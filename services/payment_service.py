@@ -65,8 +65,12 @@ def verify_webhook_signature(payload, signature):
     """
     webhook_secret = os.getenv('POLAR_WEBHOOK_SECRET')
     
+    # In production, webhook secret must be configured
+    # In development, allow skipping if secret not set (but still verify if signature provided)
     if not webhook_secret:
-        return True
+        # If no secret configured but signature provided, verification should fail
+        # This prevents accepting unsigned webhooks in production
+        return False
     
     expected_signature = hmac.new(
         webhook_secret.encode('utf-8'),

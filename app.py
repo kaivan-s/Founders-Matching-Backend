@@ -5,6 +5,9 @@ import os
 import traceback
 
 from utils.auth import get_clerk_user_id
+from utils.validation import sanitize_string, validate_integer, sanitize_list, validate_enum
+from utils.logger import log_error, log_warning, log_info
+from utils.rate_limit import init_rate_limiter, RATE_LIMITS
 from config.database import get_supabase
 from services import founder_service, project_service, swipe_service, profile_service, match_service, waitlist_service, message_service, payment_service, workspace_service, task_service, accountability_partner_service
 from services import plan_service, subscription_service
@@ -20,6 +23,9 @@ CORS(app, resources={
     }
 })
 
+# Initialize rate limiter
+limiter = init_rate_limiter(app)
+
 @app.route('/')
 def home():
     return jsonify({
@@ -29,6 +35,7 @@ def home():
     })
 
 @app.route('/health')
+@limiter.exempt
 def health_check():
     return jsonify({
         "status": "healthy",
@@ -43,27 +50,24 @@ def get_founders():
         if not clerk_user_id:
             return jsonify({"error": "User ID required", "received_headers": [k for k, v in request.headers]}), 401
         
-        # Get filter parameters from query string
+        # Get and validate filter parameters from query string
         filters = {
-            'skills': request.args.getlist('skills'),  # Can pass multiple skills
-            'location': request.args.get('location', ''),
-            'project_stage': request.args.get('project_stage', ''),
-            'looking_for': request.args.get('looking_for', ''),
-            'search': request.args.get('search', ''),  # Text search for name/bio
-            'genre': request.args.get('genre', ''),
-            'limit': int(request.args.get('limit', 20)),  # Pagination
-            'offset': int(request.args.get('offset', 0)),
-            'preferences': request.args.get('preferences', '')  # User preferences for scoring
+            'skills': sanitize_list(request.args.getlist('skills'), max_items=20),  # Max 20 skills
+            'location': sanitize_string(request.args.get('location', ''), max_length=200),
+            'project_stage': validate_enum(request.args.get('project_stage', ''), 
+                                         ['idea', 'mvp', 'early_revenue', 'scaling', '']),
+            'looking_for': sanitize_string(request.args.get('looking_for', ''), max_length=100),
+            'search': sanitize_string(request.args.get('search', ''), max_length=200),
+            'genre': sanitize_string(request.args.get('genre', ''), max_length=50),
+            'limit': validate_integer(request.args.get('limit', 20), min_value=1, max_value=100),
+            'offset': validate_integer(request.args.get('offset', 0), min_value=0),
+            'preferences': sanitize_string(request.args.get('preferences', ''), max_length=5000)
         }
         
-        # Check if we're in project mode or founder mode
-        mode = request.args.get('mode', 'projects')  # Default to projects mode for new project-based discovery
-        print(f"DEBUG: API mode = {mode}")
-        if filters.get('preferences'):
-            print(f"DEBUG: Preferences in API: {filters['preferences'][:100]}...")  # First 100 chars
+        # Validate mode parameter
+        mode = validate_enum(request.args.get('mode', 'projects'), ['projects', 'founders'], case_sensitive=False) or 'projects'
         
         founders = founder_service.get_available_founders(clerk_user_id, filters, mode=mode)
-        print(founders)
         return jsonify(founders)
     except ValueError as e:
         return jsonify({"error": str(e)}), 404
@@ -71,6 +75,7 @@ def get_founders():
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/founders/onboarding', methods=['POST'])
+@limiter.limit(RATE_LIMITS['moderate'])
 def save_onboarding():
     """Save or update onboarding data for a founder"""
     try:
@@ -81,6 +86,16 @@ def save_onboarding():
         data = request.get_json()
         if not data:
             return jsonify({"error": "No data provided"}), 400
+        
+        # Validate and sanitize input
+        try:
+            validated_data = {
+                'purpose': sanitize_string(data.get('purpose'), max_length=2000) if data.get('purpose') else None,
+                'location': sanitize_string(data.get('location'), max_length=200) if data.get('location') else '',
+                'skills': sanitize_list(data.get('skills', []), max_items=50) if data.get('skills') else [],
+            }
+        except Exception as e:
+            return jsonify({"error": f"Invalid input: {str(e)}"}), 400
         
         supabase = get_supabase()
         if not supabase:
@@ -93,9 +108,9 @@ def save_onboarding():
             # Update existing founder
             founder_id = existing.data[0]['id']
             update_data = {
-                'purpose': data.get('purpose'),
-                'location': data.get('location', ''),
-                'skills': data.get('skills', []),
+                'purpose': validated_data['purpose'],
+                'location': validated_data['location'],
+                'skills': validated_data['skills'],
                 'onboarding_completed': True
             }
             
@@ -113,20 +128,26 @@ def save_onboarding():
                 existing_projects = supabase.table('projects').select('display_order').eq('founder_id', founder_id).execute()
                 max_order = max([p['display_order'] for p in existing_projects.data], default=-1) if existing_projects.data else -1
                 
-                for idx, project in enumerate(data['projects']):
-                    if project.get('title') and project.get('description'):
+                for idx, project in enumerate(data['projects'][:10]):  # Limit to 10 projects
+                    title = sanitize_string(project.get('title'), max_length=200)
+                    description = sanitize_string(project.get('description'), max_length=5000)
+                    stage = validate_enum(project.get('stage', 'idea'), 
+                                         ['idea', 'mvp', 'early_revenue', 'scaling'], 
+                                         case_sensitive=False) or 'idea'
+                    
+                    if title and description:
                         try:
                             project_data = {
                                 'founder_id': founder_id,
-                                'title': project['title'],
-                                'description': project['description'],
-                                'stage': project.get('stage', 'idea'),
+                                'title': title,
+                                'description': description,
+                                'stage': stage,
                                 'display_order': max_order + idx + 1
                             }
                             supabase.table('projects').insert(project_data).execute()
                         except Exception as project_error:
                             # Log but don't fail if project insert fails (might be duplicate)
-                            print(f"Warning: Failed to insert project: {str(project_error)}")
+                            log_warning(f"Failed to insert project: {str(project_error)}")
             
             return jsonify(result.data[0]), 200
         else:
@@ -180,14 +201,13 @@ def save_onboarding():
                             supabase.table('projects').insert(project_data).execute()
                         except Exception as project_error:
                             # Log but don't fail if project insert fails
-                            print(f"Warning: Failed to insert project: {str(project_error)}")
+                            log_warning(f"Failed to insert project: {str(project_error)}")
             
             return jsonify(result.data[0]), 201
             
     except Exception as e:
         error_trace = traceback.format_exc()
-        print(f"ERROR in save_onboarding: {str(e)}")
-        print(f"Full traceback:\n{error_trace}")
+        log_error("Error in save_onboarding", error=e, traceback_str=error_trace)
         return jsonify({
             "error": str(e),
             "traceback": error_trace if app.debug else None
@@ -224,6 +244,7 @@ def check_onboarding_status():
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/founders', methods=['POST'])
+@limiter.limit(RATE_LIMITS['moderate'])
 def create_founder():
     """Create a new founder profile with projects"""
     try:
@@ -238,8 +259,7 @@ def create_founder():
     except Exception as e:
         error_trace = traceback.format_exc()
         error_msg = str(e)
-        print(f"ERROR in create_founder: {error_msg}")
-        print(f"Full traceback:\n{error_trace}")
+        log_error(f"Error in create_founder: {error_msg}", traceback_str=error_trace)
         
         error_response = {"error": error_msg}
         if app.debug:
@@ -261,11 +281,11 @@ def get_my_projects():
         return jsonify({"error": str(e)}), 404
     except Exception as e:
         error_trace = traceback.format_exc()
-        print(f"ERROR in get_my_projects: {str(e)}")
-        print(f"Traceback: {error_trace}")
+        log_error("Error in get_my_projects", error=e, traceback_str=error_trace)
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/projects', methods=['POST'])
+@limiter.limit(RATE_LIMITS['moderate'])
 def create_project():
     """Create a new project for a founder - deducts 5 credits"""
     try:
@@ -280,8 +300,7 @@ def create_project():
         return jsonify({"error": str(e)}), 400
     except Exception as e:
         error_trace = traceback.format_exc()
-        print(f"ERROR in create_project: {str(e)}")
-        print(f"Traceback: {error_trace}")
+        log_error("Error in create_project", error=e, traceback_str=error_trace)
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/projects/<project_id>', methods=['PUT'])
@@ -330,8 +349,7 @@ def create_swipe():
         return jsonify({"error": str(e)}), 400
     except Exception as e:
         error_trace = traceback.format_exc()
-        print(f"ERROR in create_swipe: {str(e)}")
-        print(f"Traceback: {error_trace}")
+        log_error("Error in create_swipe", error=e, traceback_str=error_trace)
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/profile/check', methods=['GET'])
@@ -361,8 +379,7 @@ def get_credits():
         return jsonify({"error": str(e)}), 404
     except Exception as e:
         error_trace = traceback.format_exc()
-        print(f"ERROR in get_credits: {str(e)}")
-        print(f"Traceback: {error_trace}")
+        log_error("Error in get_credits", error=e, traceback_str=error_trace)
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/profile/debug', methods=['GET'])
@@ -428,8 +445,7 @@ def get_likes():
         return jsonify({"error": str(e)}), 404
     except Exception as e:
         error_trace = traceback.format_exc()
-        print(f"ERROR in get_likes: {str(e)}")
-        print(f"Traceback: {error_trace}")
+        log_error("Error in get_likes", error=e, traceback_str=error_trace)
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/likes/<swipe_id>/respond', methods=['POST'])
@@ -452,8 +468,7 @@ def respond_to_like(swipe_id):
         return jsonify({"error": str(e)}), 400
     except Exception as e:
         error_trace = traceback.format_exc()
-        print(f"ERROR in respond_to_like: {str(e)}")
-        print(f"Traceback: {error_trace}")
+        log_error("Error in respond_to_like", error=e, traceback_str=error_trace)
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/waitlist', methods=['POST'])
@@ -542,6 +557,7 @@ def get_unread_count():
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/payments/create-checkout', methods=['POST'])
+@limiter.limit(RATE_LIMITS['strict'])
 def create_checkout():
     """Create a Polar checkout session for purchasing credits"""
     try:
@@ -565,10 +581,11 @@ def create_checkout():
         return jsonify({"error": str(e)}), 400
     except Exception as e:
         error_trace = traceback.format_exc()
-        print(f"Error creating checkout: {error_trace}")
+        log_error("Error creating checkout", traceback_str=error_trace)
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/payments/webhook', methods=['POST'])
+@limiter.limit(RATE_LIMITS['strict'])
 def handle_webhook():
     """Handle Polar webhook events for credits (legacy)"""
     try:
@@ -582,10 +599,12 @@ def handle_webhook():
         if not webhook_data:
             return jsonify({"error": "Invalid webhook payload"}), 400
         
-        # Verify webhook signature
-        if signature and not payment_service.verify_webhook_signature(payload, signature):
-            print("Warning: Webhook signature verification failed")
-            return jsonify({"error": "Invalid signature"}), 401
+        # Verify webhook signature (required for security)
+        if not signature:
+            return jsonify({"error": "Missing webhook signature"}), 401
+        
+        if not payment_service.verify_webhook_signature(payload, signature):
+            return jsonify({"error": "Invalid webhook signature"}), 401
         
         # Handle webhook event
         result = payment_service.handle_webhook(webhook_data)
@@ -593,10 +612,11 @@ def handle_webhook():
         return jsonify(result), 200
     except Exception as e:
         error_trace = traceback.format_exc()
-        print(f"Error handling webhook: {error_trace}")
+        log_error("Error handling webhook", traceback_str=error_trace)
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/billing/webhook', methods=['POST'])
+@limiter.limit(RATE_LIMITS['strict'])
 def handle_subscription_webhook():
     """Handle Polar webhook events for subscriptions"""
     try:
@@ -610,10 +630,12 @@ def handle_subscription_webhook():
         if not webhook_data:
             return jsonify({"error": "Invalid webhook payload"}), 400
         
-        # Verify webhook signature
-        if signature and not subscription_service.verify_webhook_signature(payload, signature):
-            print("Warning: Subscription webhook signature verification failed")
-            return jsonify({"error": "Invalid signature"}), 401
+        # Verify webhook signature (required for security)
+        if not signature:
+            return jsonify({"error": "Missing webhook signature"}), 401
+        
+        if not subscription_service.verify_webhook_signature(payload, signature):
+            return jsonify({"error": "Invalid webhook signature"}), 401
         
         # Handle subscription webhook event
         result = subscription_service.handle_subscription_webhook(webhook_data)
@@ -621,7 +643,7 @@ def handle_subscription_webhook():
         return jsonify(result), 200
     except Exception as e:
         error_trace = traceback.format_exc()
-        print(f"Error handling subscription webhook: {error_trace}")
+        log_error("Error handling subscription webhook", traceback_str=error_trace)
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/payments/history', methods=['GET'])
@@ -636,7 +658,7 @@ def get_payment_history():
         return jsonify(payments), 200
     except Exception as e:
         error_trace = traceback.format_exc()
-        print(f"Error fetching payment history: {error_trace}")
+        log_error("Error fetching payment history", traceback_str=error_trace)
         return jsonify({"error": str(e)}), 500
 
 # ==================== Workspace API Routes ====================
@@ -659,7 +681,7 @@ def get_workspace_by_match(match_id):
                 workspace_data = workspace_service.get_workspace(clerk_user_id, workspace_id)
                 return jsonify(workspace_data), 200
             except Exception as e:
-                print(f"Error creating workspace for match {match_id}: {e}")
+                log_error(f"Error creating workspace for match {match_id}", error=e)
                 import traceback
                 traceback.print_exc()
                 return jsonify({"error": f"Workspace not found and failed to create: {str(e)}"}), 500
@@ -865,10 +887,10 @@ def update_equity_scenario(scenario_id):
         scenario = workspace_service.update_equity_scenario_note(clerk_user_id, scenario_id, note)
         return jsonify(scenario), 200
     except ValueError as e:
-        print(f"ValueError updating scenario note: {e}")
+        log_error("ValueError updating scenario note", error=e)
         return jsonify({"error": str(e)}), 400
     except Exception as e:
-        print(f"Error updating scenario note: {e}")
+        log_error("Error updating scenario note", error=e)
         import traceback
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
@@ -1047,7 +1069,7 @@ def get_notifications_summary():
         return jsonify(summaries)
         
     except Exception as e:
-        print(f"Error getting notification summaries: {e}")
+        log_error("Error getting notification summaries", error=e)
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/notifications', methods=['GET'])
@@ -1085,7 +1107,7 @@ def get_notifications():
         return jsonify(notifications.data or [])
         
     except Exception as e:
-        print(f"Error getting notifications: {e}")
+        log_error("Error getting notifications", error=e)
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/notifications/<notification_id>/read', methods=['POST'])
@@ -1116,7 +1138,7 @@ def mark_notification_read(notification_id):
         return jsonify({"success": True})
         
     except Exception as e:
-        print(f"Error marking notification read: {e}")
+        log_error("Error marking notification read", error=e)
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/notifications/mark-all-read', methods=['POST'])
@@ -1152,7 +1174,7 @@ def mark_all_notifications_read():
         })
         
     except Exception as e:
-        print(f"Error marking all notifications read: {e}")
+        log_error("Error marking all notifications read", error=e)
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/debug/approvals/<workspace_id>', methods=['GET'])
@@ -1204,7 +1226,7 @@ def debug_approvals(workspace_id):
         })
         
     except Exception as e:
-        print(f"Error in debug: {e}")
+        log_error("Error in debug", error=e)
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/approvals/pending', methods=['GET'])
@@ -1223,7 +1245,7 @@ def get_pending_approvals():
         return jsonify(approvals)
         
     except Exception as e:
-        print(f"Error getting pending approvals: {e}")
+        log_error("Error getting pending approvals", error=e)
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/approvals/<approval_id>/approve', methods=['POST'])
@@ -1244,7 +1266,7 @@ def approve_request(approval_id):
         return jsonify({"success": success})
         
     except Exception as e:
-        print(f"Error approving request: {e}")
+        log_error("Error approving request", error=e)
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/approvals/<approval_id>/reject', methods=['POST'])
@@ -1265,7 +1287,7 @@ def reject_request(approval_id):
         return jsonify({"success": success})
         
     except Exception as e:
-        print(f"Error rejecting request: {e}")
+        log_error("Error rejecting request", error=e)
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/workspaces/<workspace_id>/equity-scenarios/<scenario_id>/propose', methods=['POST'])
@@ -1300,7 +1322,7 @@ def propose_equity_change(workspace_id, scenario_id):
         })
         
     except Exception as e:
-        print(f"Error proposing equity change: {e}")
+        log_error("Error proposing equity change", error=e)
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/notification-preferences', methods=['GET', 'PUT'])
@@ -1363,7 +1385,7 @@ def notification_preferences():
             return jsonify(result.data[0] if result.data else pref_data)
         
     except Exception as e:
-        print(f"Error with notification preferences: {e}")
+        log_error("Error with notification preferences", error=e)
         return jsonify({"error": str(e)}), 500
 
 # Task Board Endpoints
@@ -1383,7 +1405,7 @@ def get_workspace_tasks(workspace_id):
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
     except Exception as e:
-        print(f"Error getting tasks: {e}")
+        log_error("Error getting tasks", error=e)
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/workspaces/<workspace_id>/tasks', methods=['POST'])
@@ -1400,7 +1422,7 @@ def create_workspace_task(workspace_id):
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
     except Exception as e:
-        print(f"Error creating task: {e}")
+        log_error("Error creating task", error=e)
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/workspaces/<workspace_id>/tasks/<task_id>', methods=['PATCH'])
@@ -1417,7 +1439,7 @@ def update_workspace_task(workspace_id, task_id):
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
     except Exception as e:
-        print(f"Error updating task: {e}")
+        log_error("Error updating task", error=e)
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/workspaces/<workspace_id>/tasks/<task_id>', methods=['DELETE'])
@@ -1433,7 +1455,7 @@ def delete_workspace_task(workspace_id, task_id):
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
     except Exception as e:
-        print(f"Error deleting task: {e}")
+        log_error("Error deleting task", error=e)
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/workspaces/<workspace_id>/task-metrics', methods=['GET'])
@@ -1452,7 +1474,7 @@ def get_task_metrics(workspace_id):
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
     except Exception as e:
-        print(f"Error getting task metrics: {e}")
+        log_error("Error getting task metrics", error=e)
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/workspaces/<workspace_id>/tasks/completed-for-week', methods=['GET'])
@@ -1474,7 +1496,7 @@ def get_completed_tasks_for_week(workspace_id):
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
     except Exception as e:
-        print(f"Error getting completed tasks: {e}")
+        log_error("Error getting completed tasks", error=e)
         return jsonify({"error": str(e)}), 500
 
 # ==================== ACCOUNTABILITY PARTNER ENDPOINTS ====================
@@ -1497,14 +1519,14 @@ def partner_profile():
             if not data:
                 return jsonify({"error": "No data provided"}), 400
             
-            print(f"Creating partner profile for clerk_user_id: {clerk_user_id}")
-            print(f"Request data: {data}")
+            log_info(f"Creating partner profile for clerk_user_id: {clerk_user_id}")
+            log_info(f"Request data: {data}")
             
             # Get user name and email from request if available (for creating minimal founder profile)
             user_name = data.get('user_name') or request.headers.get('X-User-Name')
             user_email = data.get('user_email') or request.headers.get('X-User-Email')
             
-            print(f"User name: {user_name}, User email: {user_email}")
+            log_info(f"User name: {user_name}, User email: {user_email}")
             
             # Handle contact info updates separately if provided
             contact_info = {}
@@ -1528,19 +1550,18 @@ def partner_profile():
                 # Refresh profile to include contact info
                 profile = accountability_partner_service.get_partner_profile(clerk_user_id)
             
-            print(f"Partner profile created successfully: {profile.get('id')}")
+            log_info(f"Partner profile created successfully: {profile.get('id')}")
             return jsonify(profile), 201 if request.method == 'POST' else 200
     except ValueError as e:
         error_msg = str(e)
-        print(f"ValueError in partner_profile: {error_msg}")
+        log_error(f"ValueError in partner_profile: {error_msg}")
         import traceback
         traceback.print_exc()
         return jsonify({"error": error_msg}), 400
     except Exception as e:
         error_msg = str(e)
         error_trace = traceback.format_exc()
-        print(f"Error with partner profile: {error_msg}")
-        print(f"Full traceback:\n{error_trace}")
+        log_error(f"Error with partner profile: {error_msg}", traceback_str=error_trace)
         return jsonify({
             "error": error_msg,
             "traceback": error_trace if app.debug else None
@@ -1563,7 +1584,7 @@ def get_partner_marketplace(workspace_id):
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
     except Exception as e:
-        print(f"Error getting marketplace partners: {e}")
+        log_error("Error getting marketplace partners", error=e)
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/workspaces/<workspace_id>/accountability-partners/invite', methods=['POST'])
@@ -1585,7 +1606,7 @@ def invite_own_partner(workspace_id):
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
     except Exception as e:
-        print(f"Error inviting partner: {e}")
+        log_error("Error inviting partner", error=e)
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/workspaces/<workspace_id>/accountability-partners/request', methods=['POST'])
@@ -1607,7 +1628,7 @@ def create_partner_request(workspace_id):
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
     except Exception as e:
-        print(f"Error creating partner request: {e}")
+        log_error("Error creating partner request", error=e)
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/accountability-partners/requests', methods=['GET'])
@@ -1622,7 +1643,7 @@ def get_partner_requests():
         requests = accountability_partner_service.get_partner_requests(clerk_user_id, status)
         return jsonify(requests), 200
     except Exception as e:
-        print(f"Error getting partner requests: {e}")
+        log_error("Error getting partner requests", error=e)
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/accountability-partners/requests/<request_id>/respond', methods=['POST'])
@@ -1644,7 +1665,7 @@ def respond_to_partner_request(request_id):
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
     except Exception as e:
-        print(f"Error responding to partner request: {e}")
+        log_error("Error responding to partner request", error=e)
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/accountability-partners/workspaces', methods=['GET'])
@@ -1658,7 +1679,7 @@ def get_partner_workspaces():
         workspaces = accountability_partner_service.get_active_workspaces(clerk_user_id)
         return jsonify(workspaces), 200
     except Exception as e:
-        print(f"Error getting partner workspaces: {e}")
+        log_error("Error getting partner workspaces", error=e)
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/accountability-partners/notifications', methods=['GET'])
@@ -1708,7 +1729,7 @@ def get_partner_notifications():
         return jsonify(notifications.data or []), 200
         
     except Exception as e:
-        print(f"Error getting partner notifications: {e}")
+        log_error("Error getting partner notifications", error=e)
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/workspaces/<workspace_id>/accountability-partners/<partner_user_id>', methods=['DELETE'])
@@ -1726,7 +1747,7 @@ def remove_partner(workspace_id, partner_user_id):
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
     except Exception as e:
-        print(f"Error removing partner: {e}")
+        log_error("Error removing partner", error=e)
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/workspaces/<workspace_id>/checkins/<checkin_id>/comment', methods=['POST'])
@@ -1746,7 +1767,7 @@ def add_checkin_comment(workspace_id, checkin_id):
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
     except Exception as e:
-        print(f"Error adding check-in comment: {e}")
+        log_error("Error adding check-in comment", error=e)
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/workspaces/<workspace_id>/checkins/<checkin_id>/verdict', methods=['POST', 'PUT'])
@@ -1766,7 +1787,7 @@ def set_checkin_verdict(workspace_id, checkin_id):
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
     except Exception as e:
-        print(f"Error setting check-in verdict: {e}")
+        log_error("Error setting check-in verdict", error=e)
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/workspaces/<workspace_id>/checkins/<checkin_id>/partner-review', methods=['GET'])
@@ -1785,7 +1806,7 @@ def get_checkin_partner_review(workspace_id, checkin_id):
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
     except Exception as e:
-        print(f"Error getting check-in partner review: {e}")
+        log_error("Error getting check-in partner review", error=e)
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/workspaces/<workspace_id>/checkins/<checkin_id>/partner-review', methods=['POST'])
@@ -1810,7 +1831,7 @@ def upsert_checkin_partner_review(workspace_id, checkin_id):
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
     except Exception as e:
-        print(f"Error saving check-in partner review: {e}")
+        log_error("Error saving check-in partner review", error=e)
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/workspaces/<workspace_id>/checkins/<checkin_id>/partner-reviews', methods=['GET'])
@@ -1826,7 +1847,7 @@ def get_checkin_partner_reviews(workspace_id, checkin_id):
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
     except Exception as e:
-        print(f"Error getting check-in partner reviews: {e}")
+        log_error("Error getting check-in partner reviews", error=e)
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/workspaces/<workspace_id>/partner-impact-scorecard', methods=['GET'])
@@ -1845,7 +1866,7 @@ def get_partner_impact_scorecard(workspace_id):
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
     except Exception as e:
-        print(f"Error computing partner impact scorecard: {e}")
+        log_error("Error computing partner impact scorecard", error=e)
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/workspaces/<workspace_id>/quarterly-review', methods=['POST'])
@@ -1875,7 +1896,7 @@ def save_quarterly_review(workspace_id):
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
     except Exception as e:
-        print(f"Error saving quarterly review: {e}")
+        log_error("Error saving quarterly review", error=e)
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/accountability-partners/profile/contact', methods=['PUT'])
@@ -1898,7 +1919,7 @@ def update_partner_contact():
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
     except Exception as e:
-        print(f"Error updating partner contact info: {e}")
+        log_error("Error updating partner contact info", error=e)
         return jsonify({"error": str(e)}), 500
 
 # ==================== BILLING & PLAN ENDPOINTS ====================
@@ -1912,7 +1933,7 @@ def get_plans():
             'partner_pricing': plan_service.PARTNER_PRICING,
         }), 200
     except Exception as e:
-        print(f"Error getting plans: {e}")
+        log_error("Error getting plans", error=e)
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/billing/my-plan', methods=['GET'])
@@ -1928,7 +1949,7 @@ def get_my_plan():
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
     except Exception as e:
-        print(f"Error getting plan: {e}")
+        log_error("Error getting plan", error=e)
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/billing/check-feature', methods=['GET'])
@@ -1948,7 +1969,7 @@ def check_feature():
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
     except Exception as e:
-        print(f"Error checking feature: {e}")
+        log_error("Error checking feature", error=e)
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/billing/workspace-limit', methods=['GET'])
@@ -1968,7 +1989,7 @@ def check_workspace_limit():
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
     except Exception as e:
-        print(f"Error checking workspace limit: {e}")
+        log_error("Error checking workspace limit", error=e)
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/billing/discovery-limit', methods=['GET'])
@@ -1988,10 +2009,11 @@ def check_discovery_limit():
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
     except Exception as e:
-        print(f"Error checking discovery limit: {e}")
+        log_error("Error checking discovery limit", error=e)
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/billing/founder/subscribe', methods=['POST'])
+@limiter.limit(RATE_LIMITS['strict'])
 def subscribe_plan():
     """Subscribe to a plan using Polar"""
     try:
@@ -2014,12 +2036,13 @@ def subscribe_plan():
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
     except Exception as e:
-        print(f"Error creating subscription checkout: {e}")
+        log_error("Error creating subscription checkout", error=e)
         import traceback
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/billing/founder/cancel', methods=['POST'])
+@limiter.limit(RATE_LIMITS['moderate'])
 def cancel_subscription():
     """Cancel subscription (downgrade to FREE)"""
     try:
@@ -2027,15 +2050,36 @@ def cancel_subscription():
         if not clerk_user_id:
             return jsonify({"error": "User ID required"}), 401
         
-        # TODO: Handle workspace selection for downgrade
-        # For now, just downgrade to FREE
-        updated_plan = plan_service.update_founder_plan(clerk_user_id, 'FREE')
+        data = request.get_json() or {}
+        workspace_to_keep = data.get('workspace_to_keep')  # Optional: user can specify which workspace to keep
+        
+        # Check if user has multiple workspaces that would exceed FREE plan limit
+        can_create, current_count, max_allowed = plan_service.check_workspace_limit(clerk_user_id)
+        current_plan = plan_service.get_founder_plan(clerk_user_id)
+        
+        # If downgrading from paid plan and would exceed FREE limit (1 workspace)
+        if current_plan.get('id') != 'FREE' and current_count > 1:
+            # If user didn't specify which workspace to keep, return list for selection
+            if not workspace_to_keep:
+                # Get list of user's workspaces
+                from services import workspace_service
+                workspaces = workspace_service.get_workspaces(clerk_user_id)
+                return jsonify({
+                    "error": "workspace_selection_required",
+                    "message": f"You have {current_count} workspaces. FREE plan allows only 1 workspace. Please select which workspace to keep.",
+                    "workspaces": workspaces,
+                    "current_count": current_count,
+                    "max_allowed": 1
+                }), 400
+        
+        # Downgrade to FREE (will auto-handle workspace selection if needed)
+        updated_plan = plan_service.update_founder_plan(clerk_user_id, 'FREE', workspace_to_keep=workspace_to_keep)
         
         return jsonify(updated_plan), 200
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
     except Exception as e:
-        print(f"Error canceling subscription: {e}")
+        log_error("Error canceling subscription", error=e)
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/billing/partner/profile', methods=['GET'])
@@ -2051,7 +2095,7 @@ def get_partner_billing():
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
     except Exception as e:
-        print(f"Error getting partner billing: {e}")
+        log_error("Error getting partner billing", error=e)
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/billing/partner/onboarding', methods=['POST'])
@@ -2069,7 +2113,7 @@ def pay_partner_onboarding():
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
     except Exception as e:
-        print(f"Error creating partner onboarding checkout: {e}")
+        log_error("Error creating partner onboarding checkout", error=e)
         import traceback
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
@@ -2089,7 +2133,7 @@ def renew_partner_subscription():
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
     except Exception as e:
-        print(f"Error creating partner renewal checkout: {e}")
+        log_error("Error creating partner renewal checkout", error=e)
         import traceback
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
@@ -2108,7 +2152,7 @@ def calculate_partner_pricing():
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
     except Exception as e:
-        print(f"Error calculating pricing: {e}")
+        log_error("Error calculating pricing", error=e)
         return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':

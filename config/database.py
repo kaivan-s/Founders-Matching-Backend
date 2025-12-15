@@ -6,8 +6,15 @@ from supabase import create_client, Client
 load_dotenv()
 
 # Supabase configuration
-SUPABASE_URL = os.environ.get('SUPABASE_URL', "https://stosfnfkclzixfacebyk.supabase.co")
-SUPABASE_KEY = os.environ.get('SUPABASE_ANON_KEY', "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InN0b3NmbmZrY2x6aXhmYWNlYnlrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjE1NTE0OTYsImV4cCI6MjA3NzEyNzQ5Nn0.7BWuzE0ey6IyyT7RSP09Mzspsox52PNs5IB2ifVr5XY")
+# These must be set as environment variables - no defaults for security
+SUPABASE_URL = os.environ.get('SUPABASE_URL')
+SUPABASE_KEY = os.environ.get('SUPABASE_ANON_KEY')
+
+if not SUPABASE_URL or not SUPABASE_KEY:
+    raise ValueError(
+        "Missing required environment variables: SUPABASE_URL and SUPABASE_ANON_KEY must be set. "
+        "Please configure these in your environment or .env file."
+    )
 
 # Initialize Supabase client
 try:

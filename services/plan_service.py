@@ -209,8 +209,8 @@ def increment_discovery_usage(clerk_user_id: str) -> None:
             'swipe_count': 1,
         }).execute()
 
-def update_founder_plan(clerk_user_id: str, new_plan: FounderPlan, subscription_id: Optional[str] = None, subscription_status: Optional[str] = None, current_period_end: Optional[datetime] = None) -> Dict[str, Any]:
-    """Update founder's plan"""
+def update_founder_plan(clerk_user_id: str, new_plan: FounderPlan, subscription_id: Optional[str] = None, subscription_status: Optional[str] = None, current_period_end: Optional[datetime] = None, workspace_to_keep: Optional[str] = None) -> Dict[str, Any]:
+    """Update founder's plan and handle workspace limits on downgrade"""
     founder_id = _get_founder_id(clerk_user_id)
     supabase = get_supabase()
     
@@ -220,6 +220,43 @@ def update_founder_plan(clerk_user_id: str, new_plan: FounderPlan, subscription_
         raise ValueError("Founder not found")
     
     old_plan = founder.data[0].get('plan', 'FREE')
+    
+    # Check if this is a downgrade that would exceed workspace limits
+    is_downgrade = not _is_upgrade(old_plan, new_plan) and old_plan != new_plan
+    if is_downgrade:
+        # This is a downgrade - check workspace limits
+        new_plan_config = FOUNDER_PLANS.get(new_plan, FOUNDER_PLANS['FREE'])
+        max_workspaces = new_plan_config.get('maxWorkspaces', 1)
+        
+        # Get user's current workspaces
+        workspaces = supabase.table('workspace_participants').select('workspace_id, created_at').eq('user_id', founder_id).execute()
+        unique_workspaces = {}
+        if workspaces.data:
+            for wp in workspaces.data:
+                workspace_id = wp['workspace_id']
+                if workspace_id not in unique_workspaces:
+                    unique_workspaces[workspace_id] = wp.get('created_at')
+        
+        current_count = len(unique_workspaces)
+        
+        # If user has more workspaces than new plan allows, handle it
+        if current_count > max_workspaces:
+            if workspace_to_keep:
+                # User specified which workspace to keep
+                if workspace_to_keep not in unique_workspaces:
+                    raise ValueError(f"Workspace {workspace_to_keep} not found or you don't have access")
+                # Remove user from all other workspaces
+                workspaces_to_remove = [wid for wid in unique_workspaces.keys() if wid != workspace_to_keep]
+            else:
+                # Auto-select: keep the most recent workspace
+                # Sort by created_at (most recent first)
+                sorted_workspaces = sorted(unique_workspaces.items(), key=lambda x: x[1] or '', reverse=True)
+                workspace_to_keep = sorted_workspaces[0][0]
+                workspaces_to_remove = [wid for wid, _ in sorted_workspaces[1:]]
+            
+            # Remove user from excess workspaces
+            for workspace_id in workspaces_to_remove:
+                supabase.table('workspace_participants').delete().eq('workspace_id', workspace_id).eq('user_id', founder_id).execute()
     
     # Update plan
     update_data = {'plan': new_plan}
