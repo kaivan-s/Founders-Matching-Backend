@@ -1,0 +1,454 @@
+"""Founder-related business logic"""
+import json
+import traceback
+from config.database import get_supabase
+
+
+def apply_filters_to_founders(founders, filters):
+    """
+    Apply filters to the list of founders
+    
+    Args:
+        founders: List of founder dictionaries
+        filters: Dictionary with filter criteria
+    
+    Returns:
+        Filtered list of founders
+    """
+    filtered = founders
+    
+    # Filter by skills (any match)
+    if filters.get('skills') and len(filters['skills']) > 0:
+        filtered = [
+            f for f in filtered 
+            if any(skill in (f.get('skills') or []) for skill in filters['skills'])
+        ]
+    
+    # Filter by location (case-insensitive partial match)
+    if filters.get('location'):
+        location_query = filters['location'].lower()
+        filtered = [
+            f for f in filtered 
+            if location_query in (f.get('location') or '').lower()
+        ]
+    
+    # Filter by project stage (any project matching the stage)
+    if filters.get('project_stage'):
+        stage = filters['project_stage']
+        filtered = [
+            f for f in filtered 
+            if any(p.get('stage') == stage for p in (f.get('projects') or []))
+        ]
+    
+    # Filter by looking_for (partial match)
+    if filters.get('looking_for'):
+        looking_for_query = filters['looking_for'].lower()
+        filtered = [
+            f for f in filtered 
+            if looking_for_query in (f.get('looking_for') or '').lower()
+        ]
+    
+    # Text search in name, looking_for, and project titles/descriptions
+    if filters.get('search'):
+        search_query = filters['search'].lower()
+        filtered = [
+            f for f in filtered 
+            if (
+                search_query in (f.get('name') or '').lower() or
+                search_query in (f.get('looking_for') or '').lower() or
+                any(search_query in (p.get('title') or '').lower() for p in (f.get('projects') or [])) or
+                any(search_query in (p.get('description') or '').lower() for p in (f.get('projects') or []))
+            )
+        ]
+    
+    return filtered
+
+def calculate_preference_score(preferences, project_answers):
+    """Calculate compatibility score based on user preferences and project answers
+    Returns a score between 0 and 100
+    """
+    if not preferences or not any(preferences.values()):
+        return 50  # Default neutral score
+    
+    if not project_answers:
+        return 25  # Low score if project has no answers
+    
+    # Weight for each preference question
+    PREFERENCE_WEIGHTS = {
+        'primary_role': 30,
+        'ideal_outcome': 25,
+        'work_hours': 25,
+        'work_model': 20
+    }
+    
+    total_score = 0
+    total_weight = 0
+    
+    for pref_id, weight in PREFERENCE_WEIGHTS.items():
+        user_pref = preferences.get(pref_id)
+        project_answer = project_answers.get(pref_id)
+        
+        if user_pref and project_answer:
+            # Exact match gets full points
+            if user_pref == project_answer:
+                total_score += weight
+            # Partial matches for flexible options
+            elif pref_id == 'work_hours' and project_answer == 'flexible':
+                # Flexible work hours is partially compatible with any preference
+                total_score += weight * 0.5
+            elif pref_id == 'ideal_outcome' and user_pref == 'flexible':
+                # User is flexible on outcome
+                total_score += weight * 0.5
+            
+            total_weight += weight
+    
+    # Consider other compatibility questions with lower weight
+    # Check if there are matching answers in other fields
+    secondary_matches = 0
+    secondary_total = 0
+    
+    for key in project_answers:
+        if key not in PREFERENCE_WEIGHTS:
+            project_val = project_answers.get(key)
+            user_val = preferences.get(key)
+            if project_val and user_val:
+                secondary_total += 1
+                if project_val == user_val:
+                    secondary_matches += 1
+    
+    # Add secondary score with lower weight (10% of total)
+    if secondary_total > 0:
+        secondary_score = (secondary_matches / secondary_total) * 10
+        total_score += secondary_score
+        total_weight += 10
+    
+    # Calculate final percentage
+    if total_weight > 0:
+        return int(min(100, (total_score / total_weight) * 100))
+    
+    return 50  # Default score if no matching criteria
+
+def get_available_founders(clerk_user_id, filters=None, mode='founders'):
+    """Get founders available for swiping (excludes current user and already swiped)
+    Now supports two modes:
+    - 'founders': Legacy mode showing all founders (backward compatible)
+    - 'projects': New mode showing individual projects as cards
+    """
+    import json
+    supabase = get_supabase()
+    
+    # Get current user's founder profile
+    user_profile = supabase.table('founders').select('id').eq('clerk_user_id', clerk_user_id).execute()
+    if not user_profile.data:
+        raise ValueError("Profile not found. Please create your profile first.")
+    
+    current_user_id = user_profile.data[0]['id']
+    
+    # Parse preferences from filters if provided
+    user_preferences = None
+    if filters and filters.get('preferences'):
+        try:
+            user_preferences = json.loads(filters['preferences'])
+        except Exception as e:
+            user_preferences = None
+    
+    if mode == 'projects':
+        # Optimized project-based discovery with single query
+        # Use raw SQL for better performance at scale
+        
+        # Get pagination parameters (default to first 20 results)
+        limit = filters.get('limit', 20) if filters else 20
+        offset = filters.get('offset', 0) if filters else 0
+        
+        # Build the optimized query using Supabase's query builder with proper JOINs
+        # This single query excludes:
+        # 1. User's own projects
+        # 2. Projects with existing workspaces 
+        # 3. Projects already swiped on by current user
+        
+        try:
+            query = supabase.table('projects').select(
+                '*, founder:founders!founder_id(*)'
+            ).neq('founder_id', current_user_id).eq('is_active', True).eq('seeking_cofounder', True)
+        except Exception as e:
+            raise
+        
+        # Apply filters if provided
+        if filters.get('search'):
+            search_term = f"%{filters['search']}%"
+            # Note: Supabase doesn't support OR in query builder easily, 
+            # so we'll filter by title for now (can be optimized with full-text search later)
+            query = query.ilike('title', search_term)
+        
+        if filters.get('project_stage'):
+            query = query.eq('stage', filters['project_stage'])
+            
+        if filters.get('genre'):
+            query = query.eq('genre', filters['genre'])
+        
+        # Order by most recent and limit results for pagination
+        query = query.order('created_at', desc=True).range(offset, offset + limit - 1)
+        
+        all_projects = query.execute()
+        
+        
+        if not all_projects.data:
+            available_projects = []
+        else:
+            # Get project IDs for efficient filtering
+            project_ids = [p['id'] for p in all_projects.data]
+            
+            # Single query to get projects with workspaces (only for current batch)
+            # Use separate queries for project1_id and project2_id to avoid UUID parsing issues
+            workspace_project_ids = set()
+            if project_ids:
+                # Query for project1_id matches
+                workspace_projects_1 = supabase.table('workspaces').select('project1_id').in_('project1_id', project_ids).execute()
+                if workspace_projects_1.data:
+                    for wp in workspace_projects_1.data:
+                        if wp.get('project1_id'):
+                            workspace_project_ids.add(wp['project1_id'])
+                
+                # Query for project2_id matches
+                workspace_projects_2 = supabase.table('workspaces').select('project2_id').in_('project2_id', project_ids).execute()
+                if workspace_projects_2.data:
+                    for wp in workspace_projects_2.data:
+                        if wp.get('project2_id'):
+                            workspace_project_ids.add(wp['project2_id'])
+            
+            # Single query to get swipes by current user (only for current batch)
+            # Only query if we have valid project IDs
+            swiped_combinations = set()
+            if project_ids:
+                user_swipes = supabase.table('swipes').select('project_id, swiped_id').eq('swiper_id', current_user_id).in_('project_id', project_ids).execute()
+                if user_swipes.data:
+                    for swipe in user_swipes.data:
+                        if swipe.get('project_id'):
+                            swiped_combinations.add((swipe['project_id'], swipe['swiped_id']))
+            
+            
+            # Filter the batch efficiently
+            available_projects = []
+            for project in all_projects.data:
+                project_id = project['id']
+                project_owner_id = project['founder_id']
+                
+                # Skip if project has workspace or already swiped
+                if (project_id not in workspace_project_ids and 
+                    (project_id, project_owner_id) not in swiped_combinations):
+                    available_projects.append(project)
+        
+        
+        # Apply project-level filters (skills, location, looking_for)
+        if filters:
+            filtered_projects = []
+            for project in available_projects:
+                founder_info = project.get('founder', {})
+                founder_skills = founder_info.get('skills', [])
+                founder_location = founder_info.get('location', '')
+                founder_looking_for = founder_info.get('looking_for', '')
+                
+                # Filter by skills (founder's skills)
+                if filters.get('skills') and len(filters['skills']) > 0:
+                    if not any(skill in founder_skills for skill in filters['skills']):
+                        continue
+                
+                # Filter by location
+                if filters.get('location'):
+                    location_query = filters['location'].lower()
+                    if location_query not in founder_location.lower():
+                        continue
+                
+                # Filter by looking_for
+                if filters.get('looking_for'):
+                    looking_for_query = filters['looking_for'].lower()
+                    if looking_for_query not in founder_looking_for.lower():
+                        continue
+                
+                # Filter by search (project title/description or founder name)
+                if filters.get('search'):
+                    search_query = filters['search'].lower()
+                    project_title = (project.get('title') or '').lower()
+                    project_desc = (project.get('description') or '').lower()
+                    founder_name = (founder_info.get('name') or '').lower()
+                    if (search_query not in project_title and 
+                        search_query not in project_desc and 
+                        search_query not in founder_name):
+                        continue
+                
+                filtered_projects.append(project)
+            
+            available_projects = filtered_projects
+        
+        # Format projects as founder-like objects for UI compatibility
+        # Each project becomes a separate card
+        formatted_results = []
+        for project in available_projects:
+            founder_info = project.get('founder', {})
+            
+            # Calculate preference score if user has set preferences
+            preference_score = None
+            if user_preferences and any(user_preferences.values()):
+                project_answers = project.get('compatibility_answers', {})
+                preference_score = calculate_preference_score(user_preferences, project_answers)
+            
+            # Use project ID as the unique identifier
+            # This avoids the composite ID issue that was causing UUID parsing errors
+            formatted_result = {
+                'id': project['id'],  # Use project ID as unique ID
+                'founder_id': founder_info.get('id'),  # Keep original founder ID for swiping
+                'name': founder_info.get('name'),
+                'email': founder_info.get('email'),
+                'location': founder_info.get('location'),
+                'skills': founder_info.get('skills', []),
+                'looking_for': founder_info.get('looking_for'),
+                'profile_picture_url': founder_info.get('profile_picture_url'),
+                'linkedin_url': founder_info.get('linkedin_url'),
+                'website_url': founder_info.get('website_url'),
+                'projects': [{
+                    'id': project.get('id'),
+                    'title': project.get('title', 'Untitled Project'),
+                    'description': project.get('description', 'No description available'),
+                    'stage': project.get('stage', 'Unknown'),
+                    'genre': project.get('genre'),
+                    'compatibility_answers': project.get('compatibility_answers', {}),
+                    'is_primary': True  # Mark this as the primary project being shown
+                }],
+                'primary_project_id': project['id']  # Track which project this card represents
+            }
+            
+            # Add preference score if calculated
+            if preference_score is not None:
+                formatted_result['preference_score'] = int(preference_score)
+            
+            formatted_results.append(formatted_result)
+        
+        # Sort by preference score if preferences are set
+        if user_preferences and any(user_preferences.values()):
+            # Only sort and filter if user actually has preferences set
+            formatted_results.sort(key=lambda x: x.get('preference_score', 0), reverse=True)
+            
+            # Log top 5 scores for debugging
+            for i, result in enumerate(formatted_results[:5]):
+                score = result.get('preference_score', 'N/A')
+            
+            # Filter out projects with very low scores (below 25% match)
+            # This ensures we only show relevant projects when preferences are set
+            MIN_SCORE_THRESHOLD = 25
+            
+            # Keep original list before filtering
+            all_scored_results = formatted_results.copy()
+            
+            formatted_results = [
+                r for r in formatted_results 
+                if r.get('preference_score', 0) >= MIN_SCORE_THRESHOLD
+            ]
+            
+            # If filtering leaves us with too few results, show at least top 10
+            if len(formatted_results) < 10 and len(all_scored_results) >= 10:
+                # Take top 10 from original list regardless of score
+                formatted_results = all_scored_results[:10]
+        
+        # Return top 20 results (or all if less than 20)
+        available_founders = formatted_results[:20]
+        # Skip fetching all projects - we already have the single project per card
+    else:
+        # Legacy founder-based discovery (backward compatible)
+        # For legacy mode, we still filter by user-level swipes for backward compatible
+        swipes = supabase.table('swipes').select('swiped_id').eq('swiper_id', current_user_id).is_('project_id', None).execute()
+        swiped_ids = [swipe['swiped_id'] for swipe in swipes.data] if swipes.data else []
+        
+        # Get all founders excluding current user
+        all_founders = supabase.table('founders').select('*').neq('clerk_user_id', clerk_user_id).execute()
+        
+        
+        # Filter out already swiped founders (only for legacy user-to-user swipes)
+        available_founders = [
+            founder for founder in all_founders.data 
+            if founder['id'] not in swiped_ids
+        ]
+        
+    
+        # Fetch projects for each founder (only in legacy mode)
+        for founder in available_founders:
+            founder_id = founder['id']
+            projects = supabase.table('projects').select('*').eq('founder_id', founder_id).order('display_order').execute()
+            founder['projects'] = projects.data if projects.data else []
+    
+        # Apply filters if provided (only in legacy mode)
+        if filters:
+            available_founders = apply_filters_to_founders(available_founders, filters)
+    
+    return available_founders
+
+def create_founder(data):
+    """Create a new founder profile with projects"""
+    supabase = get_supabase()
+    
+    if supabase is None:
+        raise Exception("Database connection not available")
+    
+    # Extract projects from request
+    projects = data.get('projects', [])
+    if not isinstance(projects, list):
+        projects = []
+    
+    # Create founder profile with starting credits
+    founder_data = {
+        'clerk_user_id': data.get('clerk_user_id'),
+        'name': data.get('name'),
+        'email': data.get('email'),
+        'profile_picture_url': data.get('profile_picture_url'),
+        'looking_for': data.get('looking_for'),
+        'compatibility_answers': data.get('compatibility_answers', {}),
+        'credits': 50,  # Give new users 50 free credits to start
+        'skills': data.get('skills', []),
+        'location': data.get('location'),
+        'website_url': data.get('website_url'),
+        'linkedin_url': data.get('linkedin_url'),
+        'credits': data.get('credits')
+    }
+    
+    # Remove credits from founder_data if not provided (let database handle default)
+    if 'credits' in founder_data and founder_data['credits'] is None:
+        del founder_data['credits']
+    
+    # Validate required fields
+    if not founder_data.get('clerk_user_id'):
+        raise ValueError("clerk_user_id is required")
+    if not founder_data.get('name'):
+        raise ValueError("name is required")
+    if not founder_data.get('email'):
+        raise ValueError("email is required")
+    
+    
+    # Insert founder
+    founder_response = supabase.table('founders').insert(founder_data).execute()
+    
+    if not founder_response.data or len(founder_response.data) == 0:
+        raise Exception("Failed to create founder profile")
+    
+    founder_id = founder_response.data[0]['id']
+    
+    # During profile creation, don't charge for projects (part of onboarding)
+    # Only charge for projects added AFTER profile is created
+    valid_projects = [p for p in projects if p.get('title') and p.get('description') and p.get('stage')]
+    
+    # Create projects
+    created_projects = []
+    for idx, project in enumerate(valid_projects):
+        project_data = {
+            'founder_id': founder_id,
+            'title': project.get('title'),
+            'description': project.get('description'),
+            'stage': project.get('stage'),
+            'display_order': idx
+        }
+        project_response = supabase.table('projects').insert(project_data).execute()
+        if project_response.data and len(project_response.data) > 0:
+            created_projects.append(project_response.data[0])
+    
+    # Return founder with projects
+    founder_response.data[0]['projects'] = created_projects
+    return founder_response.data[0]
+
