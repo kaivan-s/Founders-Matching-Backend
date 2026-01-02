@@ -75,3 +75,46 @@ def get_clerk_user_id():
         log_warning(f"Failed to verify Clerk user ID: {clerk_user_id}")
         return None
 
+def get_clerk_user_email(clerk_user_id):
+    """
+    Get user's email from Clerk API
+    
+    Args:
+        clerk_user_id: The Clerk user ID
+        
+    Returns:
+        str: User's email address, or None if not found
+    """
+    if not CLERK_SECRET_KEY:
+        return None
+    
+    if not clerk_user_id:
+        return None
+    
+    try:
+        headers = {
+            'Authorization': f'Bearer {CLERK_SECRET_KEY}',
+            'Content-Type': 'application/json'
+        }
+        
+        response = requests.get(
+            f'{CLERK_API_URL}/users/{clerk_user_id}',
+            headers=headers,
+            timeout=5
+        )
+        
+        if response.status_code == 200:
+            user_data = response.json()
+            # Clerk returns email_addresses array, get primary email
+            email_addresses = user_data.get('email_addresses', [])
+            for email_obj in email_addresses:
+                if email_obj.get('id') == user_data.get('primary_email_address_id'):
+                    return email_obj.get('email_address')
+            # Fallback to first email if primary not found
+            if email_addresses:
+                return email_addresses[0].get('email_address')
+        return None
+    except Exception as e:
+        log_error(f"Error fetching email from Clerk for user {clerk_user_id}: {str(e)}")
+        return None
+

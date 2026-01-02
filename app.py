@@ -121,6 +121,14 @@ def save_onboarding():
                 'onboarding_completed': True
             }
             
+            # Also update name and email if provided
+            if data.get('name'):
+                update_data['name'] = sanitize_string(data.get('name'), max_length=200)
+            if data.get('email'):
+                email = data.get('email', '').strip()
+                if email and '@' in email:  # Basic email validation
+                    update_data['email'] = email
+            
             # Only update fields that are provided and not None
             update_data = {k: v for k, v in update_data.items() if v is not None}
             

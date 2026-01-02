@@ -7,6 +7,7 @@ from typing import Dict, Optional, Any
 from config.database import get_supabase
 from polar_sdk import Polar
 from services import plan_service
+from utils.auth import get_clerk_user_email
 
 # Polar API configuration
 POLAR_ACCESS_TOKEN = os.getenv('POLAR_ACCESS_TOKEN')
@@ -45,15 +46,23 @@ def create_subscription_checkout(clerk_user_id: str, plan_id: str) -> Dict[str, 
     if not product_id:
         raise ValueError(f"Polar product ID not configured for plan {plan_id}")
     
-    # Get user's email from profile
+    # Get user's email from profile, fallback to Clerk API
     supabase = get_supabase()
     profile = supabase.table('founders').select('email, name').eq('clerk_user_id', clerk_user_id).execute()
     
-    if not profile.data:
-        raise ValueError("Profile not found")
+    user_email = None
+    user_name = ''
     
-    user_email = profile.data[0].get('email')
-    user_name = profile.data[0].get('name', '')
+    if profile.data:
+        user_email = profile.data[0].get('email')
+        user_name = profile.data[0].get('name', '')
+    
+    # If email is missing or empty, get it from Clerk API
+    if not user_email or '@' not in user_email:
+        user_email = get_clerk_user_email(clerk_user_id)
+    
+    if not user_email or '@' not in user_email:
+        raise ValueError("User email not found. Please complete your profile or ensure your email is set in Clerk.")
     
     try:
         # Create checkout session using Polar SDK
@@ -135,10 +144,17 @@ def create_partner_renewal_checkout(clerk_user_id: str) -> Dict[str, str]:
     supabase = get_supabase()
     profile = supabase.table('founders').select('email, name').eq('clerk_user_id', clerk_user_id).execute()
     
-    if not profile.data:
-        raise ValueError("Profile not found")
+    user_email = None
     
-    user_email = profile.data[0].get('email')
+    if profile.data:
+        user_email = profile.data[0].get('email')
+    
+    # If email is missing or empty, get it from Clerk API
+    if not user_email or '@' not in user_email:
+        user_email = get_clerk_user_email(clerk_user_id)
+    
+    if not user_email or '@' not in user_email:
+        raise ValueError("User email not found. Please complete your profile or ensure your email is set in Clerk.")
     
     try:
         with Polar(access_token=POLAR_ACCESS_TOKEN) as polar:
