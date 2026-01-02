@@ -16,7 +16,7 @@ from services.notification_service import NotificationService, ApprovalService
 app = Flask(__name__)
 CORS(app, resources={
     r"/*": {
-        "origins": ["http://localhost:3000", "http://127.0.0.1:5000", "https://founder-match.in/"],  # Allow iOS simulator
+        "origins": ["http://localhost:3000", "http://127.0.0.1:5000", "https://founder-match.in/", "https://beta-branch.dc301xqwoyccc.amplifyapp.com/"],  # Allow iOS simulator
         "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
         "allow_headers": ["Content-Type", "X-Clerk-User-Id", "X-User-Email", "X-User-Name"],
         "supports_credentials": True
