@@ -2,8 +2,6 @@
 import traceback
 from config.database import get_supabase
 
-CREDITS_PER_PROJECT = 5
-
 def get_user_projects(clerk_user_id):
     """Get all projects for a user"""
     supabase = get_supabase()
@@ -20,24 +18,15 @@ def get_user_projects(clerk_user_id):
     return projects.data if projects.data else []
 
 def create_project(clerk_user_id, data):
-    """Create a new project for a founder - deducts 5 credits"""
+    """Create a new project for a founder - free for all plans (no credits required)"""
     supabase = get_supabase()
     
-    # Get founder ID and credits
-    founder = supabase.table('founders').select('id, credits').eq('clerk_user_id', clerk_user_id).execute()
+    # Get founder ID
+    founder = supabase.table('founders').select('id').eq('clerk_user_id', clerk_user_id).execute()
     if not founder.data:
         raise ValueError("Founder profile not found")
     
     founder_id = founder.data[0]['id']
-    current_credits = founder.data[0].get('credits', 0)
-    
-    # Check if user has enough credits
-    if current_credits < CREDITS_PER_PROJECT:
-        raise ValueError(f"Insufficient credits. You need {CREDITS_PER_PROJECT} credits to create a project but only have {current_credits}.")
-    
-    # Deduct credits
-    new_credits = current_credits - CREDITS_PER_PROJECT
-    supabase.table('founders').update({'credits': new_credits}).eq('id', founder_id).execute()
     
     # Get current project count for ordering
     existing_projects = supabase.table('projects').select('display_order').eq('founder_id', founder_id).execute()
@@ -56,6 +45,10 @@ def create_project(clerk_user_id, data):
     # Add genre if provided
     if 'genre' in data and data.get('genre'):
         project_data['genre'] = data['genre']
+    
+    # Add needed_skills if provided (array of skills the project needs)
+    if 'needed_skills' in data and data.get('needed_skills'):
+        project_data['needed_skills'] = data['needed_skills']
     
     # Add compatibility_answers if provided (for project-specific matching)
     if 'compatibility_answers' in data and data['compatibility_answers']:
@@ -83,6 +76,8 @@ def update_project(clerk_user_id, project_id, data):
         update_data['stage'] = data['stage']
     if 'genre' in data:
         update_data['genre'] = data['genre']
+    if 'needed_skills' in data:
+        update_data['needed_skills'] = data['needed_skills']
     if 'compatibility_answers' in data:
         update_data['compatibility_answers'] = data['compatibility_answers']
     

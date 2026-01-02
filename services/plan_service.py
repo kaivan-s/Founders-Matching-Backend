@@ -24,7 +24,6 @@ FOUNDER_PLANS: Dict[FounderPlan, Dict[str, Any]] = {
             "notifications": True,
         },
         "accountability": {
-            "canInviteOwnMentor": True,
             "canUseMarketplace": False,
             "priorityPartners": False,
         },
@@ -50,7 +49,6 @@ FOUNDER_PLANS: Dict[FounderPlan, Dict[str, Any]] = {
             "notifications": True,
         },
         "accountability": {
-            "canInviteOwnMentor": True,
             "canUseMarketplace": True,
             "priorityPartners": False,
         },
@@ -76,7 +74,6 @@ FOUNDER_PLANS: Dict[FounderPlan, Dict[str, Any]] = {
             "notifications": True,
         },
         "accountability": {
-            "canInviteOwnMentor": True,
             "canUseMarketplace": True,
             "priorityPartners": True,
         },
@@ -296,8 +293,9 @@ def get_partner_billing_profile(clerk_user_id: str) -> Dict[str, Any]:
     founder_id = _get_founder_id(clerk_user_id)
     supabase = get_supabase()
     
+    # Use monthly_rate_inr column to store USD values (column name is legacy)
     profile = supabase.table('accountability_partner_profiles').select(
-        'onboarding_paid, onboarding_paid_at, renewal_paid_until, monthly_rate_usd'
+        'onboarding_paid, onboarding_paid_at, renewal_paid_until, monthly_rate_inr'
     ).eq('user_id', founder_id).execute()
     
     if not profile.data:
@@ -311,6 +309,8 @@ def get_partner_billing_profile(clerk_user_id: str) -> Dict[str, Any]:
     data = profile.data[0]
     renewal_until = data.get('renewal_paid_until')
     is_paid = data.get('onboarding_paid', False)
+    # The monthly_rate_inr column stores USD values (legacy column name)
+    monthly_rate_usd = data.get('monthly_rate_inr')
     
     # Check if renewal is still valid
     renewal_valid = False
@@ -326,19 +326,25 @@ def get_partner_billing_profile(clerk_user_id: str) -> Dict[str, Any]:
         'onboarding_paid': is_paid,
         'onboarding_paid_at': data.get('onboarding_paid_at'),
         'renewal_paid_until': renewal_until,
-        'monthly_rate_usd': data.get('monthly_rate_usd'),
+        'monthly_rate_usd': monthly_rate_usd,
         'is_discoverable': is_discoverable,
     }
 
-def update_partner_billing(clerk_user_id: str, onboarding_paid: Optional[bool] = None, monthly_rate_usd: Optional[int] = None) -> Dict[str, Any]:
+def update_partner_billing(clerk_user_id: str, onboarding_paid: Optional[bool] = None, monthly_rate_usd: Optional[int] = None, monthly_rate_inr: Optional[int] = None) -> Dict[str, Any]:
     """Update partner billing information"""
     founder_id = _get_founder_id(clerk_user_id)
     supabase = get_supabase()
     
-    # Validate monthly rate if provided
+    # Handle monthly rate - use USD throughout (stored in monthly_rate_inr column due to legacy naming)
+    monthly_rate_value = None
     if monthly_rate_usd is not None:
+        # Validate USD range
         if monthly_rate_usd < PARTNER_PRICING['minMonthlyRateUSD'] or monthly_rate_usd > PARTNER_PRICING['maxMonthlyRateUSD']:
             raise ValueError(f"Monthly rate must be between ${PARTNER_PRICING['minMonthlyRateUSD']} and ${PARTNER_PRICING['maxMonthlyRateUSD']} USD")
+        monthly_rate_value = monthly_rate_usd
+    elif monthly_rate_inr is not None:
+        # Support legacy INR parameter (treating it as USD)
+        monthly_rate_value = monthly_rate_inr
     
     update_data = {}
     if onboarding_paid is not None:
@@ -346,8 +352,9 @@ def update_partner_billing(clerk_user_id: str, onboarding_paid: Optional[bool] =
         if onboarding_paid:
             update_data['onboarding_paid_at'] = datetime.now(timezone.utc).isoformat()
     
-    if monthly_rate_usd is not None:
-        update_data['monthly_rate_usd'] = monthly_rate_usd
+    # Store USD value in monthly_rate_inr column (legacy column name)
+    if monthly_rate_value is not None:
+        update_data['monthly_rate_inr'] = monthly_rate_value
     
     # Update profile
     existing = supabase.table('accountability_partner_profiles').select('id').eq('user_id', founder_id).execute()

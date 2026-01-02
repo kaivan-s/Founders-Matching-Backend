@@ -185,6 +185,25 @@ def list_user_workspaces(clerk_user_id):
     if not workspaces.data:
         return []
     
+    # Collect all founder IDs from matches to fetch in a single query (optimized)
+    founder_ids_to_fetch = set()
+    for workspace in workspaces.data:
+        match = workspace.get('match', {})
+        if match:
+            if match.get('founder1_id'):
+                founder_ids_to_fetch.add(match['founder1_id'])
+            if match.get('founder2_id'):
+                founder_ids_to_fetch.add(match['founder2_id'])
+    
+    # Fetch all founders in a single query
+    founders_map = {}
+    if founder_ids_to_fetch:
+        founders_list = list(founder_ids_to_fetch)
+        founders_result = supabase.table('founders').select('id, name, email').in_('id', founders_list).execute()
+        if founders_result.data:
+            for founder in founders_result.data:
+                founders_map[founder['id']] = founder
+    
     # Format workspaces with project and founder info
     formatted_workspaces = []
     for workspace in workspaces.data:
@@ -192,23 +211,18 @@ def list_user_workspaces(clerk_user_id):
         project2 = workspace.get('project2')
         match = workspace.get('match', {})
         
-        # Determine the other founder
+        # Determine the other founder from the match (using pre-fetched founders map)
         other_founder = None
         if match:
-            if match.get('founder1_id') == founder_id:
-                # Get founder2 info
-                founder2_id = match.get('founder2_id')
-                if founder2_id:
-                    founder2 = supabase.table('founders').select('id, name, email').eq('id', founder2_id).execute()
-                    if founder2.data:
-                        other_founder = founder2.data[0]
-            else:
-                # Get founder1 info
-                founder1_id = match.get('founder1_id')
-                if founder1_id:
-                    founder1 = supabase.table('founders').select('id, name, email').eq('id', founder1_id).execute()
-                    if founder1.data:
-                        other_founder = founder1.data[0]
+            founder1_id = match.get('founder1_id')
+            founder2_id = match.get('founder2_id')
+            
+            if founder1_id == founder_id and founder2_id:
+                # Current user is founder1, so other founder is founder2
+                other_founder = founders_map.get(founder2_id)
+            elif founder2_id == founder_id and founder1_id:
+                # Current user is founder2, so other founder is founder1
+                other_founder = founders_map.get(founder1_id)
         
         # Build project title
         project_titles = []
@@ -244,7 +258,12 @@ def list_user_workspaces(clerk_user_id):
     return formatted_workspaces
 
 def get_workspace(clerk_user_id, workspace_id):
-    """Get workspace overview with participants, equity summary, and KPI summary"""
+    """Get workspace overview with participants, equity summary, and KPI summary
+    
+    Optimized to fetch only necessary fields. These queries cannot be combined into a single
+    query because participants, equity scenarios, and KPIs are separate tables with no direct
+    JOIN relationship - they're all related only via workspace_id.
+    """
     founder_id = _verify_workspace_access(clerk_user_id, workspace_id)
     supabase = get_supabase()
     
@@ -255,20 +274,27 @@ def get_workspace(clerk_user_id, workspace_id):
     
     workspace_data = workspace.data[0]
     
-    # Get participants
+    # Fetch participants, equity, and KPIs
+    # Note: These are separate queries because they're different tables that can't be JOINed
+    # We optimize by fetching only the fields we need
+    
+    # Get participants with user info (using JOIN to avoid N+1)
     participants = supabase.table('workspace_participants').select('*, user:founders!user_id(id, name, email)').eq('workspace_id', workspace_id).execute()
     
-    # Get current equity scenario
-    equity = supabase.table('workspace_equity_scenarios').select('*').eq('workspace_id', workspace_id).eq('is_current', True).execute()
+    # Get current equity scenario (only one, filtered by is_current)
+    equity = supabase.table('workspace_equity_scenarios').select('*').eq('workspace_id', workspace_id).eq('is_current', True).limit(1).execute()
     current_equity = equity.data[0] if equity.data else None
     
-    # Get KPI summary (count by status)
+    # Get KPI summary - optimized to fetch only status field (not full records)
     kpis = supabase.table('workspace_kpis').select('status').eq('workspace_id', workspace_id).execute()
+    
+    # Calculate KPI summary from fetched data
+    kpi_data = kpis.data if kpis.data else []
     kpi_summary = {
-        'total': len(kpis.data) if kpis.data else 0,
-        'not_started': len([k for k in (kpis.data or []) if k.get('status') == 'not_started']),
-        'in_progress': len([k for k in (kpis.data or []) if k.get('status') == 'in_progress']),
-        'done': len([k for k in (kpis.data or []) if k.get('status') == 'done'])
+        'total': len(kpi_data),
+        'not_started': len([k for k in kpi_data if k.get('status') == 'not_started']),
+        'in_progress': len([k for k in kpi_data if k.get('status') == 'in_progress']),
+        'done': len([k for k in kpi_data if k.get('status') == 'done'])
     }
     
     return {

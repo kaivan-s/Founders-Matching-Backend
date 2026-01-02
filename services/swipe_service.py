@@ -3,21 +3,19 @@ import traceback
 from config.database import get_supabase
 from services import plan_service
 
-CREDITS_PER_CONNECT = 2
-
 def create_swipe(clerk_user_id, data):
-    """Record a swipe action - deducts 2 credits for right swipes
+    """Record a swipe action - uses plan-based limits instead of credits
     Now supports project-based swiping where users swipe on specific projects
+    Limits are enforced via plan_service.check_discovery_limit()
     """
     supabase = get_supabase()
     
-    # Get current user's founder profile with credits
-    user_profile = supabase.table('founders').select('id, credits').eq('clerk_user_id', clerk_user_id).execute()
+    # Get current user's founder profile
+    user_profile = supabase.table('founders').select('id').eq('clerk_user_id', clerk_user_id).execute()
     if not user_profile.data:
         raise ValueError("Profile not found")
     
     swiper_id = user_profile.data[0]['id']
-    current_credits = user_profile.data[0].get('credits', 0)
     swiped_id = data.get('swiped_id')
     swipe_type = data.get('swipe_type')
     project_id = data.get('project_id')  # New: project being swiped on
@@ -26,23 +24,17 @@ def create_swipe(clerk_user_id, data):
     if not swiped_id or not swipe_type:
         raise ValueError("swiped_id and swipe_type required")
     
-    # Check discovery limit for right swipes (only count connects toward limit)
+    # Check discovery limit for right swipes (plan-based, not credits)
+    # FREE plan: 10 matches/month, PRO/PRO_PLUS: unlimited
     if swipe_type == 'right':
         can_swipe, current_count, max_allowed = plan_service.check_discovery_limit(clerk_user_id)
         if not can_swipe:
+            if max_allowed == -1:  # Unlimited
+                raise ValueError("Unexpected error: Unable to swipe despite unlimited plan")
             raise ValueError(f"Discovery limit reached. You've used {current_count} of {max_allowed} swipes this month. Upgrade to Pro for unlimited discovery.")
         
         # Increment usage after successful check
         plan_service.increment_discovery_usage(clerk_user_id)
-    
-    # Deduct credits only for right swipes (connects)
-    if swipe_type == 'right':
-        if current_credits < CREDITS_PER_CONNECT:
-            raise ValueError(f"Insufficient credits. You need {CREDITS_PER_CONNECT} credits to connect but only have {current_credits}.")
-        
-        # Deduct credits
-        new_credits = current_credits - CREDITS_PER_CONNECT
-        supabase.table('founders').update({'credits': new_credits}).eq('id', swiper_id).execute()
     
     # Check if swipe already exists to avoid constraint violation
     existing_swipe_query = supabase.table('swipes').select('id').eq('swiper_id', swiper_id).eq('swiped_id', swiped_id)
@@ -106,35 +98,35 @@ def create_swipe(clerk_user_id, data):
             # This allows same users to have multiple matches for different project combinations
             match_exists = False
             if project_id and swiper_project_id:
-                # Project-based match - check for specific project combination
-                # Get all matches between these users
-                all_matches = supabase.table('matches').select('*').execute()
-                if all_matches.data:
-                    for match in all_matches.data:
-                        # Check if same users
-                        if ((match['founder1_id'] == swiper_id and match['founder2_id'] == swiped_id) or \
-                           (match['founder1_id'] == swiped_id and match['founder2_id'] == swiper_id)):
-                            # Check if this exact project combination already exists (order doesn't matter)
+                # Project-based match - check for specific project combination using database query
+                # Query for matches between these two users (using consistent ordering)
+                # Then check project combinations in Python (much better than fetching ALL matches)
+                ordered_founder1 = min(swiper_id, swiped_id)
+                ordered_founder2 = max(swiper_id, swiped_id)
+                
+                # Query only matches between these two users
+                matches_query = supabase.table('matches').select('project1_id, project2_id').eq('founder1_id', ordered_founder1).eq('founder2_id', ordered_founder2).execute()
+                
+                # Check if any match has the same project combination (order doesn't matter)
+                if matches_query.data:
+                    for match in matches_query.data:
                             match_proj1 = match.get('project1_id')
                             match_proj2 = match.get('project2_id')
                             if match_proj1 and match_proj2:
-                                # Same two projects matched (in any order) = duplicate
+                            # Check if same two projects (in any order)
                                 if ((match_proj1 == swiper_project_id and match_proj2 == project_id) or \
                                    (match_proj1 == project_id and match_proj2 == swiper_project_id)):
                                     match_exists = True
                                     break
             else:
                 # Legacy user-based match - check for any match between these users (without projects)
-                all_matches = supabase.table('matches').select('*').execute()
-                if all_matches.data:
-                    for match in all_matches.data:
-                        # Only consider matches without projects (legacy user-to-user)
-                        if ((match['founder1_id'] == swiper_id and match['founder2_id'] == swiped_id) or \
-                           (match['founder1_id'] == swiped_id and match['founder2_id'] == swiper_id)):
-                            # Only match exists if no project IDs (legacy match)
-                            if not match.get('project1_id') and not match.get('project2_id'):
-                                match_exists = True
-                                break
+                # Use database query to filter at database level with consistent ordering
+                ordered_founder1 = min(swiper_id, swiped_id)
+                ordered_founder2 = max(swiper_id, swiped_id)
+                
+                matches_query = supabase.table('matches').select('id').eq('founder1_id', ordered_founder1).eq('founder2_id', ordered_founder2).is_('project1_id', None).is_('project2_id', None).execute()
+                
+                match_exists = bool(matches_query.data and len(matches_query.data) > 0)
             
             if not match_exists:
                 # Create match with consistent ordering (smaller ID first)

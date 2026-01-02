@@ -156,9 +156,20 @@ def get_available_founders(clerk_user_id, filters=None, mode='founders'):
         # Optimized project-based discovery with single query
         # Use raw SQL for better performance at scale
         
-        # Get pagination parameters (default to first 20 results)
-        limit = filters.get('limit', 20) if filters else 20
+        # Get pagination parameters
+        # When preferences are set, fetch more projects initially to find best matches
+        # When no preferences, use normal pagination
+        final_limit = filters.get('limit', 20) if filters else 20
         offset = filters.get('offset', 0) if filters else 0
+        
+        # If preferences are set, fetch more candidates (100-200) before preference scoring
+        # This ensures we find the best matches, not just the first 20
+        if user_preferences and any(user_preferences.values()):
+            # Fetch more candidates for preference-based matching
+            initial_fetch_limit = min(200, max(100, final_limit * 5))  # Fetch 5x more, max 200
+        else:
+            # No preferences: use normal pagination
+            initial_fetch_limit = final_limit
         
         # Build the optimized query using Supabase's query builder with proper JOINs
         # This single query excludes:
@@ -186,8 +197,9 @@ def get_available_founders(clerk_user_id, filters=None, mode='founders'):
         if filters.get('genre'):
             query = query.eq('genre', filters['genre'])
         
-        # Order by most recent and limit results for pagination
-        query = query.order('created_at', desc=True).range(offset, offset + limit - 1)
+        # Order by most recent and fetch initial batch
+        # When preferences are set, we fetch more to score them all
+        query = query.order('created_at', desc=True).range(offset, offset + initial_fetch_limit - 1)
         
         all_projects = query.execute()
         
@@ -292,6 +304,23 @@ def get_available_founders(clerk_user_id, filters=None, mode='founders'):
                 project_answers = project.get('compatibility_answers', {})
                 preference_score = calculate_preference_score(user_preferences, project_answers)
             
+            # Calculate information completeness (not "quality" - just how much info is available)
+            # This helps prioritize projects that are easier to evaluate
+            info_completeness = 0
+            # Description length (more detailed = easier to understand the project)
+            description = project.get('description', '')
+            if description:
+                word_count = len(description.split())
+                if word_count >= 50:
+                    info_completeness += 1  # Well-detailed
+                elif word_count >= 20:
+                    info_completeness += 0.5  # Adequate
+            
+            # Needed skills (helps founders know if they're a good fit)
+            # Note: Compatibility answers are compulsory, so not used for differentiation
+            if project.get('needed_skills') and len(project.get('needed_skills', [])) > 0:
+                info_completeness += 0.5
+            
             # Use project ID as the unique identifier
             # This avoids the composite ID issue that was causing UUID parsing errors
             formatted_result = {
@@ -311,10 +340,13 @@ def get_available_founders(clerk_user_id, filters=None, mode='founders'):
                     'description': project.get('description', 'No description available'),
                     'stage': project.get('stage', 'Unknown'),
                     'genre': project.get('genre'),
+                    'needed_skills': project.get('needed_skills', []),
                     'compatibility_answers': project.get('compatibility_answers', {}),
                     'is_primary': True  # Mark this as the primary project being shown
                 }],
-                'primary_project_id': project['id']  # Track which project this card represents
+                'primary_project_id': project['id'],  # Track which project this card represents
+                'info_completeness': info_completeness,  # Simple score: more info = easier to evaluate
+                'created_at': project.get('created_at')  # Keep for sorting
             }
             
             # Add preference score if calculated
@@ -323,34 +355,49 @@ def get_available_founders(clerk_user_id, filters=None, mode='founders'):
             
             formatted_results.append(formatted_result)
         
-        # Sort by preference score if preferences are set
+        # Sorting strategy
         if user_preferences and any(user_preferences.values()):
-            # Only sort and filter if user actually has preferences set
-            formatted_results.sort(key=lambda x: x.get('preference_score', 0), reverse=True)
+            # When preferences are set: Sort by preference score (primary), completeness as tie-breaker
+            # We've already fetched more projects (100-200), so we can find the best matches
+            formatted_results.sort(
+                key=lambda x: (
+                    x.get('preference_score', 0),  # Primary: preference match
+                    x.get('info_completeness', 0)  # Secondary: more info = easier to evaluate
+                ),
+                reverse=True
+            )
             
-            # Log top 5 scores for debugging
-            for i, result in enumerate(formatted_results[:5]):
-                score = result.get('preference_score', 'N/A')
-            
-            # Filter out projects with very low scores (below 25% match)
-            # This ensures we only show relevant projects when preferences are set
-            MIN_SCORE_THRESHOLD = 25
-            
-            # Keep original list before filtering
-            all_scored_results = formatted_results.copy()
-            
-            formatted_results = [
+            # Soft filtering: Filter out very low matches, but keep enough for good results
+            # Since we fetched more projects, we can be more selective
+            filtered_results = [
                 r for r in formatted_results 
-                if r.get('preference_score', 0) >= MIN_SCORE_THRESHOLD
+                if r.get('preference_score', 0) >= 20 or r.get('info_completeness', 0) >= 1.5
             ]
             
-            # If filtering leaves us with too few results, show at least top 10
-            if len(formatted_results) < 10 and len(all_scored_results) >= 10:
-                # Take top 10 from original list regardless of score
-                formatted_results = all_scored_results[:10]
+            # Use filtered results if we have enough, otherwise use all (to avoid empty results)
+            if len(filtered_results) >= final_limit:
+                formatted_results = filtered_results
+            # If filtering leaves too few, keep at least top results regardless of score
+            elif len(formatted_results) > final_limit:
+                # Keep top results even if some are below threshold
+                formatted_results = formatted_results[:max(final_limit, len(filtered_results))]
+        else:
+            # When no preferences: Sort by info completeness first, then recency
+            # This shows projects with more information first (easier to evaluate)
+            # rather than just showing newest projects
+            formatted_results.sort(
+                key=lambda x: (
+                    x.get('info_completeness', 0),  # More info = easier to evaluate
+                    x.get('created_at', '')  # Then recency
+                ),
+                reverse=True
+            )
         
-        # Return top 20 results (or all if less than 20)
-        available_founders = formatted_results[:20]
+        # Return top N results (based on final_limit, default 20)
+        # Apply pagination offset here if needed
+        start_idx = offset
+        end_idx = offset + final_limit
+        available_founders = formatted_results[start_idx:end_idx]
         # Skip fetching all projects - we already have the single project per card
     else:
         # Legacy founder-based discovery (backward compatible)
@@ -363,17 +410,32 @@ def get_available_founders(clerk_user_id, filters=None, mode='founders'):
         
         
         # Filter out already swiped founders (only for legacy user-to-user swipes)
-        available_founders = [
-            founder for founder in all_founders.data 
+        available_founder_ids = [
+            founder['id'] for founder in all_founders.data 
             if founder['id'] not in swiped_ids
         ]
         
-    
-        # Fetch projects for each founder (only in legacy mode)
-        for founder in available_founders:
-            founder_id = founder['id']
-            projects = supabase.table('projects').select('*').eq('founder_id', founder_id).order('display_order').execute()
-            founder['projects'] = projects.data if projects.data else []
+        # Fetch all projects for available founders in a single query (optimized)
+        if available_founder_ids:
+            all_projects = supabase.table('projects').select('*').in_('founder_id', available_founder_ids).order('display_order').execute()
+            
+            # Group projects by founder_id
+            projects_by_founder = {}
+            if all_projects.data:
+                for project in all_projects.data:
+                    founder_id = project['founder_id']
+                    if founder_id not in projects_by_founder:
+                        projects_by_founder[founder_id] = []
+                    projects_by_founder[founder_id].append(project)
+            
+            # Attach projects to founders
+            available_founders = []
+            for founder in all_founders.data:
+                if founder['id'] in available_founder_ids:
+                    founder['projects'] = projects_by_founder.get(founder['id'], [])
+                    available_founders.append(founder)
+        else:
+            available_founders = []
     
         # Apply filters if provided (only in legacy mode)
         if filters:
@@ -393,7 +455,7 @@ def create_founder(data):
     if not isinstance(projects, list):
         projects = []
     
-    # Create founder profile with starting credits
+    # Create founder profile (no credits system - uses plan-based features)
     founder_data = {
         'clerk_user_id': data.get('clerk_user_id'),
         'name': data.get('name'),
@@ -401,17 +463,11 @@ def create_founder(data):
         'profile_picture_url': data.get('profile_picture_url'),
         'looking_for': data.get('looking_for'),
         'compatibility_answers': data.get('compatibility_answers', {}),
-        'credits': 50,  # Give new users 50 free credits to start
         'skills': data.get('skills', []),
         'location': data.get('location'),
         'website_url': data.get('website_url'),
-        'linkedin_url': data.get('linkedin_url'),
-        'credits': data.get('credits')
+        'linkedin_url': data.get('linkedin_url')
     }
-    
-    # Remove credits from founder_data if not provided (let database handle default)
-    if 'credits' in founder_data and founder_data['credits'] is None:
-        del founder_data['credits']
     
     # Validate required fields
     if not founder_data.get('clerk_user_id'):

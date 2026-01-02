@@ -10,7 +10,7 @@ from utils.logger import log_error, log_warning, log_info
 from utils.rate_limit import init_rate_limiter, RATE_LIMITS
 from config.database import get_supabase
 from services import founder_service, project_service, swipe_service, profile_service, match_service, waitlist_service, message_service, payment_service, workspace_service, task_service, accountability_partner_service
-from services import plan_service, subscription_service
+from services import plan_service, subscription_service, document_service, feedback_service, advanced_search_service
 from services.notification_service import NotificationService, ApprovalService
 
 app = Flask(__name__)
@@ -175,8 +175,7 @@ def save_onboarding():
                 'location': data.get('location', ''),
                 'looking_for': data.get('looking_for', default_looking_for),
                 'skills': data.get('skills', []),
-                'onboarding_completed': True,
-                'credits': 10  # Give initial credits
+                'onboarding_completed': True
             }
             
             result = supabase.table('founders').insert(founder_data).execute()
@@ -268,26 +267,102 @@ def create_founder():
         return jsonify(error_response), 500
 
 @app.route('/api/projects', methods=['GET'])
-def get_my_projects():
-    """Get all projects for the current logged-in user"""
+def get_projects():
+    """Get projects - user's own projects by default, or discoverable projects if discover=true"""
     try:
         clerk_user_id = get_clerk_user_id()
         if not clerk_user_id:
             return jsonify({"error": "User ID required"}), 401
         
-        projects = project_service.get_user_projects(clerk_user_id)
-        return jsonify(projects), 200
+        # Check if this is a discovery request
+        discover = request.args.get('discover', '').lower() == 'true'
+        
+        if discover:
+            # Return discoverable projects (other users' projects for swiping)
+            filters = {
+                'skills': sanitize_list(request.args.getlist('skills'), max_items=20),
+                'location': sanitize_string(request.args.get('location', ''), max_length=200),
+                'project_stage': validate_enum(request.args.get('project_stage', ''), 
+                                             ['idea', 'mvp', 'early_revenue', 'scaling', '']),
+                'looking_for': sanitize_string(request.args.get('looking_for', ''), max_length=100),
+                'search': sanitize_string(request.args.get('search', ''), max_length=200),
+                'genre': sanitize_string(request.args.get('genre', ''), max_length=50),
+                'limit': validate_integer(request.args.get('limit', 20), min_value=1, max_value=100),
+                'offset': validate_integer(request.args.get('offset', 0), min_value=0),
+                'preferences': sanitize_string(request.args.get('preferences', ''), max_length=5000)
+            }
+            
+            # Use project mode for discovery
+            projects = founder_service.get_available_founders(clerk_user_id, filters, mode='projects')
+            return jsonify(projects)
+        else:
+            # Return user's own projects (default behavior)
+            projects = project_service.get_user_projects(clerk_user_id)
+            return jsonify(projects), 200
     except ValueError as e:
         return jsonify({"error": str(e)}), 404
     except Exception as e:
         error_trace = traceback.format_exc()
-        log_error("Error in get_my_projects", error=e, traceback_str=error_trace)
+        log_error("Error in get_projects", error=e, traceback_str=error_trace)
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/advanced-search', methods=['GET'])
+@limiter.limit(RATE_LIMITS['moderate'])
+def advanced_search():
+    """Advanced search for Pro+ users - search projects by keyword, genre, stage, region"""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        # Check Pro+ access
+        if not advanced_search_service.check_pro_plus_access(clerk_user_id):
+            return jsonify({
+                "error": "Advanced search is available on Pro+ only.",
+                "upgrade_required": True
+            }), 403
+        
+        # Get current user's founder ID
+        supabase = get_supabase()
+        user_profile = supabase.table('founders').select('id').eq('clerk_user_id', clerk_user_id).execute()
+        if not user_profile.data:
+            return jsonify({"error": "Profile not found. Please create your profile first."}), 404
+        
+        current_user_id = user_profile.data[0]['id']
+        
+        # Parse and validate query parameters
+        query_params = {
+            'q': sanitize_string(request.args.get('q', ''), max_length=200) if request.args.get('q') else None,
+            'genre': sanitize_list(request.args.getlist('genre'), max_items=10),
+            'stage': sanitize_list(request.args.getlist('stage'), max_items=10),
+            'region': sanitize_string(request.args.get('region', ''), max_length=100) if request.args.get('region') else None,
+            'timezone_offset_range': sanitize_string(request.args.get('timezone_offset_range', ''), max_length=20) if request.args.get('timezone_offset_range') else None,
+            'limit': validate_integer(request.args.get('limit', 50), min_value=1, max_value=200),
+            'offset': validate_integer(request.args.get('offset', 0), min_value=0)
+        }
+        
+        # Validate stage values
+        valid_stages = ['idea', 'mvp', 'early_revenue', 'scaling', 'revenue', 'other']
+        if query_params['stage']:
+            query_params['stage'] = [s for s in query_params['stage'] if s in valid_stages]
+        
+        # Perform search
+        results = advanced_search_service.search_projects(query_params, current_user_id)
+        
+        # Results now returns a dict with 'projects' and 'total'
+        return jsonify(results), 200
+        
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        error_trace = traceback.format_exc()
+        log_error("Error in advanced_search", error=e, traceback_str=error_trace)
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/projects', methods=['POST'])
 @limiter.limit(RATE_LIMITS['moderate'])
 def create_project():
-    """Create a new project for a founder - deducts 5 credits"""
+    """Create a new project for a founder - free for all plans"""
     try:
         clerk_user_id = get_clerk_user_id()
         if not clerk_user_id:
@@ -336,7 +411,7 @@ def delete_project(project_id):
 
 @app.route('/api/swipes', methods=['POST'])
 def create_swipe():
-    """Record a swipe action - deducts 2 credits for right swipes"""
+    """Record a swipe action - uses plan-based discovery limits"""
     try:
         clerk_user_id = get_clerk_user_id()
         if not clerk_user_id:
@@ -365,26 +440,9 @@ def check_profile():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-@app.route('/api/profile/credits', methods=['GET'])
-def get_credits():
-    """Get current user's credits"""
-    try:
-        clerk_user_id = get_clerk_user_id()
-        if not clerk_user_id:
-            return jsonify({"error": "User ID required"}), 401
-        
-        result = profile_service.get_credits(clerk_user_id)
-        return jsonify(result)
-    except ValueError as e:
-        return jsonify({"error": str(e)}), 404
-    except Exception as e:
-        error_trace = traceback.format_exc()
-        log_error("Error in get_credits", error=e, traceback_str=error_trace)
-        return jsonify({"error": str(e)}), 500
-
 @app.route('/api/profile/debug', methods=['GET'])
 def debug_profile():
-    """Debug endpoint to check user profile and credits"""
+    """Debug endpoint to check user profile"""
     try:
         clerk_user_id = get_clerk_user_id()
         if not clerk_user_id:
@@ -556,38 +614,10 @@ def get_unread_count():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-@app.route('/api/payments/create-checkout', methods=['POST'])
-@limiter.limit(RATE_LIMITS['strict'])
-def create_checkout():
-    """Create a Polar checkout session for purchasing credits"""
-    try:
-        clerk_user_id = get_clerk_user_id()
-        if not clerk_user_id:
-            return jsonify({"error": "User ID required"}), 401
-        
-        data = request.get_json()
-        if not data:
-            return jsonify({"error": "No data provided"}), 400
-        
-        product_id = data.get('product_id')
-        credits_amount = data.get('credits_amount')
-        
-        if not product_id or not credits_amount:
-            return jsonify({"error": "product_id and credits_amount are required"}), 400
-        
-        result = payment_service.create_checkout_session(clerk_user_id, product_id, credits_amount)
-        return jsonify(result), 200
-    except ValueError as e:
-        return jsonify({"error": str(e)}), 400
-    except Exception as e:
-        error_trace = traceback.format_exc()
-        log_error("Error creating checkout", traceback_str=error_trace)
-        return jsonify({"error": str(e)}), 500
-
 @app.route('/api/payments/webhook', methods=['POST'])
 @limiter.limit(RATE_LIMITS['strict'])
 def handle_webhook():
-    """Handle Polar webhook events for credits (legacy)"""
+    """Handle Polar webhook events (legacy - kept for backward compatibility)"""
     try:
         # Get raw body for signature verification (must be done before parsing JSON)
         payload = request.get_data(as_text=True)
@@ -1512,7 +1542,8 @@ def partner_profile():
         if request.method == 'GET':
             profile = accountability_partner_service.get_partner_profile(clerk_user_id)
             if not profile:
-                return jsonify({"error": "Partner profile not found"}), 404
+                # Return 200 with null to indicate profile doesn't exist (not an error)
+                return jsonify(None), 200
             return jsonify(profile), 200
         else:  # POST or PUT
             data = request.get_json()
@@ -1585,28 +1616,6 @@ def get_partner_marketplace(workspace_id):
         return jsonify({"error": str(e)}), 400
     except Exception as e:
         log_error("Error getting marketplace partners", error=e)
-        return jsonify({"error": str(e)}), 500
-
-@app.route('/api/workspaces/<workspace_id>/accountability-partners/invite', methods=['POST'])
-def invite_own_partner(workspace_id):
-    """Invite own accountability partner by email"""
-    try:
-        clerk_user_id = get_clerk_user_id()
-        if not clerk_user_id:
-            return jsonify({"error": "User ID required"}), 401
-        
-        data = request.get_json()
-        if not data or not data.get('email'):
-            return jsonify({"error": "email is required"}), 400
-        
-        result = accountability_partner_service.invite_own_partner(
-            clerk_user_id, workspace_id, data['email'], data.get('name'), data.get('note')
-        )
-        return jsonify(result), 201
-    except ValueError as e:
-        return jsonify({"error": str(e)}), 400
-    except Exception as e:
-        log_error("Error inviting partner", error=e)
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/workspaces/<workspace_id>/accountability-partners/request', methods=['POST'])
@@ -1899,6 +1908,91 @@ def save_quarterly_review(workspace_id):
         log_error("Error saving quarterly review", error=e)
         return jsonify({"error": str(e)}), 500
 
+# ==================== WORKSPACE DOCUMENTS ENDPOINTS ====================
+
+@app.route('/api/workspaces/<workspace_id>/documents', methods=['POST'])
+@limiter.limit(RATE_LIMITS['moderate'])
+def upload_workspace_document(workspace_id):
+    """Upload a document to workspace storage"""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        # Check if file is present
+        if 'file' not in request.files:
+            return jsonify({"error": "No file provided"}), 400
+        
+        file = request.files['file']
+        category = request.form.get('category')
+        description = request.form.get('description')
+        
+        # Validate description length
+        if description and len(description) > 1000:
+            return jsonify({"error": "Description must be 1000 characters or less"}), 400
+        
+        document = document_service.upload_document(
+            clerk_user_id, workspace_id, file, category, description
+        )
+        return jsonify(document), 201
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        log_error("Error uploading document", error=e)
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/workspaces/<workspace_id>/documents', methods=['GET'])
+def list_workspace_documents(workspace_id):
+    """List documents for a workspace"""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        category = request.args.get('category')
+        search = request.args.get('search')
+        
+        documents = document_service.list_documents(clerk_user_id, workspace_id, category, search)
+        return jsonify(documents), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        log_error("Error listing documents", error=e)
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/workspaces/<workspace_id>/documents/<document_id>/url', methods=['GET'])
+def get_document_signed_url(workspace_id, document_id):
+    """Generate a signed URL for downloading a document"""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        result = document_service.get_document_signed_url(clerk_user_id, workspace_id, document_id)
+        return jsonify(result), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        log_error("Error generating signed URL", error=e)
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/workspaces/<workspace_id>/documents/<document_id>', methods=['DELETE'])
+@limiter.limit(RATE_LIMITS['moderate'])
+def delete_workspace_document(workspace_id, document_id):
+    """Delete a document and its stored file"""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        result = document_service.delete_document(clerk_user_id, workspace_id, document_id)
+        return jsonify(result), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        log_error("Error deleting document", error=e)
+        return jsonify({"error": str(e)}), 500
+
 @app.route('/api/accountability-partners/profile/contact', methods=['PUT'])
 def update_partner_contact():
     """Update partner contact info"""
@@ -2153,6 +2247,97 @@ def calculate_partner_pricing():
         return jsonify({"error": str(e)}), 400
     except Exception as e:
         log_error("Error calculating pricing", error=e)
+        return jsonify({"error": str(e)}), 500
+
+# Product Feedback Routes
+@app.route('/api/feedback', methods=['POST'])
+@limiter.limit(RATE_LIMITS['moderate'])
+def create_feedback():
+    """Create a new feedback entry"""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No data provided"}), 400
+        
+        title = data.get('title', '').strip()
+        description = data.get('description', '').strip()
+        category = data.get('category', 'Other')
+        workspace_id = data.get('workspaceId') or data.get('workspace_id')
+        
+        feedback = feedback_service.create_feedback(
+            clerk_user_id=clerk_user_id,
+            title=title,
+            description=description,
+            category=category,
+            workspace_id=workspace_id
+        )
+        
+        return jsonify(feedback), 201
+        
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        log_error("Error creating feedback", error=e)
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/feedback/my', methods=['GET'])
+@limiter.limit(RATE_LIMITS['moderate'])
+def get_my_feedback():
+    """Get all feedback entries for the current user"""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        feedback_list = feedback_service.get_user_feedback(clerk_user_id)
+        return jsonify(feedback_list), 200
+        
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        log_error("Error fetching feedback", error=e)
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/admin/feedback/<feedback_id>', methods=['PATCH'])
+@limiter.limit(RATE_LIMITS['moderate'])
+def update_feedback_admin(feedback_id):
+    """Admin-only: Update feedback status and reward fields"""
+    try:
+        # TODO: Add admin authentication check here
+        # For now, this endpoint exists but should be protected
+        # You can add a check like: if not is_admin(clerk_user_id): return 403
+        
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No data provided"}), 400
+        
+        status = data.get('status')
+        usefulness_score = data.get('usefulness_score')
+        reward_amount_cents = data.get('reward_amount_cents')
+        reward_paid = data.get('reward_paid')
+        
+        feedback = feedback_service.update_feedback_admin(
+            feedback_id=feedback_id,
+            status=status,
+            usefulness_score=usefulness_score,
+            reward_amount_cents=reward_amount_cents,
+            reward_paid=reward_paid
+        )
+        
+        return jsonify(feedback), 200
+        
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        log_error("Error updating feedback", error=e)
         return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':

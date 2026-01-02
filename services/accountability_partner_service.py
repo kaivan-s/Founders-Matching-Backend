@@ -307,6 +307,18 @@ def get_available_partners(workspace_id, filters=None, clerk_user_id=None):
     for profile in (profiles.data or []):
         user_id = profile['user_id']
         
+        # Check if this partner is already a founder/co-founder in this workspace
+        # Partners cannot be partners for their own projects
+        workspace_participant = supabase.table('workspace_participants').select('id, role').eq(
+            'workspace_id', workspace_id
+        ).eq('user_id', user_id).execute()
+        
+        if workspace_participant.data:
+            participant_role = workspace_participant.data[0].get('role')
+            # Skip if user is already a founder/co-founder (role is NULL or not ACCOUNTABILITY_PARTNER)
+            if participant_role != 'ACCOUNTABILITY_PARTNER':
+                continue  # Skip this partner - they're already a founder in this workspace
+        
         # Count current active workspaces
         # Try to filter by role, but handle case where column might not exist
         try:
@@ -353,6 +365,18 @@ def create_partner_request(clerk_user_id, workspace_id, partner_user_id):
     founder_id = _verify_workspace_access(clerk_user_id, workspace_id)
     supabase = get_supabase()
     notification_service = NotificationService()
+    
+    # Prevent partners from being partners for their own workspaces
+    # Check if the partner_user_id is already a founder/participant in this workspace
+    existing_participant = supabase.table('workspace_participants').select('id, role').eq(
+        'workspace_id', workspace_id
+    ).eq('user_id', partner_user_id).execute()
+    
+    if existing_participant.data:
+        # User is already a participant - check if they're a founder (not a partner)
+        participant_role = existing_participant.data[0].get('role')
+        if participant_role != 'ACCOUNTABILITY_PARTNER':
+            raise ValueError("This user is already a founder/co-founder in this workspace. Accountability partners cannot be partners for their own projects.")
     
     # Check if partner profile exists
     try:
@@ -724,51 +748,6 @@ def respond_to_partner_request(clerk_user_id, request_id, response):
                 pass
         
         return {'status': 'DECLINED', 'message': 'Partner request declined'}
-
-def invite_own_partner(clerk_user_id, workspace_id, email, name, note=None):
-    """Invite a partner by email (creates pending membership)"""
-    founder_id = _verify_workspace_access(clerk_user_id, workspace_id)
-    supabase = get_supabase()
-    
-    # Check if user exists
-    existing_user = supabase.table('founders').select('id, clerk_user_id').eq('email', email).execute()
-    
-    if existing_user.data:
-        # User exists, create pending membership
-        user_id = existing_user.data[0]['id']
-        clerk_user_id_invitee = existing_user.data[0].get('clerk_user_id')
-        
-        # Check if already a participant
-        existing_participant = supabase.table('workspace_participants').select('id').eq(
-            'workspace_id', workspace_id
-        ).eq('user_id', user_id).execute()
-        
-        if existing_participant.data:
-            raise ValueError("User is already a participant in this workspace")
-        
-        # Create pending membership
-        membership_data = {
-            'workspace_id': workspace_id,
-            'user_id': user_id,
-            'role': 'ACCOUNTABILITY_PARTNER',
-            'status': 'PENDING'  # Assuming we add status field
-        }
-        
-        supabase.table('workspace_participants').insert(membership_data).execute()
-        
-        # TODO: Send email invite if clerk_user_id_invitee exists
-        # For now, return success
-        
-        return {
-            'status': 'invited',
-            'user_id': user_id,
-            'message': 'Invitation sent to existing user'
-        }
-    else:
-        # User doesn't exist, create pending invite
-        # TODO: Store invite in a separate table and send email
-        # For now, return error suggesting they use marketplace
-        raise ValueError("User not found. Please ask them to sign up first, or use the marketplace to find available partners.")
 
 def remove_partner_from_workspace(clerk_user_id, workspace_id, partner_user_id):
     """Remove a partner from workspace"""

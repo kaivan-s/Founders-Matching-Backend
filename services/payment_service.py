@@ -11,12 +11,14 @@ POLAR_ACCESS_TOKEN = os.getenv('POLAR_ACCESS_TOKEN')
 
 def create_checkout_session(clerk_user_id, product_id, credits_amount):
     """
-    Create a Polar checkout session
+    DEPRECATED: Credit purchase system has been removed in favor of plan-based features.
+    This function is kept for backward compatibility but should not be used for new integrations.
+    Use subscription_service for plan subscriptions instead.
     
     Args:
         clerk_user_id: The Clerk user ID
-        product_id: The Polar product ID for the credit package
-        credits_amount: The number of credits being purchased (for reference)
+        product_id: The Polar product ID for the credit package (deprecated)
+        credits_amount: The number of credits being purchased (deprecated, ignored)
     
     Returns:
         dict: Checkout session data with checkout_url
@@ -82,11 +84,13 @@ def verify_webhook_signature(payload, signature):
 
 def handle_webhook(webhook_data):
     """
-    Handle Polar webhook events
+    DEPRECATED: Handle Polar webhook events for legacy credit purchases.
+    Credits system has been removed - this is kept for backward compatibility.
+    Webhooks will process payments but will NOT add credits.
     
     Events handled:
-    - checkout.created: When a checkout is created
-    - order.created: When an order is created and paid - this is when we add credits
+    - checkout.created: When a checkout is created (legacy)
+    - order.created: When an order is created and paid (legacy - no credits added)
     
     Returns:
         dict: Result of webhook processing
@@ -101,21 +105,17 @@ def handle_webhook(webhook_data):
         return {"status": "ignored", "message": f"Event {event_type} not handled"}
 
 def handle_checkout_created(webhook_data):
-    """Handle checkout.created webhook - store checkout info but don't add credits yet"""
+    """DEPRECATED: Handle checkout.created webhook for legacy credit purchases.
+    Credits system removed - payment is recorded but no credits are added."""
     try:
         # Extract checkout data from webhook
         data = webhook_data.get('data', {})
-        
-        # Get checkout ID
         checkout_id = data.get('id')
-        
-        # Get custom metadata (clerk_user_id and credits_amount)
         metadata = data.get('metadata', {})
         clerk_user_id = metadata.get('clerk_user_id')
-        credits_amount = int(metadata.get('credits_amount', 0))
         
-        if not clerk_user_id or not credits_amount:
-            return {"status": "error", "message": "Missing metadata"}
+        if not clerk_user_id:
+            return {"status": "error", "message": "Missing clerk_user_id"}
         
         # Get payment details
         product_id = data.get('product_id')
@@ -123,83 +123,43 @@ def handle_checkout_created(webhook_data):
         currency = data.get('currency', 'USD')
         customer_email = data.get('customer_email')
         
-        # Add credits to user account
         supabase = get_supabase()
         
-        # Get user's founder profile
-        profile = supabase.table('founders').select('id, credits').eq('clerk_user_id', clerk_user_id).execute()
+        # Get user's founder profile (no credits needed)
+        profile = supabase.table('founders').select('id').eq('clerk_user_id', clerk_user_id).execute()
         
         if not profile.data:
             return {"status": "error", "message": "User profile not found"}
         
         founder_id = profile.data[0]['id']
-        current_credits = profile.data[0].get('credits') or 0
         
-        # Store payment record
+        # Store payment record (for history) but don't add credits
         payment_data = {
             'clerk_user_id': clerk_user_id,
             'founder_id': founder_id,
             'polar_checkout_id': checkout_id,
-            'polar_order_id': None,  # Will be updated when order.created fires
+            'polar_order_id': None,
             'product_id': product_id,
-            'credits_amount': credits_amount,
-            'amount_paid': float(amount) / 100 if amount else None,  # Convert cents to dollars
+            'credits_amount': 0,  # No credits system
+            'amount_paid': float(amount) / 100 if amount else None,
             'currency': currency,
             'status': 'succeeded',
             'customer_email': customer_email,
-            'metadata': {'credits_added': False},
+            'metadata': {'legacy_credit_purchase': True, 'credits_added': False},
             'webhook_data': webhook_data
         }
         
         # Check if payment record already exists
-        existing_payment = supabase.table('payments').select('id, metadata').eq('polar_checkout_id', checkout_id).execute()
+        existing_payment = supabase.table('payments').select('id').eq('polar_checkout_id', checkout_id).execute()
         
-        if existing_payment.data:
-            # Update existing payment record
-            payment_id = existing_payment.data[0]['id']
-            metadata = existing_payment.data[0].get('metadata', {})
-            credits_added = metadata.get('credits_added', False)
-            
-            if not credits_added:
-                # Add credits for the first time
-                new_credits = current_credits + credits_amount
-                
-                # Update credits
-                result = supabase.table('founders').update({
-                    'credits': new_credits
-                }).eq('id', founder_id).execute()
-                
-                if not result.data:
-                    return {"status": "error", "message": "Failed to update credits"}
-                
-                # Mark credits as added
-                payment_data['metadata'] = {'credits_added': True}
-                supabase.table('payments').update(payment_data).eq('id', payment_id).execute()
-        else:
-            # Add credits
-            new_credits = current_credits + credits_amount
-            
-            # Update credits
-            result = supabase.table('founders').update({
-                'credits': new_credits
-            }).eq('id', founder_id).execute()
-            
-            if not result.data:
-                return {"status": "error", "message": "Failed to update credits"}
-            
-            # Mark credits as added
-            payment_data['metadata'] = {'credits_added': True}
-            
-            # Create new payment record
-            payment_result = supabase.table('payments').insert(payment_data).execute()
-            if payment_result.data:
-                pass
+        if not existing_payment.data:
+            # Create payment record
+            supabase.table('payments').insert(payment_data).execute()
         
         return {
             "status": "success",
-            "message": "Payment processed successfully",
+            "message": "Payment processed (legacy credit purchase - no credits added)",
             "clerk_user_id": clerk_user_id,
-            "credits_added": credits_amount,
             "checkout_id": checkout_id
         }
         
@@ -208,13 +168,12 @@ def handle_checkout_created(webhook_data):
         return {"status": "error", "message": str(e)}
 
 def handle_order_created(webhook_data):
-    """Handle order.created webhook - this is when payment succeeds, add credits here"""
+    """DEPRECATED: Handle order.created webhook for legacy credit purchases.
+    Credits system removed - payment is recorded but no credits are added."""
     try:
         # Extract order data
         data = webhook_data.get('data', {})
         order_id = data.get('id')
-        
-        # Get product and pricing info
         product_id = data.get('product_id')
         amount = data.get('amount', 0)
         currency = data.get('currency', 'USD')
@@ -222,101 +181,52 @@ def handle_order_created(webhook_data):
         # Get custom metadata from order
         metadata = data.get('metadata', {})
         clerk_user_id = metadata.get('clerk_user_id')
-        credits_amount = int(metadata.get('credits_amount', 0))
         
-        if not clerk_user_id or not credits_amount:
-            return {"status": "error", "message": "Missing metadata in order"}
+        if not clerk_user_id:
+            return {"status": "error", "message": "Missing clerk_user_id in order"}
         
-        # Get customer info
         customer_email = data.get('customer', {}).get('email') if isinstance(data.get('customer'), dict) else None
         
         supabase = get_supabase()
         
-        # Get user's founder profile
-        profile = supabase.table('founders').select('id, credits').eq('clerk_user_id', clerk_user_id).execute()
+        # Get user's founder profile (no credits needed)
+        profile = supabase.table('founders').select('id').eq('clerk_user_id', clerk_user_id).execute()
         
         if not profile.data:
             return {"status": "error", "message": "User profile not found"}
         
         founder_id = profile.data[0]['id']
-        current_credits = profile.data[0].get('credits') or 0
         
         # Check if order already processed
-        existing_payment = supabase.table('payments').select('id, metadata').eq('polar_order_id', order_id).execute()
+        existing_payment = supabase.table('payments').select('id').eq('polar_order_id', order_id).execute()
         
         if existing_payment.data:
-            # Order already exists
-            payment_id = existing_payment.data[0]['id']
-            metadata_check = existing_payment.data[0].get('metadata', {})
-            credits_added = metadata_check.get('credits_added', False)
-            
-            if credits_added:
-                return {"status": "success", "message": "Order already processed"}
-            
-            # Credits not yet added, add them now
-            new_credits = current_credits + credits_amount
-            
-            result = supabase.table('founders').update({
-                'credits': new_credits
-            }).eq('id', founder_id).execute()
-            
-            if not result.data:
-                return {"status": "error", "message": "Failed to update credits"}
-            
-            # Mark credits as added
-            supabase.table('payments').update({
-                'metadata': {'credits_added': True}
-            }).eq('id', payment_id).execute()
-            
-            
-            return {
-                "status": "success",
-                "message": "Credits added successfully",
-                "clerk_user_id": clerk_user_id,
-                "credits_added": credits_amount,
-                "order_id": order_id
-            }
-        else:
-            # New order - create payment record and add credits
-            new_credits = current_credits + credits_amount
-            
-            # Add credits
-            result = supabase.table('founders').update({
-                'credits': new_credits
-            }).eq('id', founder_id).execute()
-            
-            if not result.data:
-                return {"status": "error", "message": "Failed to update credits"}
-            
-            # Create payment record
-            payment_data = {
-                'clerk_user_id': clerk_user_id,
-                'founder_id': founder_id,
-                'polar_order_id': order_id,
-                'polar_checkout_id': data.get('checkout', {}).get('id') if isinstance(data.get('checkout'), dict) else None,
-                'product_id': product_id,
-                'credits_amount': credits_amount,
-                'amount_paid': float(amount) / 100 if amount else None,
-                'currency': currency,
-                'status': 'succeeded',
-                'customer_email': customer_email,
-                'metadata': {'credits_added': True},
-                'webhook_data': webhook_data
-            }
-            
-            payment_result = supabase.table('payments').insert(payment_data).execute()
-            
-            if payment_result.data:
-                pass
-            
-            return {
-                "status": "success",
-                "message": "Payment processed and credits added",
-                "clerk_user_id": clerk_user_id,
-                "credits_added": credits_amount,
-                "order_id": order_id
-            }
+            return {"status": "success", "message": "Order already processed (legacy - no credits)"}
         
+        # Create payment record (for history) but don't add credits
+        payment_data = {
+            'clerk_user_id': clerk_user_id,
+            'founder_id': founder_id,
+            'polar_order_id': order_id,
+            'polar_checkout_id': data.get('checkout', {}).get('id') if isinstance(data.get('checkout'), dict) else None,
+            'product_id': product_id,
+            'credits_amount': 0,  # No credits system
+            'amount_paid': float(amount) / 100 if amount else None,
+            'currency': currency,
+            'status': 'succeeded',
+            'customer_email': customer_email,
+            'metadata': {'legacy_credit_purchase': True, 'credits_added': False},
+            'webhook_data': webhook_data
+        }
+        
+        supabase.table('payments').insert(payment_data).execute()
+        
+        return {
+            "status": "success",
+            "message": "Payment processed (legacy credit purchase - no credits added)",
+            "clerk_user_id": clerk_user_id,
+            "order_id": order_id
+        }
     except Exception as e:
         error_trace = traceback.format_exc()
         return {"status": "error", "message": str(e)}
@@ -358,38 +268,5 @@ def get_payment_by_checkout_id(checkout_id):
         return payment.data[0]
     return None
 
-def add_credits_manually(clerk_user_id, credits_amount):
-    """
-    Manually add credits to a user account (for testing or admin use)
-    
-    Args:
-        clerk_user_id: The Clerk user ID
-        credits_amount: Number of credits to add
-    
-    Returns:
-        dict: Updated credits information
-    """
-    supabase = get_supabase()
-    
-    # Get current credits
-    profile = supabase.table('founders').select('credits').eq('clerk_user_id', clerk_user_id).execute()
-    
-    if not profile.data:
-        raise ValueError("User profile not found")
-    
-    current_credits = profile.data[0].get('credits') or 0
-    new_credits = current_credits + credits_amount
-    
-    # Update credits
-    result = supabase.table('founders').update({
-        'credits': new_credits
-    }).eq('clerk_user_id', clerk_user_id).execute()
-    
-    if not result.data:
-        raise ValueError("Failed to update credits")
-    
-    return {
-        "credits_added": credits_amount,
-        "previous_balance": current_credits,
-        "new_balance": new_credits
-    }
+# DEPRECATED: add_credits_manually function removed - credits system no longer exists
+# Use plan_service.update_founder_plan() for plan upgrades instead
