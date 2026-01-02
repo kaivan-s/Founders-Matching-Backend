@@ -93,21 +93,48 @@ PARTNER_PRICING = {
 }
 
 def _get_founder_id(clerk_user_id: str) -> str:
-    """Helper to get founder ID from clerk_user_id"""
+    """Helper to get founder ID from clerk_user_id - auto-creates minimal record if missing"""
     supabase = get_supabase()
     user_profile = supabase.table('founders').select('id').eq('clerk_user_id', clerk_user_id).execute()
+    
     if not user_profile.data:
-        raise ValueError("Founder not found")
+        # Auto-create minimal founder record for authenticated users
+        # This prevents 400 errors when user is signed in but hasn't completed onboarding
+        # The record will be updated with full details during onboarding
+        founder_data = {
+            'clerk_user_id': clerk_user_id,
+            'name': '',  # Will be updated during onboarding
+            'email': '',  # Will be updated during onboarding
+            'purpose': None,  # Will be set during onboarding
+            'location': '',
+            'looking_for': '',
+            'skills': [],
+            'onboarding_completed': False,  # Still requires onboarding
+            'plan': 'FREE',
+        }
+        
+        result = supabase.table('founders').insert(founder_data).execute()
+        if not result.data:
+            raise ValueError("Failed to auto-create founder record")
+        
+        return result.data[0]['id']
+    
     return user_profile.data[0]['id']
 
 def get_founder_plan(clerk_user_id: str) -> Dict[str, Any]:
     """Get founder's current plan"""
-    founder_id = _get_founder_id(clerk_user_id)
+    try:
+        founder_id = _get_founder_id(clerk_user_id)
+    except ValueError:
+        # User hasn't completed onboarding - return FREE plan as default
+        return FOUNDER_PLANS['FREE'].copy()
+    
     supabase = get_supabase()
     
     founder = supabase.table('founders').select('plan, subscription_status, subscription_current_period_end').eq('id', founder_id).execute()
     if not founder.data:
-        raise ValueError("Founder not found")
+        # Founder record exists but query failed - return FREE plan
+        return FOUNDER_PLANS['FREE'].copy()
     
     plan_id = founder.data[0].get('plan', 'FREE')
     plan_config = FOUNDER_PLANS.get(plan_id, FOUNDER_PLANS['FREE']).copy()
@@ -290,7 +317,17 @@ def log_plan_telemetry(user_id: str, event_type: str, from_plan: Optional[str] =
 
 def get_partner_billing_profile(clerk_user_id: str) -> Dict[str, Any]:
     """Get accountability partner billing profile"""
-    founder_id = _get_founder_id(clerk_user_id)
+    try:
+        founder_id = _get_founder_id(clerk_user_id)
+    except ValueError:
+        # User doesn't have founder record - return default empty profile
+        return {
+            'onboarding_paid': False,
+            'renewal_paid_until': None,
+            'monthly_rate_usd': None,
+            'is_discoverable': False,
+        }
+    
     supabase = get_supabase()
     
     # Use monthly_rate_inr column to store USD values (column name is legacy)
