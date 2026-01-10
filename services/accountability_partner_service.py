@@ -456,7 +456,7 @@ def get_partner_requests(clerk_user_id, status=None):
     supabase = get_supabase()
     
     query = supabase.table('partner_requests').select(
-        '*, workspace:workspaces!workspace_id(id, title, stage, match_id, project1_id, project2_id), founder:founders!founder_user_id(id, name)'
+        '*, workspace:workspaces!workspace_id(id, title, stage, match_id, match:matches!match_id(project_id)), founder:founders!founder_user_id(id, name)'
     ).eq('partner_user_id', founder_id)
     
     if status:
@@ -493,37 +493,29 @@ def get_partner_requests(clerk_user_id, status=None):
                 'founders': [{'name': p.get('founders', {}).get('name', 'Unknown')} for p in (participants.data or [])]
             }
             
-            # Get match/project info if available
+            # Get match/project info if available (one project, two founders)
             workspace_data = request.get('workspace', {})
             match_id = workspace_data.get('match_id') if isinstance(workspace_data, dict) else None
-            project1_id = workspace_data.get('project1_id') if isinstance(workspace_data, dict) else None
-            project2_id = workspace_data.get('project2_id') if isinstance(workspace_data, dict) else None
+            # Get project_id from match (workspaces doesn't have project_id column yet)
+            match_data = workspace_data.get('match', {}) if isinstance(workspace_data, dict) else {}
+            project_id = match_data.get('project_id') if isinstance(match_data, dict) else None
             
-            # Fetch project details if project IDs exist
+            # Fetch project details if project ID exists
             projects_info = []
-            if project1_id:
-                project1 = supabase.table('projects').select('id, title, description, stage').eq('id', project1_id).execute()
-                if project1.data:
-                    projects_info.append(project1.data[0])
+            if project_id:
+                project = supabase.table('projects').select('id, title, description, stage').eq('id', project_id).execute()
+                if project.data:
+                    projects_info.append(project.data[0])
             
-            if project2_id:
-                project2 = supabase.table('projects').select('id, title, description, stage').eq('id', project2_id).execute()
-                if project2.data:
-                    projects_info.append(project2.data[0])
-            
-            # If no projects but match exists, try to get projects from match
+            # If no project but match exists, try to get project from match
             if not projects_info and match_id:
-                match = supabase.table('matches').select('project1_id, project2_id').eq('id', match_id).execute()
+                match = supabase.table('matches').select('project_id').eq('id', match_id).execute()
                 if match.data:
                     match_data = match.data[0]
-                    if match_data.get('project1_id'):
-                        project1 = supabase.table('projects').select('id, title, description, stage').eq('id', match_data['project1_id']).execute()
-                        if project1.data:
-                            projects_info.append(project1.data[0])
-                    if match_data.get('project2_id'):
-                        project2 = supabase.table('projects').select('id, title, description, stage').eq('id', match_data['project2_id']).execute()
-                        if project2.data:
-                            projects_info.append(project2.data[0])
+                    if match_data.get('project_id'):
+                        project = supabase.table('projects').select('id, title, description, stage').eq('id', match_data['project_id']).execute()
+                        if project.data:
+                            projects_info.append(project.data[0])
             
             request['workspace_details'] = {
                 'kpis': kpi_summary,
@@ -545,12 +537,12 @@ def get_active_workspaces(clerk_user_id):
     # Get all workspaces where user is a partner (role = ACCOUNTABILITY_PARTNER)
     try:
         participants = supabase.table('workspace_participants').select(
-            'workspace_id, role, workspace:workspaces!workspace_id(id, title, stage, match_id, project1_id, project2_id)'
+            'workspace_id, role, workspace:workspaces!workspace_id(id, title, stage, match_id, match:matches!match_id(project_id))'
         ).eq('user_id', founder_id).eq('role', 'ACCOUNTABILITY_PARTNER').execute()
     except Exception:
         # Fallback if role column doesn't exist yet - just get all workspaces
         participants = supabase.table('workspace_participants').select(
-            'workspace_id, workspace:workspaces!workspace_id(id, title, stage, match_id, project1_id, project2_id)'
+            'workspace_id, workspace:workspaces!workspace_id(id, title, stage, match_id, match:matches!match_id(project_id))'
         ).eq('user_id', founder_id).execute()
     
     if not participants.data:
@@ -567,34 +559,26 @@ def get_active_workspaces(clerk_user_id):
         if not workspace_id:
             continue
         
-        # Get project information if available
+        # Get project information if available (one project, two founders)
         projects_info = []
-        project1_id = workspace.get('project1_id')
-        project2_id = workspace.get('project2_id')
+        # Get project_id from match (workspaces doesn't have project_id column yet)
+        match_data = workspace.get('match', {})
+        project_id = match_data.get('project_id') if isinstance(match_data, dict) else None
         
-        if project1_id:
-            project1 = supabase.table('projects').select('id, title, description, stage').eq('id', project1_id).execute()
-            if project1.data:
-                projects_info.append(project1.data[0])
+        if project_id:
+            project = supabase.table('projects').select('id, title, description, stage').eq('id', project_id).execute()
+            if project.data:
+                projects_info.append(project.data[0])
         
-        if project2_id:
-            project2 = supabase.table('projects').select('id, title, description, stage').eq('id', project2_id).execute()
-            if project2.data:
-                projects_info.append(project2.data[0])
-        
-        # If no projects but match exists, try to get projects from match
+        # If no project but match_id exists, try to get project from match directly
         if not projects_info and workspace.get('match_id'):
-            match = supabase.table('matches').select('project1_id, project2_id').eq('id', workspace.get('match_id')).execute()
+            match = supabase.table('matches').select('project_id').eq('id', workspace.get('match_id')).execute()
             if match.data:
                 match_data = match.data[0]
-                if match_data.get('project1_id'):
-                    project1 = supabase.table('projects').select('id, title, description, stage').eq('id', match_data['project1_id']).execute()
-                    if project1.data:
-                        projects_info.append(project1.data[0])
-                if match_data.get('project2_id'):
-                    project2 = supabase.table('projects').select('id, title, description, stage').eq('id', match_data['project2_id']).execute()
-                    if project2.data:
-                        projects_info.append(project2.data[0])
+                if match_data.get('project_id'):
+                    project = supabase.table('projects').select('id, title, description, stage').eq('id', match_data['project_id']).execute()
+                    if project.data:
+                        projects_info.append(project.data[0])
         
         workspaces.append({
             'id': workspace_id,

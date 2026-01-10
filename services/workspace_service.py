@@ -84,16 +84,21 @@ def create_workspace_for_match(match_id, founder1_clerk_id=None, founder2_clerk_
     if existing.data:
         return existing.data[0]['id']
     
-    # Get match to find founders and projects
-    match = supabase.table('matches').select('founder1_id, founder2_id, project1_id, project2_id').eq('id', match_id).execute()
+    # Get match to find founders and project (one project, two founders)
+    match = supabase.table('matches').select('founder1_id, founder2_id, project_id').eq('id', match_id).execute()
     if not match.data:
         raise ValueError("Match not found")
     
     match_data = match.data[0]
     founder1_id = match_data['founder1_id']
     founder2_id = match_data['founder2_id']
-    project1_id = match_data.get('project1_id')
-    project2_id = match_data.get('project2_id')
+    project_id = match_data.get('project_id')
+    
+    # Validate project exists if project_id is provided
+    if project_id:
+        project_check = supabase.table('projects').select('id').eq('id', project_id).execute()
+        if not project_check.data:
+            raise ValueError(f"Project {project_id} not found - cannot create workspace")
     
     # Check workspace limits for both founders
     # Fetch clerk IDs from founder IDs if not provided
@@ -131,17 +136,16 @@ def create_workspace_for_match(match_id, founder1_clerk_id=None, founder2_clerk_
         # If check fails for other reasons, log but don't block workspace creation (graceful degradation)
         pass
     
-    # Create workspace with project information if available
+    # Create workspace with project information if available (one project, two founders)
     workspace_data = {
         'match_id': match_id,
         'stage': 'idea'
     }
     
-    # Add project IDs if this is a project-based match
-    if project1_id:
-        workspace_data['project1_id'] = project1_id
-    if project2_id:
-        workspace_data['project2_id'] = project2_id
+    # Add project_id if this is a project-based match
+    # After migration 006_add_project_id_to_workspaces.sql, this column will exist
+    if project_id:
+        workspace_data['project_id'] = project_id
     
     workspace = supabase.table('workspaces').insert(workspace_data).execute()
     
@@ -175,11 +179,10 @@ def list_user_workspaces(clerk_user_id):
     
     workspace_ids = [p['workspace_id'] for p in participants.data]
     
-    # Get workspace details with project and match info
+    # Get workspace details with project and match info (one project, two founders)
+    # Get project_id from matches table since workspaces doesn't have project_id column yet
     workspaces = supabase.table('workspaces').select(
-        '*, project1:projects!project1_id(*, founder:founders!founder_id(id, name, clerk_user_id)), '
-        'project2:projects!project2_id(*, founder:founders!founder_id(id, name, clerk_user_id)), '
-        'match:matches!match_id(founder1_id, founder2_id)'
+        '*, match:matches!match_id(founder1_id, founder2_id, project_id, project:projects!project_id(*, founder:founders!founder_id(id, name, clerk_user_id)))'
     ).in_('id', workspace_ids).execute()
     
     if not workspaces.data:
@@ -204,12 +207,12 @@ def list_user_workspaces(clerk_user_id):
             for founder in founders_result.data:
                 founders_map[founder['id']] = founder
     
-    # Format workspaces with project and founder info
+    # Format workspaces with project and founder info (one project, two founders)
     formatted_workspaces = []
     for workspace in workspaces.data:
-        project1 = workspace.get('project1')
-        project2 = workspace.get('project2')
         match = workspace.get('match', {})
+        # Get project from match (since workspaces doesn't have project_id column yet)
+        project = match.get('project') if match else None
         
         # Determine the other founder from the match (using pre-fetched founders map)
         other_founder = None
@@ -224,33 +227,27 @@ def list_user_workspaces(clerk_user_id):
                 # Current user is founder2, so other founder is founder1
                 other_founder = founders_map.get(founder1_id)
         
-        # Build project title
-        project_titles = []
-        founder_names = []
+        # Build project title (one project, two founders)
+        project_title = None
+        founder_name = None
         
-        if project1:
-            project_titles.append(project1.get('title', 'Untitled Project'))
-            if project1.get('founder'):
-                founder_names.append(project1['founder'].get('name', 'Unknown'))
+        if project:
+            project_title = project.get('title', 'Untitled Project')
+            if project.get('founder'):
+                founder_name = project['founder'].get('name', 'Unknown')
         
-        if project2:
-            project_titles.append(project2.get('title', 'Untitled Project'))
-            if project2.get('founder'):
-                founder_names.append(project2['founder'].get('name', 'Unknown'))
-        
-        # If no projects, use workspace title or default
-        if not project_titles:
-            project_titles.append(workspace.get('title', 'Collaboration'))
+        # If no project, use workspace title or default
+        if not project_title:
+            project_title = workspace.get('title', 'Collaboration')
         
         formatted_workspaces.append({
             'id': workspace['id'],
             'title': workspace.get('title', 'Collaboration'),
-            'project_title': ' ↔ '.join(project_titles) if len(project_titles) > 1 else project_titles[0] if project_titles else 'Collaboration',
-            'founder_names': founder_names if founder_names else [other_founder.get('name', 'Unknown')] if other_founder else ['Unknown'],
+            'project_title': project_title,
+            'founder_names': [founder_name] if founder_name else [other_founder.get('name', 'Unknown')] if other_founder else ['Unknown'],
             'stage': workspace.get('stage', 'idea'),
             'created_at': workspace.get('created_at'),
-            'project1': project1,
-            'project2': project2,
+            'project': project,
             'match_id': workspace.get('match_id'),
             'other_founder': other_founder
         })

@@ -210,32 +210,58 @@ def get_available_founders(clerk_user_id, filters=None, mode='founders'):
             # Get project IDs for efficient filtering
             project_ids = [p['id'] for p in all_projects.data]
             
-            # Single query to get projects with workspaces (only for current batch)
-            # Use separate queries for project1_id and project2_id to avoid UUID parsing issues
+            # Optimized: Single query to get workspace project_ids (after migration adds project_id to workspaces)
+            # Also get matched project_ids from matches table (defense in depth)
             workspace_project_ids = set()
+            matched_project_ids = set()
             if project_ids:
-                # Query for project1_id matches
-                workspace_projects_1 = supabase.table('workspaces').select('project1_id').in_('project1_id', project_ids).execute()
-                if workspace_projects_1.data:
-                    for wp in workspace_projects_1.data:
-                        if wp.get('project1_id'):
-                            workspace_project_ids.add(wp['project1_id'])
+                # Try direct query on workspaces.project_id first (after migration)
+                try:
+                    workspaces_direct = supabase.table('workspaces').select('project_id').in_('project_id', project_ids).execute()
+                    if workspaces_direct.data:
+                        for wp in workspaces_direct.data:
+                            if wp.get('project_id'):
+                                workspace_project_ids.add(wp['project_id'])
+                except Exception:
+                    # Fallback: If project_id column doesn't exist yet, use match_id lookup
+                    matches = supabase.table('matches').select('id, project_id').in_('project_id', project_ids).execute()
+                    if matches.data:
+                        match_ids = [m['id'] for m in matches.data]
+                        # Extract matched project IDs (defense in depth - even if workspace is deleted, match still exists)
+                        for m in matches.data:
+                            if m.get('project_id'):
+                                matched_project_ids.add(m['project_id'])
+                        
+                        # Check which matches have workspaces
+                        if match_ids:
+                            workspaces = supabase.table('workspaces').select('match_id').in_('match_id', match_ids).execute()
+                            if workspaces.data:
+                                # Map workspace match_ids back to project_ids
+                                match_to_project = {m['id']: m['project_id'] for m in matches.data if m.get('project_id')}
+                                for wp in workspaces.data:
+                                    match_id = wp.get('match_id')
+                                    if match_id and match_id in match_to_project:
+                                        workspace_project_ids.add(match_to_project[match_id])
                 
-                # Query for project2_id matches
-                workspace_projects_2 = supabase.table('workspaces').select('project2_id').in_('project2_id', project_ids).execute()
-                if workspace_projects_2.data:
-                    for wp in workspace_projects_2.data:
-                        if wp.get('project2_id'):
-                            workspace_project_ids.add(wp['project2_id'])
+                # Get matched project_ids from matches table (defense in depth - even if workspace is deleted, match still exists)
+                # Only if we didn't already get them in the fallback
+                if not matched_project_ids:
+                    matches = supabase.table('matches').select('project_id').in_('project_id', project_ids).execute()
+                    if matches.data:
+                        for m in matches.data:
+                            if m.get('project_id'):
+                                matched_project_ids.add(m['project_id'])
             
             # Single query to get swipes by current user (only for current batch)
             # Only query if we have valid project IDs
+            # Only filter RIGHT swipes - allow re-swiping after left swipe
             swiped_combinations = set()
             if project_ids:
-                user_swipes = supabase.table('swipes').select('project_id, swiped_id').eq('swiper_id', current_user_id).in_('project_id', project_ids).execute()
+                user_swipes = supabase.table('swipes').select('project_id, swiped_id, swipe_type').eq('swiper_id', current_user_id).in_('project_id', project_ids).execute()
                 if user_swipes.data:
                     for swipe in user_swipes.data:
-                        if swipe.get('project_id'):
+                        # Only filter if it was a right swipe (allow re-swiping after left swipe)
+                        if swipe.get('project_id') and swipe.get('swipe_type') == 'right':
                             swiped_combinations.add((swipe['project_id'], swipe['swiped_id']))
             
             
@@ -245,8 +271,9 @@ def get_available_founders(clerk_user_id, filters=None, mode='founders'):
                 project_id = project['id']
                 project_owner_id = project['founder_id']
                 
-                # Skip if project has workspace or already swiped
+                # Skip if project has workspace, has match, or already right-swiped
                 if (project_id not in workspace_project_ids and 
+                    project_id not in matched_project_ids and
                     (project_id, project_owner_id) not in swiped_combinations):
                     available_projects.append(project)
         

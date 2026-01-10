@@ -100,20 +100,32 @@ def search_projects(query_params: Dict[str, Any], current_user_id: str) -> Dict[
     # Get project IDs for filtering out already swiped/workspaced projects
     project_ids = [p['id'] for p in all_projects.data]
     
-    # Get projects that already have workspaces (exclude them)
+    # Get projects that already have workspaces (exclude them) - optimized after migration
+    # One project per workspace (one project, two founders)
     workspace_project_ids = set()
     if project_ids:
-        workspace_projects_1 = supabase.table('workspaces').select('project1_id').in_('project1_id', project_ids).execute()
-        if workspace_projects_1.data:
-            for wp in workspace_projects_1.data:
-                if wp.get('project1_id'):
-                    workspace_project_ids.add(wp['project1_id'])
-        
-        workspace_projects_2 = supabase.table('workspaces').select('project2_id').in_('project2_id', project_ids).execute()
-        if workspace_projects_2.data:
-            for wp in workspace_projects_2.data:
-                if wp.get('project2_id'):
-                    workspace_project_ids.add(wp['project2_id'])
+        # Try direct query on workspaces.project_id first (after migration)
+        try:
+            workspaces_direct = supabase.table('workspaces').select('project_id').in_('project_id', project_ids).execute()
+            if workspaces_direct.data:
+                for wp in workspaces_direct.data:
+                    if wp.get('project_id'):
+                        workspace_project_ids.add(wp['project_id'])
+        except Exception:
+            # Fallback: If project_id column doesn't exist yet, use match_id lookup
+            matches = supabase.table('matches').select('id, project_id').in_('project_id', project_ids).execute()
+            if matches.data:
+                match_ids = [m['id'] for m in matches.data]
+                # Get workspaces for these matches
+                if match_ids:
+                    workspaces = supabase.table('workspaces').select('match_id').in_('match_id', match_ids).execute()
+                    if workspaces.data:
+                        # Map match_ids back to project_ids
+                        match_to_project = {m['id']: m['project_id'] for m in matches.data if m.get('project_id')}
+                        for wp in workspaces.data:
+                            match_id = wp.get('match_id')
+                            if match_id and match_id in match_to_project:
+                                workspace_project_ids.add(match_to_project[match_id])
     
     # Get projects already swiped by current user
     swiped_combinations = set()

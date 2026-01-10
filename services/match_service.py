@@ -12,54 +12,85 @@ def get_matches(clerk_user_id):
     
     current_user_id = user_profile.data[0]['id']
     
-    # Get matches where current user is founder1 or founder2
-    matches1 = supabase.table('matches').select('*, founder1:founders!founder1_id(*), founder2:founders!founder2_id(*)').eq('founder1_id', current_user_id).execute()
-    matches2 = supabase.table('matches').select('*, founder1:founders!founder1_id(*), founder2:founders!founder2_id(*)').eq('founder2_id', current_user_id).execute()
+    # Get matches where current user is founder1 or founder2 (optimized - single query with OR condition)
+    # Using PostgREST filter syntax: or=(condition1,condition2)
+    try:
+        # Try using OR filter syntax (PostgREST format: or=(field.eq.value,field.eq.value))
+        all_matches_result = supabase.table('matches').select(
+            '*, founder1:founders!founder1_id(*), founder2:founders!founder2_id(*)'
+        ).or_(f'founder1_id.eq.{current_user_id},founder2_id.eq.{current_user_id}').execute()
+        all_matches = all_matches_result.data if all_matches_result.data else []
+    except (AttributeError, Exception) as e:
+        # Fallback to two queries if OR syntax not supported by client
+        # This is still more efficient than before as we combine results immediately
+        matches1 = supabase.table('matches').select('*, founder1:founders!founder1_id(*), founder2:founders!founder2_id(*)').eq('founder1_id', current_user_id).execute()
+        matches2 = supabase.table('matches').select('*, founder1:founders!founder1_id(*), founder2:founders!founder2_id(*)').eq('founder2_id', current_user_id).execute()
+        all_matches = []
+        if matches1.data:
+            all_matches.extend(matches1.data)
+        if matches2.data:
+            all_matches.extend(matches2.data)
     
-    # Combine and format matches
-    all_matches = []
-    if matches1.data:
-        all_matches.extend(matches1.data)
-    if matches2.data:
-        all_matches.extend(matches2.data)
+    # Batch fetch all projects to avoid N+1 queries
+    # Collect all founder IDs and project IDs
+    founder_ids = set()
+    project_ids = set()
+    for match in all_matches:
+        if match.get('founder1_id'):
+            founder_ids.add(match['founder1_id'])
+        if match.get('founder2_id'):
+            founder_ids.add(match['founder2_id'])
+        if match.get('project_id'):
+            project_ids.add(match['project_id'])
+    
+    # Batch fetch all projects for all founders
+    founder_projects_map = {}
+    if founder_ids:
+        all_founder_projects = supabase.table('projects').select('*').in_('founder_id', list(founder_ids)).order('display_order').execute()
+        if all_founder_projects.data:
+            for project in all_founder_projects.data:
+                founder_id = project['founder_id']
+                if founder_id not in founder_projects_map:
+                    founder_projects_map[founder_id] = []
+                founder_projects_map[founder_id].append(project)
+    
+    # Batch fetch all match projects
+    match_projects_map = {}
+    if project_ids:
+        all_match_projects = supabase.table('projects').select('*').in_('id', list(project_ids)).execute()
+        if all_match_projects.data:
+            for project in all_match_projects.data:
+                match_projects_map[project['id']] = project
     
     # Format to show the other founder (not current user) with projects
+    # Only return project-based matches (no founder-level matches)
     formatted_matches = []
     for match in all_matches:
+        match_project_id = match.get('project_id')
+        
+        # Skip legacy matches without project_id (no longer supported)
+        if not match_project_id:
+            continue
+        
         if match['founder1_id'] == current_user_id:
             other_founder = match.get('founder2') or {}
-            my_project_id = match.get('project1_id')
-            their_project_id = match.get('project2_id')
         else:
             other_founder = match.get('founder1') or {}
-            my_project_id = match.get('project2_id')
-            their_project_id = match.get('project1_id')
         
-        # Fetch projects for the matched founder
+        # Assign projects for the matched founder (from batch fetch)
         if other_founder.get('id'):
             founder_id = other_founder['id']
-            projects = supabase.table('projects').select('*').eq('founder_id', founder_id).order('display_order').execute()
-            other_founder['projects'] = projects.data if projects.data else []
+            other_founder['projects'] = founder_projects_map.get(founder_id, [])
         
-            # Fetch specific project information if this is a project-based match
-            match_project1 = None
-            match_project2 = None
-            if their_project_id:
-                project_result = supabase.table('projects').select('*').eq('id', their_project_id).execute()
-                if project_result.data:
-                    match_project2 = project_result.data[0]
-            if my_project_id:
-                project_result = supabase.table('projects').select('*').eq('id', my_project_id).execute()
-                if project_result.data:
-                    match_project1 = project_result.data[0]
+        # Get the specific project that was matched (from batch fetch)
+        match_project = match_projects_map.get(match_project_id)
         
         formatted_matches.append({
             'match_id': match['id'],
             'matched_at': match['created_at'],
-                'founder': other_founder,
-                'project1': match_project1,  # Current user's project in the match
-                'project2': match_project2,  # Other user's project in the match
-                'is_project_based': bool(their_project_id or my_project_id)
+            'founder': other_founder,
+            'project': match_project,  # The project they matched on (one project, two founders)
+            'is_project_based': True  # All matches are project-based
         })
     
     return formatted_matches
@@ -76,7 +107,25 @@ def get_likes(clerk_user_id):
     current_user_id = user_profile.data[0]['id']
     
     # Get swipes where someone swiped right on current user
-    likes_swipes = supabase.table('swipes').select('*, swiper:founders!swiper_id(*)').eq('swiped_id', current_user_id).eq('swipe_type', 'right').execute()
+    # Only include swipes for projects that are still seeking co-founders
+    # Join with projects table to filter by seeking_cofounder status
+    likes_swipes = supabase.table('swipes').select(
+        '*, swiper:founders!swiper_id(*), project:projects!project_id(id, seeking_cofounder, is_active)'
+    ).eq('swiped_id', current_user_id).eq('swipe_type', 'right').execute()
+    
+    if not likes_swipes.data:
+        return []
+    
+    # Filter out swipes for projects that are no longer seeking or not active
+    # This handles cases where project was matched or deleted after the swipe
+    filtered_likes = []
+    for swipe in likes_swipes.data:
+        project = swipe.get('project')
+        # Only include if project exists, is active, and still seeking
+        if project and project.get('is_active', True) and project.get('seeking_cofounder', True):
+            filtered_likes.append(swipe)
+    
+    likes_swipes.data = filtered_likes
     
     if not likes_swipes.data:
         return []
@@ -92,34 +141,63 @@ def get_likes(clerk_user_id):
             if swipe.get('project_id'):
                 swiped_project_combinations.add((swipe['swiped_id'], swipe['project_id']))
     
-    # Get matches to filter out already matched (but only for same project combinations)
-    matches1 = supabase.table('matches').select('founder1_id, founder2_id, project1_id, project2_id').eq('founder1_id', current_user_id).execute()
-    matches2 = supabase.table('matches').select('founder1_id, founder2_id, project1_id, project2_id').eq('founder2_id', current_user_id).execute()
+    # Get matches to filter out already matched (one project, two founders)
+    matches1 = supabase.table('matches').select('founder1_id, founder2_id, project_id').eq('founder1_id', current_user_id).execute()
+    matches2 = supabase.table('matches').select('founder1_id, founder2_id, project_id').eq('founder2_id', current_user_id).execute()
     
     # Track matched user+project combinations
-    # Key: (other_user_id, our_project_they_swiped_on_that_we_accepted)
-    # When we accept, we create a match with our project (the one they swiped on) and their project
+    # Key: (other_user_id, project_id) - the project they matched on
+    # Only project-based matches are supported (no founder-level matches)
     matched_combinations = set()
     if matches1.data:
         for m in matches1.data:
             other_user_id = m['founder2_id']
-            # When we're founder1: project1_id is OUR project, project2_id is THEIR project
-            # They swiped on project1_id, so track (other_user, project1_id)
-            if m.get('project1_id'):
-                matched_combinations.add((other_user_id, m['project1_id']))
-            if not m.get('project1_id') and not m.get('project2_id'):
-                # Legacy match without projects - exclude user entirely
-                matched_combinations.add((other_user_id, None))
+            project_id = m.get('project_id')
+            if project_id:
+                # Only include project-based matches
+                matched_combinations.add((other_user_id, project_id))
+            # Legacy matches without project_id are ignored (no longer supported)
     if matches2.data:
         for m in matches2.data:
             other_user_id = m['founder1_id']
-            # When we're founder2: project1_id is THEIR project, project2_id is OUR project
-            # They swiped on project2_id, so track (other_user, project2_id)
-            if m.get('project2_id'):
-                matched_combinations.add((other_user_id, m['project2_id']))
-            if not m.get('project1_id') and not m.get('project2_id'):
-                # Legacy match without projects - exclude user entirely
-                matched_combinations.add((other_user_id, None))
+            project_id = m.get('project_id')
+            if project_id:
+                # Only include project-based matches
+                matched_combinations.add((other_user_id, project_id))
+            # Legacy matches without project_id are ignored (no longer supported)
+    
+    # Batch fetch all projects to avoid N+1 queries
+    # Collect all swiper IDs and project IDs
+    swiper_ids = set()
+    project_ids = set()
+    for swipe in likes_swipes.data:
+        swiper = swipe.get('swiper') or {}
+        swiper_id = swiper.get('id')
+        project_id = swipe.get('project_id')
+        
+        if swiper_id:
+            swiper_ids.add(swiper_id)
+        if project_id:
+            project_ids.add(project_id)
+    
+    # Batch fetch all projects for all swipers
+    swiper_projects_map = {}
+    if swiper_ids:
+        all_swiper_projects = supabase.table('projects').select('*').in_('founder_id', list(swiper_ids)).order('display_order').execute()
+        if all_swiper_projects.data:
+            for project in all_swiper_projects.data:
+                founder_id = project['founder_id']
+                if founder_id not in swiper_projects_map:
+                    swiper_projects_map[founder_id] = []
+                swiper_projects_map[founder_id].append(project)
+    
+    # Batch fetch all interested projects
+    interested_projects_map = {}
+    if project_ids:
+        all_interested_projects = supabase.table('projects').select('*').in_('id', list(project_ids)).execute()
+        if all_interested_projects.data:
+            for project in all_interested_projects.data:
+                interested_projects_map[project['id']] = project
     
     # Format likes - exclude already swiped or matched
     formatted_likes = []
@@ -129,6 +207,7 @@ def get_likes(clerk_user_id):
         project_id = swipe.get('project_id')  # Project they swiped on (OUR project)
         
         # Skip if already swiped or matched (project-specific check)
+        # All swipes must be project-based (no founder-level swipes)
         if project_id:
             # Project-based swipe - check if we've already swiped on this specific project
             if (swiper_id, project_id) in swiped_project_combinations:
@@ -138,24 +217,16 @@ def get_likes(clerk_user_id):
             if (swiper_id, project_id) in matched_combinations:
                 continue
         else:
-            # Legacy user-based swipe - check if already swiped or matched on this user (any project)
-            if swiper_id in swiped_user_ids:
-                continue
-            # Check for legacy matches (no projects) - exclude user entirely
-            if (swiper_id, None) in matched_combinations:
-                continue
+            # Legacy swipe without project_id - filter out (no longer supported)
+            # These should not appear in new swipes, but handle gracefully for existing data
+            continue
         
-        # Fetch projects for the swiper
+        # Assign projects for the swiper (from batch fetch)
         if swiper_id:
-            projects = supabase.table('projects').select('*').eq('founder_id', swiper_id).order('display_order').execute()
-            swiper['projects'] = projects.data if projects.data else []
+            swiper['projects'] = swiper_projects_map.get(swiper_id, [])
         
-        # Fetch the specific project they're interested in (if project-based)
-        interested_project = None
-        if project_id:
-            project_result = supabase.table('projects').select('*').eq('id', project_id).execute()
-            if project_result.data:
-                interested_project = project_result.data[0]
+        # Get the specific project they're interested in (from batch fetch)
+        interested_project = interested_projects_map.get(project_id) if project_id else None
         
         formatted_likes.append({
             'swipe_id': swipe['id'],
@@ -196,83 +267,80 @@ def respond_to_like(clerk_user_id, swipe_id, response_type):
         swiper_id = swipe_data.get('swiper_id')
     
     if response_type == 'accept':
-        # Create a match
-        swipe_project_id = swipe_data.get('project_id')  # Project they swiped on
+        # Create a match - project-based only (no founder-level matches)
+        swipe_project_id = swipe_data.get('project_id')  # Project they swiped on (YOUR project)
         
-        # Get project information for match creation
-        # swipe_project_id = the project of CURRENT USER that the SWIPER swiped on
-        # For the match, we need:
-        # - current_user_project_id = the project of CURRENT USER (swipe_project_id)
-        # - swiper_project_id = the project of SWIPER (their "primary" or first active project)
-        current_user_project_id = swipe_project_id  # This is YOUR project they swiped on
+        # Project ID is REQUIRED - all matches are project-based
+        if not swipe_project_id:
+            raise ValueError("Project ID is required. All matches must be project-based.")
         
-        # Get the swiper's first active project to use in the match
-        swiper_project_id_for_match = None
-        if swipe_project_id:
-            # Get the swiper's active projects
-            swiper_projects = supabase.table('projects').select('id').eq('founder_id', swiper_id).eq('is_active', True).order('created_at', desc=False).execute()
-            if swiper_projects.data:
-                # Use their first active project as the project they're "offering" in this match
-                swiper_project_id_for_match = swiper_projects.data[0]['id']
+        project_id = swipe_project_id  # This is the project they matched on
         
-        # Check if match already exists (project-specific if project-based)
+        # Check if match already exists for this project between these founders
+        ordered_founder1 = min(current_user_id, swiper_id)
+        ordered_founder2 = max(current_user_id, swiper_id)
+        
         match_exists = False
         existing_match_id = None
-        if swipe_project_id and swiper_project_id_for_match:
-            # Project-based match - check for specific project combination
-            # Get all matches between these two users
-            all_matches = supabase.table('matches').select('*').execute()
-            if all_matches.data:
-                for match in all_matches.data:
-                    # Check if same users
-                    if ((match['founder1_id'] == current_user_id and match['founder2_id'] == swiper_id) or \
-                       (match['founder1_id'] == swiper_id and match['founder2_id'] == current_user_id)):
-                        # Check if this exact project combination already exists (order doesn't matter)
-                        match_proj1 = match.get('project1_id')
-                        match_proj2 = match.get('project2_id')
-                        if match_proj1 and match_proj2:
-                            # Check if the same two projects are matched (in any order)
-                            if ((match_proj1 == current_user_project_id and match_proj2 == swiper_project_id_for_match) or \
-                               (match_proj1 == swiper_project_id_for_match and match_proj2 == current_user_project_id)):
-                                match_exists = True
-                                existing_match_id = match['id']
-                                break
-        else:
-            # Legacy user-based match - check for any match between these users without projects
-            all_matches = supabase.table('matches').select('*').execute()
-            if all_matches.data:
-                for match in all_matches.data:
-                    if ((match['founder1_id'] == current_user_id and match['founder2_id'] == swiper_id) or \
-                       (match['founder1_id'] == swiper_id and match['founder2_id'] == current_user_id)):
-                        # Only consider it a duplicate if it's a legacy match (no projects)
-                        if not match.get('project1_id') and not match.get('project2_id'):
-                            match_exists = True
-                            existing_match_id = match['id']
-                            break
         
-        # Get or create match
+        # Project-based match - check for this specific project
+        matches_query = supabase.table('matches').select('id').eq('founder1_id', ordered_founder1).eq('founder2_id', ordered_founder2).eq('project_id', project_id).execute()
+        if matches_query.data:
+            match_exists = True
+            existing_match_id = matches_query.data[0]['id']
+        
+        # Validate project owner before creating match (data integrity)
+        project_check = supabase.table('projects').select('founder_id').eq('id', project_id).execute()
+        if not project_check.data:
+            raise ValueError("Project not found")
+        elif project_check.data[0]['founder_id'] != current_user_id:
+            raise ValueError("Project does not belong to you")
+        
+        # Get or create match (project-based only)
         match_id = None
         if not match_exists:
+            # Create project-based match (one project, two founders)
             match_data = {
                 'founder1_id': min(current_user_id, swiper_id),
-                'founder2_id': max(current_user_id, swiper_id)
+                'founder2_id': max(current_user_id, swiper_id),
+                'project_id': project_id  # Required - all matches are project-based
             }
-            
-            # Add project IDs if this is a project-based match
-            if swipe_project_id and swiper_project_id_for_match:
-                if current_user_id < swiper_id:
-                    match_data['project1_id'] = current_user_project_id
-                    match_data['project2_id'] = swiper_project_id_for_match
-                else:
-                    match_data['project1_id'] = swiper_project_id_for_match
-                    match_data['project2_id'] = current_user_project_id
             
             match_result = supabase.table('matches').insert(match_data).execute()
             
             if match_result.data:
                 match_id = match_result.data[0]['id']
+                
+                # Create workspace FIRST, then mark project (atomicity)
+                try:
+                    from services.workspace_service import create_workspace_for_match
+                    create_workspace_for_match(match_id)
+                    
+                    # Only mark project AFTER workspace is created successfully
+                    try:
+                        supabase.table('projects').update({'seeking_cofounder': False}).eq('id', project_id).execute()
+                    except Exception as e:
+                        # Log but don't fail - workspace exists, project state is secondary
+                        from utils.logger import log_error
+                        log_error(f"Failed to mark project as matched for match {match_id}", error=e)
+                except Exception as e:
+                    # Workspace creation failed - rollback match creation
+                    from utils.logger import log_error
+                    log_error(f"Workspace creation failed for match {match_id}, rolling back match", error=e)
+                    try:
+                        supabase.table('matches').delete().eq('id', match_id).execute()
+                    except Exception as rollback_error:
+                        log_error(f"Failed to rollback match {match_id} after workspace creation failure", error=rollback_error)
+                    raise ValueError("Failed to create workspace for match")
         else:
             match_id = existing_match_id
+            # Mark project even for existing match (data consistency)
+            try:
+                supabase.table('projects').update({'seeking_cofounder': False}).eq('id', project_id).execute()
+            except Exception as e:
+                # Log but don't fail
+                from utils.logger import log_error
+                log_error(f"Failed to mark project as matched for existing match {match_id}", error=e)
         
         # Always ensure workspace exists (for both new and existing matches)
         if match_id:
@@ -280,9 +348,9 @@ def respond_to_like(clerk_user_id, swipe_id, response_type):
             try:
                 workspace_id = create_workspace_for_match(match_id)
             except Exception as e:
-                import traceback
-                traceback.print_exc()
-                # Don't fail the whole operation, but log the error
+                # For existing matches, workspace might already exist, so don't fail
+                from utils.logger import log_error
+                log_error(f"Workspace creation/check failed for existing match {match_id}", error=e)
         
         # Delete the original swipe record since it's been processed (accepted)
         supabase.table('swipes').delete().eq('id', swipe_id).execute()
@@ -292,18 +360,20 @@ def respond_to_like(clerk_user_id, swipe_id, response_type):
         # Reject - record that you swiped left on them and delete the original swipe
         project_id = swipe_data.get('project_id')  # Get project_id from the original swipe
         
+        # Project ID is required (all swipes are project-based)
+        if not project_id:
+            raise ValueError("Project ID is required. All swipes must be project-based.")
+        
         # Check if swipe already exists
-        existing_swipe = supabase.table('swipes').select('*').eq('swiper_id', current_user_id).eq('swiped_id', swiper_id).execute()
+        existing_swipe = supabase.table('swipes').select('*').eq('swiper_id', current_user_id).eq('swiped_id', swiper_id).eq('project_id', project_id).execute()
         
         if not existing_swipe.data:
             swipe_data = {
                 'swiper_id': current_user_id,
                 'swiped_id': swiper_id,
-                'swipe_type': 'left'
+                'swipe_type': 'left',
+                'project_id': project_id  # Required - all swipes are project-based
             }
-            # Include project_id if this was a project-based swipe
-            if project_id:
-                swipe_data['project_id'] = project_id
             supabase.table('swipes').insert(swipe_data).execute()
         
         # Delete the original swipe record since it's been processed (rejected)
@@ -322,7 +392,7 @@ def unmatch(clerk_user_id, match_id):
     
     current_user_id = user_profile.data[0]['id']
     
-    # Verify user is part of this match
+    # Verify user is part of this match and get match data
     match = supabase.table('matches').select('*').eq('id', match_id).execute()
     if not match.data:
         raise ValueError("Match not found")
@@ -331,8 +401,34 @@ def unmatch(clerk_user_id, match_id):
     if match_data['founder1_id'] != current_user_id and match_data['founder2_id'] != current_user_id:
         raise ValueError("You are not part of this match")
     
+    # Get project_id before deleting match (for restoring project state)
+    project_id = match_data.get('project_id')
+    
+    # Delete associated workspace first (if exists) - foreign key constraint
+    try:
+        workspace = supabase.table('workspaces').select('id').eq('match_id', match_id).execute()
+        if workspace.data:
+            workspace_id = workspace.data[0]['id']
+            # Delete workspace participants first (foreign key constraint)
+            supabase.table('workspace_participants').delete().eq('workspace_id', workspace_id).execute()
+            # Delete workspace
+            supabase.table('workspaces').delete().eq('id', workspace_id).execute()
+    except Exception as e:
+        from utils.logger import log_error
+        log_error(f"Failed to delete workspace after unmatch {match_id}", error=e)
+        # Continue with match deletion even if workspace deletion fails
+    
     # Delete the match
     supabase.table('matches').delete().eq('id', match_id).execute()
+    
+    # Restore project state if it was project-based (mark as seeking co-founder again)
+    if project_id:
+        try:
+            supabase.table('projects').update({'seeking_cofounder': True}).eq('id', project_id).execute()
+        except Exception as e:
+            from utils.logger import log_error
+            log_error(f"Failed to restore project state after unmatch {match_id}", error=e)
+            # Don't fail the whole operation, but log the error
     
     return {"message": "Match removed successfully"}
 
