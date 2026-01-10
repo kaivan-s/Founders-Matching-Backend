@@ -521,6 +521,41 @@ def get_likes():
         log_error("Error in get_likes", error=e, traceback_str=error_trace)
         return jsonify({"error": str(e)}), 500
 
+@app.route('/api/notifications/counts', methods=['GET'])
+def get_notification_counts():
+    """Get notification counts for different tabs (interests, workspaces, etc.)"""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        # Count interests (unresponded likes)
+        interests_count = 0
+        try:
+            likes = match_service.get_likes(clerk_user_id)
+            interests_count = len(likes) if likes else 0
+        except Exception:
+            # If there's an error, just return 0
+            interests_count = 0
+        
+        # Count workspaces (all workspaces the user is part of)
+        workspaces_count = 0
+        try:
+            workspaces = workspace_service.list_user_workspaces(clerk_user_id)
+            workspaces_count = len(workspaces) if workspaces else 0
+        except Exception:
+            # If there's an error, just return 0
+            workspaces_count = 0
+        
+        return jsonify({
+            "interests": interests_count,
+            "workspaces": workspaces_count
+        }), 200
+    except Exception as e:
+        error_trace = traceback.format_exc()
+        log_error("Error in get_notification_counts", error=e, traceback_str=error_trace)
+        return jsonify({"error": str(e)}), 500
+
 @app.route('/api/likes/<swipe_id>/respond', methods=['POST'])
 def respond_to_like(swipe_id):
     """Respond to a like - accept (creates match) or reject"""
