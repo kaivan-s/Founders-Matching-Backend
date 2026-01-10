@@ -32,10 +32,26 @@ class NotificationService:
             # Fallback to IAM role/default credentials (for EC2/ECS/Lambda)
             self.ses_client = boto3.client('ses', region_name=aws_region)
         
-    def _get_founder_id(self, clerk_user_id: str) -> str:
-        """Get founder ID from clerk_user_id"""
-        result = self.supabase.table('founders').select('id').eq('clerk_user_id', clerk_user_id).execute()
+    def _get_founder_id(self, clerk_user_id: str, email: str = None) -> str:
+        """Get founder ID from clerk_user_id.
+        If not found by clerk_user_id and email is provided, checks for existing founder by email
+        and updates clerk_user_id to link accounts.
+        """
+        result = self.supabase.table('founders').select('id, email').eq('clerk_user_id', clerk_user_id).execute()
+        
         if not result.data:
+            # If email is provided, check for existing founder by email (case-insensitive)
+            if email and email.strip():
+                email_lower = email.strip().lower()
+                all_founders = self.supabase.table('founders').select('id, email, clerk_user_id').execute()
+                if all_founders.data:
+                    for founder in all_founders.data:
+                        founder_email = founder.get('email', '').strip().lower()
+                        if founder_email == email_lower:
+                            # Found existing founder with same email - update clerk_user_id
+                            self.supabase.table('founders').update({'clerk_user_id': clerk_user_id}).eq('id', founder['id']).execute()
+                            return founder['id']
+            
             raise ValueError("Founder not found")
         return result.data[0]['id']
     

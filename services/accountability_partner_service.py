@@ -13,12 +13,26 @@ def _get_founder_id(clerk_user_id):
     return user_profile.data[0]['id']
 
 def _get_or_create_founder_id(clerk_user_id, user_name=None, user_email=None):
-    """Helper to get founder ID from clerk_user_id, creating a minimal profile if needed for partners"""
+    """Helper to get founder ID from clerk_user_id, creating a minimal profile if needed for partners.
+    If a founder exists with the same email but different clerk_user_id, updates the clerk_user_id.
+    """
     supabase = get_supabase()
-    user_profile = supabase.table('founders').select('id').eq('clerk_user_id', clerk_user_id).execute()
+    user_profile = supabase.table('founders').select('id, email').eq('clerk_user_id', clerk_user_id).execute()
     
     if user_profile.data:
         return user_profile.data[0]['id']
+    
+    # Check by email if provided (case-insensitive)
+    if user_email and user_email.strip():
+        email_lower = user_email.strip().lower()
+        all_founders = supabase.table('founders').select('id, email, clerk_user_id').execute()
+        if all_founders.data:
+            for founder in all_founders.data:
+                founder_email = founder.get('email', '').strip().lower()
+                if founder_email == email_lower:
+                    # Found existing founder with same email - update clerk_user_id and return
+                    supabase.table('founders').update({'clerk_user_id': clerk_user_id}).eq('id', founder['id']).execute()
+                    return founder['id']
     
     # Create minimal founder profile for accountability partners (required by schema)
     # Partners don't go through founder onboarding, so we create a minimal record

@@ -470,6 +470,61 @@ def get_available_founders(clerk_user_id, filters=None, mode='founders'):
     
     return available_founders
 
+def _get_or_create_founder_by_email(clerk_user_id, email, founder_data=None):
+    """
+    Get existing founder by email or clerk_user_id, or create a new one.
+    If a founder exists with the same email but different clerk_user_id, update the clerk_user_id.
+    
+    Args:
+        clerk_user_id: The Clerk user ID
+        email: The email address (case-insensitive check)
+        founder_data: Optional dict with founder data to use for creation/update
+    
+    Returns:
+        tuple: (founder_id, is_new) - founder ID and whether a new founder was created
+    """
+    supabase = get_supabase()
+    if not supabase:
+        raise Exception("Database connection not available")
+    
+    # First, check by clerk_user_id
+    existing_by_clerk = supabase.table('founders').select('id, email').eq('clerk_user_id', clerk_user_id).execute()
+    if existing_by_clerk.data:
+        return existing_by_clerk.data[0]['id'], False
+    
+    # If email is provided, check for existing founder by email (case-insensitive)
+    if email and email.strip():
+        email_lower = email.strip().lower()
+        # Get all founders and filter by case-insensitive email match
+        # Note: Supabase's ilike might not work perfectly, so we'll fetch and filter
+        all_founders = supabase.table('founders').select('id, email, clerk_user_id').execute()
+        if all_founders.data:
+            for founder in all_founders.data:
+                founder_email = founder.get('email', '').strip().lower()
+                if founder_email == email_lower:
+                    # Found existing founder with same email - update clerk_user_id
+                    supabase.table('founders').update({'clerk_user_id': clerk_user_id}).eq('id', founder['id']).execute()
+                    # If founder_data is provided, update other fields too
+                    if founder_data:
+                        update_data = {k: v for k, v in founder_data.items() if k != 'clerk_user_id' and k != 'email' and v is not None}
+                        if update_data:
+                            supabase.table('founders').update(update_data).eq('id', founder['id']).execute()
+                    return founder['id'], False
+    
+    # No existing founder found - create new one
+    if not founder_data:
+        raise ValueError("founder_data is required when creating a new founder")
+    
+    founder_data['clerk_user_id'] = clerk_user_id
+    if email:
+        founder_data['email'] = email
+    
+    result = supabase.table('founders').insert(founder_data).execute()
+    if not result.data:
+        raise Exception("Failed to create founder profile")
+    
+    return result.data[0]['id'], True
+
 def create_founder(data):
     """Create a new founder profile with projects"""
     supabase = get_supabase()
@@ -482,11 +537,19 @@ def create_founder(data):
     if not isinstance(projects, list):
         projects = []
     
+    # Validate required fields
+    clerk_user_id = data.get('clerk_user_id')
+    email = data.get('email', '').strip()
+    if not clerk_user_id:
+        raise ValueError("clerk_user_id is required")
+    if not email:
+        raise ValueError("email is required")
+    if not data.get('name'):
+        raise ValueError("name is required")
+    
     # Create founder profile (no credits system - uses plan-based features)
     founder_data = {
-        'clerk_user_id': data.get('clerk_user_id'),
         'name': data.get('name'),
-        'email': data.get('email'),
         'profile_picture_url': data.get('profile_picture_url'),
         'looking_for': data.get('looking_for'),
         'compatibility_answers': data.get('compatibility_answers', {}),
@@ -496,28 +559,25 @@ def create_founder(data):
         'linkedin_url': data.get('linkedin_url')
     }
     
-    # Validate required fields
-    if not founder_data.get('clerk_user_id'):
-        raise ValueError("clerk_user_id is required")
-    if not founder_data.get('name'):
-        raise ValueError("name is required")
-    if not founder_data.get('email'):
-        raise ValueError("email is required")
+    # Get or create founder (checks for existing email)
+    founder_id, is_new = _get_or_create_founder_by_email(clerk_user_id, email, founder_data)
     
-    
-    # Insert founder
-    founder_response = supabase.table('founders').insert(founder_data).execute()
-    
-    if not founder_response.data or len(founder_response.data) == 0:
-        raise Exception("Failed to create founder profile")
-    
-    founder_id = founder_response.data[0]['id']
+    # If founder already existed, fetch the updated founder data
+    if not is_new:
+        founder_response = supabase.table('founders').select('*').eq('id', founder_id).execute()
+        if not founder_response.data:
+            raise Exception("Failed to retrieve founder profile")
+    else:
+        # New founder was created, get the inserted data
+        founder_response = supabase.table('founders').select('*').eq('id', founder_id).execute()
+        if not founder_response.data:
+            raise Exception("Failed to retrieve founder profile")
     
     # During profile creation, don't charge for projects (part of onboarding)
     # Only charge for projects added AFTER profile is created
     valid_projects = [p for p in projects if p.get('title') and p.get('description') and p.get('stage')]
     
-    # Create projects
+    # Create projects (only if they don't already exist)
     created_projects = []
     for idx, project in enumerate(valid_projects):
         project_data = {
@@ -527,9 +587,13 @@ def create_founder(data):
             'stage': project.get('stage'),
             'display_order': idx
         }
-        project_response = supabase.table('projects').insert(project_data).execute()
-        if project_response.data and len(project_response.data) > 0:
-            created_projects.append(project_response.data[0])
+        try:
+            project_response = supabase.table('projects').insert(project_data).execute()
+            if project_response.data and len(project_response.data) > 0:
+                created_projects.append(project_response.data[0])
+        except Exception:
+            # Project might already exist, skip it
+            pass
     
     # Return founder with projects
     founder_response.data[0]['projects'] = created_projects

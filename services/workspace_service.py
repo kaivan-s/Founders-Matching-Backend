@@ -2,11 +2,27 @@
 from config.database import get_supabase
 from .notification_service import NotificationService, ApprovalService
 
-def _get_founder_id(clerk_user_id):
-    """Helper to get founder ID from clerk_user_id"""
+def _get_founder_id(clerk_user_id, email=None):
+    """Helper to get founder ID from clerk_user_id.
+    If not found by clerk_user_id and email is provided, checks for existing founder by email
+    and updates clerk_user_id to link accounts.
+    """
     supabase = get_supabase()
-    user_profile = supabase.table('founders').select('id').eq('clerk_user_id', clerk_user_id).execute()
+    user_profile = supabase.table('founders').select('id, email').eq('clerk_user_id', clerk_user_id).execute()
+    
     if not user_profile.data:
+        # If email is provided, check for existing founder by email (case-insensitive)
+        if email and email.strip():
+            email_lower = email.strip().lower()
+            all_founders = supabase.table('founders').select('id, email, clerk_user_id').execute()
+            if all_founders.data:
+                for founder in all_founders.data:
+                    founder_email = founder.get('email', '').strip().lower()
+                    if founder_email == email_lower:
+                        # Found existing founder with same email - update clerk_user_id
+                        supabase.table('founders').update({'clerk_user_id': clerk_user_id}).eq('id', founder['id']).execute()
+                        return founder['id']
+        
         raise ValueError("Profile not found")
     return user_profile.data[0]['id']
 
@@ -591,7 +607,10 @@ def get_equity_scenarios(clerk_user_id, workspace_id):
             'created_by_user_id': s['created_by_user_id'],
             'creator': s.get('creator', {}),
             'created_at': s['created_at'],
-            'updated_at': s['updated_at']
+            'updated_at': s['updated_at'],
+            'approval_status': s.get('approval_status', 'PENDING'),
+            'status': s.get('status', 'active'),
+            'note': s.get('note')
         }
         if s['is_current']:
             current = scenario

@@ -92,19 +92,34 @@ PARTNER_PRICING = {
     "platformFeePercent": 25,
 }
 
-def _get_founder_id(clerk_user_id: str) -> str:
-    """Helper to get founder ID from clerk_user_id - auto-creates minimal record if missing"""
+def _get_founder_id(clerk_user_id: str, email: str = None) -> str:
+    """Helper to get founder ID from clerk_user_id - auto-creates minimal record if missing.
+    If email is provided and a founder exists with that email but different clerk_user_id,
+    updates the clerk_user_id to link the accounts.
+    """
     supabase = get_supabase()
-    user_profile = supabase.table('founders').select('id').eq('clerk_user_id', clerk_user_id).execute()
+    user_profile = supabase.table('founders').select('id, email').eq('clerk_user_id', clerk_user_id).execute()
     
     if not user_profile.data:
+        # Check by email if provided (case-insensitive)
+        if email and email.strip():
+            email_lower = email.strip().lower()
+            all_founders = supabase.table('founders').select('id, email, clerk_user_id').execute()
+            if all_founders.data:
+                for founder in all_founders.data:
+                    founder_email = founder.get('email', '').strip().lower()
+                    if founder_email == email_lower:
+                        # Found existing founder with same email - update clerk_user_id
+                        supabase.table('founders').update({'clerk_user_id': clerk_user_id}).eq('id', founder['id']).execute()
+                        return founder['id']
+        
         # Auto-create minimal founder record for authenticated users
         # This prevents 400 errors when user is signed in but hasn't completed onboarding
         # The record will be updated with full details during onboarding
         founder_data = {
             'clerk_user_id': clerk_user_id,
             'name': '',  # Will be updated during onboarding
-            'email': '',  # Will be updated during onboarding
+            'email': email or '',  # Will be updated during onboarding
             'purpose': None,  # Will be set during onboarding
             'location': '',
             'looking_for': '',

@@ -48,10 +48,16 @@ def create_swipe(clerk_user_id, data):
         # Don't check limit or increment usage for existing swipes
         return existing_swipe.data[0]
     
-    # Check discovery limit for right swipes (plan-based, not credits)
-    # FREE plan: 10 matches/month, PRO/PRO_PLUS: unlimited
+    # Check workspace limit for right swipes FIRST (before discovery limit)
+    # This prevents users from sending connection requests if they're at their workspace limit
     # Only check if this is a NEW swipe
     if swipe_type == 'right':
+        can_create_workspace, current_workspace_count, max_workspaces = plan_service.check_workspace_limit(clerk_user_id)
+        if not can_create_workspace:
+            raise ValueError(f"Workspace limit reached. You currently have {current_workspace_count} of {max_workspaces} workspaces. Please upgrade your plan or remove existing workspaces before sending new connection requests.")
+        
+        # Check discovery limit for right swipes (plan-based, not credits)
+        # FREE plan: 10 matches/month, PRO/PRO_PLUS: unlimited
         can_swipe, current_count, max_allowed = plan_service.check_discovery_limit(clerk_user_id)
         if not can_swipe:
             if max_allowed == -1:  # Unlimited
