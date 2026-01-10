@@ -108,8 +108,22 @@ def save_onboarding():
         if not supabase:
             return jsonify({"error": "Database connection not available"}), 500
         
-        # Check if founder exists
-        existing = supabase.table('founders').select('id').eq('clerk_user_id', clerk_user_id).execute()
+        # Check if founder exists by clerk_user_id
+        existing = supabase.table('founders').select('id, email').eq('clerk_user_id', clerk_user_id).execute()
+        
+        # If not found by clerk_user_id, check by email (case-insensitive)
+        if not existing.data and data.get('email'):
+            email = data.get('email', '').strip().lower()
+            if email:
+                all_founders = supabase.table('founders').select('id, email, clerk_user_id').execute()
+                if all_founders.data:
+                    for founder in all_founders.data:
+                        founder_email = founder.get('email', '').strip().lower()
+                        if founder_email == email:
+                            # Found existing founder with same email - update clerk_user_id
+                            supabase.table('founders').update({'clerk_user_id': clerk_user_id}).eq('id', founder['id']).execute()
+                            existing = supabase.table('founders').select('id').eq('id', founder['id']).execute()
+                            break
         
         if existing.data:
             # Update existing founder
