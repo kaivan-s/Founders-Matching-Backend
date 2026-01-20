@@ -25,7 +25,7 @@ FOUNDER_PLANS: Dict[FounderPlan, Dict[str, Any]] = {
         },
         "accountability": {
             "canUseMarketplace": False,
-            "priorityPartners": False,
+            "priorityAdvisors": False,
         },
         "investorFeatures": {
             "advancedCompatAnalytics": False,
@@ -75,7 +75,7 @@ FOUNDER_PLANS: Dict[FounderPlan, Dict[str, Any]] = {
         },
         "accountability": {
             "canUseMarketplace": True,
-            "priorityPartners": True,
+            "priorityAdvisors": True,
         },
         "investorFeatures": {
             "advancedCompatAnalytics": True,
@@ -84,7 +84,7 @@ FOUNDER_PLANS: Dict[FounderPlan, Dict[str, Any]] = {
     },
 }
 
-PARTNER_PRICING = {
+ADVISOR_PRICING = {
     "onboardingFeeUSD": 69,
     "annualRenewalUSD": 39,
     "minMonthlyRateUSD": 50,
@@ -448,8 +448,8 @@ def update_advisor_billing(clerk_user_id: str, onboarding_paid: Optional[bool] =
     monthly_rate_value = None
     if monthly_rate_usd is not None:
         # Validate USD range
-        if monthly_rate_usd < PARTNER_PRICING['minMonthlyRateUSD'] or monthly_rate_usd > PARTNER_PRICING['maxMonthlyRateUSD']:
-            raise ValueError(f"Monthly rate must be between ${PARTNER_PRICING['minMonthlyRateUSD']} and ${PARTNER_PRICING['maxMonthlyRateUSD']} USD")
+        if monthly_rate_usd < ADVISOR_PRICING['minMonthlyRateUSD'] or monthly_rate_usd > ADVISOR_PRICING['maxMonthlyRateUSD']:
+            raise ValueError(f"Monthly rate must be between ${ADVISOR_PRICING['minMonthlyRateUSD']} and ${ADVISOR_PRICING['maxMonthlyRateUSD']} USD")
         monthly_rate_value = monthly_rate_usd
     elif monthly_rate_inr is not None:
         # Support legacy INR parameter (treating it as USD)
@@ -497,13 +497,13 @@ def renew_advisor_subscription(clerk_user_id: str) -> Dict[str, Any]:
 
 def calculate_advisor_pricing(monthly_rate_usd: int) -> Dict[str, float]:
     """Calculate advisor and platform share from monthly rate"""
-    platform_fee_percent = PARTNER_PRICING['platformFeePercent']
+    platform_fee_percent = ADVISOR_PRICING['platformFeePercent']
     platform_share = monthly_rate_usd * platform_fee_percent / 100
-    partner_share = monthly_rate_usd - platform_share
+    advisor_share = monthly_rate_usd - platform_share
     
     return {
         'display_price_usd': round(monthly_rate_usd * 1.25, 2),  # Founder sees this
-        'advisor_share_usd': round(partner_share, 2),
+        'advisor_share_usd': round(advisor_share, 2),
         'platform_share_usd': round(platform_share, 2),
         'platform_fee_percent': platform_fee_percent,
     }

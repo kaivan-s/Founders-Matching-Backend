@@ -1867,7 +1867,7 @@ def add_checkin_comment(workspace_id, checkin_id):
 
 @app.route('/api/workspaces/<workspace_id>/checkins/<checkin_id>/verdict', methods=['POST', 'PUT'])
 def set_checkin_verdict(workspace_id, checkin_id):
-    """Set verdict for a check-in (partners only)"""
+    """Set verdict for a check-in (advisors only)"""
     try:
         clerk_user_id = get_clerk_user_id()
         if not clerk_user_id:
@@ -1885,9 +1885,10 @@ def set_checkin_verdict(workspace_id, checkin_id):
         log_error("Error setting check-in verdict", error=e)
         return jsonify({"error": str(e)}), 500
 
-@app.route('/api/workspaces/<workspace_id>/checkins/<checkin_id>/partner-review', methods=['GET'])
-def get_checkin_partner_review(workspace_id, checkin_id):
-    """Get partner review for a check-in (partners only)"""
+@app.route('/api/workspaces/<workspace_id>/checkins/<checkin_id>/advisor-review', methods=['GET'])
+@app.route('/api/workspaces/<workspace_id>/checkins/<checkin_id>/partner-review', methods=['GET'])  # Backward compatibility
+def get_checkin_advisor_review(workspace_id, checkin_id):
+    """Get advisor review for a check-in (advisors only)"""
     try:
         clerk_user_id = get_clerk_user_id()
         if not clerk_user_id:
@@ -1901,12 +1902,13 @@ def get_checkin_partner_review(workspace_id, checkin_id):
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
     except Exception as e:
-        log_error("Error getting check-in partner review", error=e)
+        log_error("Error getting check-in advisor review", error=e)
         return jsonify({"error": str(e)}), 500
 
-@app.route('/api/workspaces/<workspace_id>/checkins/<checkin_id>/partner-review', methods=['POST'])
-def upsert_checkin_partner_review(workspace_id, checkin_id):
-    """Create or update partner review for a check-in (partners only)"""
+@app.route('/api/workspaces/<workspace_id>/checkins/<checkin_id>/advisor-review', methods=['POST'])
+@app.route('/api/workspaces/<workspace_id>/checkins/<checkin_id>/partner-review', methods=['POST'])  # Backward compatibility
+def upsert_checkin_advisor_review(workspace_id, checkin_id):
+    """Create or update advisor review for a check-in (advisors only)"""
     try:
         clerk_user_id = get_clerk_user_id()
         if not clerk_user_id:
@@ -1926,12 +1928,13 @@ def upsert_checkin_partner_review(workspace_id, checkin_id):
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
     except Exception as e:
-        log_error("Error saving check-in partner review", error=e)
+        log_error("Error saving check-in advisor review", error=e)
         return jsonify({"error": str(e)}), 500
 
-@app.route('/api/workspaces/<workspace_id>/checkins/<checkin_id>/partner-reviews', methods=['GET'])
-def get_checkin_partner_reviews(workspace_id, checkin_id):
-    """Get all partner reviews for a check-in (founders can view)"""
+@app.route('/api/workspaces/<workspace_id>/checkins/<checkin_id>/advisor-reviews', methods=['GET'])
+@app.route('/api/workspaces/<workspace_id>/checkins/<checkin_id>/partner-reviews', methods=['GET'])  # Backward compatibility
+def get_checkin_advisor_reviews(workspace_id, checkin_id):
+    """Get all advisor reviews for a check-in (founders can view)"""
     try:
         clerk_user_id = get_clerk_user_id()
         if not clerk_user_id:
@@ -1942,7 +1945,7 @@ def get_checkin_partner_reviews(workspace_id, checkin_id):
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
     except Exception as e:
-        log_error("Error getting check-in partner reviews", error=e)
+        log_error("Error getting check-in advisor reviews", error=e)
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/workspaces/<workspace_id>/advisor-impact-scorecard', methods=['GET'])
@@ -1978,7 +1981,7 @@ def save_quarterly_review(workspace_id):
         if not data:
             return jsonify({"error": "No data provided"}), 400
         
-        advisor_user_id = data.get('advisor_user_id') or data.get('partner_user_id')  # Support both for backward compatibility
+        advisor_user_id = data.get('advisor_user_id') or data.get('partner_user_id')  # Backward compatibility: support partner_user_id
         quarter = data.get('quarter')
         value_rating = data.get('value_rating')
         continue_next_quarter = data.get('continue_next_quarter')
@@ -2112,7 +2115,7 @@ def get_plans():
     try:
         return jsonify({
             'founder_plans': plan_service.FOUNDER_PLANS,
-            'partner_pricing': plan_service.PARTNER_PRICING,
+            'advisor_pricing': plan_service.ADVISOR_PRICING,
         }), 200
     except Exception as e:
         log_error("Error getting plans", error=e)
@@ -2264,88 +2267,15 @@ def cancel_subscription():
         log_error("Error canceling subscription", error=e)
         return jsonify({"error": str(e)}), 500
 
-@app.route('/api/billing/partner/profile', methods=['GET'])
-def get_partner_billing():
-    """Get partner billing profile"""
-    try:
-        clerk_user_id = get_clerk_user_id()
-        if not clerk_user_id:
-            return jsonify({"error": "User ID required"}), 401
-        
-        profile = plan_service.get_partner_billing_profile(clerk_user_id)
-        return jsonify(profile), 200
-    except ValueError as e:
-        return jsonify({"error": str(e)}), 400
-    except Exception as e:
-        log_error("Error getting partner billing", error=e)
-        return jsonify({"error": str(e)}), 500
-
-@app.route('/api/billing/partner/onboarding', methods=['POST'])
-def pay_partner_onboarding():
-    """Pay partner onboarding fee using Polar"""
-    try:
-        clerk_user_id = get_clerk_user_id()
-        if not clerk_user_id:
-            return jsonify({"error": "User ID required"}), 401
-        
-        # Create Polar checkout session
-        checkout = subscription_service.create_partner_onboarding_checkout(clerk_user_id)
-        
-        return jsonify(checkout), 200
-    except ValueError as e:
-        return jsonify({"error": str(e)}), 400
-    except Exception as e:
-        log_error("Error creating partner onboarding checkout", error=e)
-        import traceback
-        traceback.print_exc()
-        return jsonify({"error": str(e)}), 500
-
-@app.route('/api/billing/partner/renewal', methods=['POST'])
-def renew_partner_subscription():
-    """Renew partner annual subscription using Polar"""
-    try:
-        clerk_user_id = get_clerk_user_id()
-        if not clerk_user_id:
-            return jsonify({"error": "User ID required"}), 401
-        
-        # Create Polar checkout session
-        checkout = subscription_service.create_partner_renewal_checkout(clerk_user_id)
-        
-        return jsonify(checkout), 200
-    except ValueError as e:
-        return jsonify({"error": str(e)}), 400
-    except Exception as e:
-        log_error("Error creating partner renewal checkout", error=e)
-        import traceback
-        traceback.print_exc()
-        return jsonify({"error": str(e)}), 500
-
-@app.route('/api/billing/partner/calculate-pricing', methods=['GET'])
-def calculate_partner_pricing():
-    """Calculate partner pricing breakdown"""
-    try:
-        monthly_rate = request.args.get('monthly_rate')
-        if not monthly_rate:
-            return jsonify({"error": "monthly_rate parameter required"}), 400
-        
-        monthly_rate_usd = float(monthly_rate)
-        pricing = plan_service.calculate_partner_pricing(monthly_rate_usd)
-        return jsonify(pricing), 200
-    except ValueError as e:
-        return jsonify({"error": str(e)}), 400
-    except Exception as e:
-        log_error("Error calculating pricing", error=e)
-        return jsonify({"error": str(e)}), 500
-
 @app.route('/api/billing/advisor/profile', methods=['GET'])
 def get_advisor_billing_profile():
-    """Get advisor billing profile (alias for partner billing profile)"""
+    """Get advisor billing profile"""
     try:
         clerk_user_id = get_clerk_user_id()
         if not clerk_user_id:
             return jsonify({"error": "User ID required"}), 401
         
-        profile = plan_service.get_partner_billing_profile(clerk_user_id)
+        profile = plan_service.get_advisor_billing_profile(clerk_user_id)
         return jsonify(profile), 200
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
@@ -2355,14 +2285,14 @@ def get_advisor_billing_profile():
 
 @app.route('/api/billing/advisor/onboarding', methods=['POST'])
 def pay_advisor_onboarding():
-    """Pay advisor onboarding fee (alias for partner onboarding)"""
+    """Pay advisor onboarding fee using Polar"""
     try:
         clerk_user_id = get_clerk_user_id()
         if not clerk_user_id:
             return jsonify({"error": "User ID required"}), 401
         
         # Create Polar checkout session
-        checkout = subscription_service.create_partner_onboarding_checkout(clerk_user_id)
+        checkout = subscription_service.create_advisor_onboarding_checkout(clerk_user_id)
         
         return jsonify(checkout), 200
     except ValueError as e:
@@ -2371,6 +2301,43 @@ def pay_advisor_onboarding():
         log_error("Error creating advisor onboarding checkout", error=e)
         import traceback
         traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/billing/advisor/renewal', methods=['POST'])
+def renew_advisor_subscription():
+    """Renew advisor annual subscription using Polar"""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        # Create Polar checkout session
+        checkout = subscription_service.create_advisor_renewal_checkout(clerk_user_id)
+        
+        return jsonify(checkout), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        log_error("Error creating advisor renewal checkout", error=e)
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/billing/advisor/calculate-pricing', methods=['GET'])
+def calculate_advisor_pricing():
+    """Calculate advisor pricing breakdown"""
+    try:
+        monthly_rate = request.args.get('monthly_rate')
+        if not monthly_rate:
+            return jsonify({"error": "monthly_rate parameter required"}), 400
+        
+        monthly_rate_usd = float(monthly_rate)
+        pricing = plan_service.calculate_advisor_pricing(monthly_rate_usd)
+        return jsonify(pricing), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        log_error("Error calculating pricing", error=e)
         return jsonify({"error": str(e)}), 500
 
 # Product Feedback Routes
