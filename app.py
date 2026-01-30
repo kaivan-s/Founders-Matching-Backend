@@ -19,8 +19,8 @@ CORS(app, resources={
         "origins": [
             "http://localhost:3000", 
             "http://127.0.0.1:5000", 
-            "https://founder-match.in",           # Production frontend (without trailing slash)
-            "https://founder-match.in/",          # Production frontend (with trailing slash for compatibility)
+            "https://guild-space.co/",
+            "https://guild-space.co",
             "https://beta-branch.dc301xqwoyccc.amplifyapp.com",
             "https://beta-branch.dc301xqwoyccc.amplifyapp.com/"
         ],
