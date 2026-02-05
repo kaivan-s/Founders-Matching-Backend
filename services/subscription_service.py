@@ -299,6 +299,7 @@ def handle_order_created(webhook_data: Dict[str, Any]) -> Dict[str, Any]:
     """Handle order.created webhook - activate subscription or process advisor payment"""
     try:
         data = webhook_data.get('data', {})
+        order_id = data.get('id')
         metadata = data.get('metadata', {})
         subscription_type = metadata.get('subscription_type')
         clerk_user_id = metadata.get('clerk_user_id')
@@ -306,12 +307,41 @@ def handle_order_created(webhook_data: Dict[str, Any]) -> Dict[str, Any]:
         if not clerk_user_id:
             return {"status": "error", "message": "Missing clerk_user_id"}
         
+        if not order_id:
+            return {"status": "error", "message": "Missing order ID"}
+        
         supabase = get_supabase()
+        
+        # Check if this webhook was already processed (idempotency)
+        # Use a simple table to track processed webhooks
+        try:
+            processed_check = supabase.table('webhook_processing_log').select('id').eq('webhook_id', order_id).eq('webhook_type', 'order.created').execute()
+            if processed_check.data:
+                # Already processed - return success without re-processing
+                return {"status": "success", "message": "Webhook already processed", "idempotent": True}
+        except Exception:
+            # Table might not exist yet - continue processing
+            pass
         
         if subscription_type == 'founder_plan':
             plan_id = metadata.get('plan_id')
             if not plan_id:
                 return {"status": "error", "message": "Missing plan_id"}
+            
+            # Get actual subscription period from webhook data
+            # Polar webhooks include current_period_end, use that instead of hardcoding
+            current_period_end = None
+            if data.get('current_period_end'):
+                # Convert Unix timestamp to datetime if needed
+                period_end_value = data.get('current_period_end')
+                if isinstance(period_end_value, (int, float)):
+                    current_period_end = datetime.fromtimestamp(period_end_value, tz=timezone.utc)
+                elif isinstance(period_end_value, str):
+                    current_period_end = datetime.fromisoformat(period_end_value.replace('Z', '+00:00'))
+            else:
+                # Fallback: calculate from billing period if available
+                # Default to 30 days if no period info available
+                current_period_end = datetime.now(timezone.utc) + timedelta(days=30)
             
             # Update user's plan
             plan_service.update_founder_plan(
@@ -319,23 +349,71 @@ def handle_order_created(webhook_data: Dict[str, Any]) -> Dict[str, Any]:
                 plan_id,
                 subscription_id=data.get('subscription_id'),
                 subscription_status='active',
-                current_period_end=datetime.now(timezone.utc) + timedelta(days=30)  # Monthly subscription
+                current_period_end=current_period_end
             )
+            
+            # Log successful processing
+            try:
+                supabase.table('webhook_processing_log').insert({
+                    'webhook_id': order_id,
+                    'webhook_type': 'order.created',
+                    'processed_at': datetime.now(timezone.utc).isoformat(),
+                    'status': 'success'
+                }).execute()
+            except Exception:
+                # Log but don't fail if logging fails
+                pass
             
             return {"status": "success", "message": f"Plan {plan_id} activated"}
             
         elif subscription_type == 'advisor_onboarding':
             # Mark advisor onboarding as paid
             plan_service.update_advisor_billing(clerk_user_id, onboarding_paid=True)
+            
+            # Log successful processing
+            try:
+                supabase.table('webhook_processing_log').insert({
+                    'webhook_id': order_id,
+                    'webhook_type': 'order.created',
+                    'processed_at': datetime.now(timezone.utc).isoformat(),
+                    'status': 'success'
+                }).execute()
+            except Exception:
+                pass
+            
             return {"status": "success", "message": "Advisor onboarding paid"}
             
         elif subscription_type == 'advisor_renewal':
             # Renew advisor subscription
             plan_service.renew_advisor_subscription(clerk_user_id)
+            
+            # Log successful processing
+            try:
+                supabase.table('webhook_processing_log').insert({
+                    'webhook_id': order_id,
+                    'webhook_type': 'order.created',
+                    'processed_at': datetime.now(timezone.utc).isoformat(),
+                    'status': 'success'
+                }).execute()
+            except Exception:
+                pass
+            
             return {"status": "success", "message": "Advisor subscription renewed"}
         
         return {"status": "ignored", "message": f"Unknown subscription type: {subscription_type}"}
     except Exception as e:
+        # Log failed processing
+        try:
+            supabase = get_supabase()
+            supabase.table('webhook_processing_log').insert({
+                'webhook_id': webhook_data.get('data', {}).get('id', 'unknown'),
+                'webhook_type': 'order.created',
+                'processed_at': datetime.now(timezone.utc).isoformat(),
+                'status': 'error',
+                'error_message': str(e)
+            }).execute()
+        except Exception:
+            pass
         return {"status": "error", "message": str(e)}
 
 def handle_subscription_created(webhook_data: Dict[str, Any]) -> Dict[str, Any]:
@@ -376,33 +454,74 @@ def handle_subscription_updated(webhook_data: Dict[str, Any]) -> Dict[str, Any]:
         
         supabase.table('founders').update(update_data).eq('subscription_id', subscription_id).execute()
         
-        # If subscription is canceled or expired, downgrade to FREE
+        # If subscription is canceled or expired, check if period has ended before downgrading
         if status in ['canceled', 'expired', 'past_due']:
-            founder = supabase.table('founders').select('clerk_user_id').eq('subscription_id', subscription_id).execute()
+            founder = supabase.table('founders').select('clerk_user_id, subscription_current_period_end').eq('subscription_id', subscription_id).execute()
             if founder.data:
                 clerk_user_id = founder.data[0]['clerk_user_id']
-                plan_service.update_founder_plan(clerk_user_id, 'FREE')
+                period_end_str = founder.data[0].get('subscription_current_period_end')
+                
+                # Only downgrade if period has actually ended
+                should_downgrade = False
+                if status == 'expired':
+                    # Expired means period has definitely ended
+                    should_downgrade = True
+                elif period_end_str:
+                    # Check if current_period_end has passed
+                    try:
+                        from datetime import datetime, timezone
+                        period_end = datetime.fromisoformat(period_end_str.replace('Z', '+00:00'))
+                        if period_end.tzinfo is None:
+                            period_end = period_end.replace(tzinfo=timezone.utc)
+                        now = datetime.now(timezone.utc)
+                        if period_end < now:
+                            should_downgrade = True
+                    except (ValueError, AttributeError):
+                        # Invalid date - assume expired
+                        should_downgrade = True
+                else:
+                    # No period_end date - assume expired
+                    should_downgrade = True
+                
+                if should_downgrade:
+                    plan_service.update_founder_plan(clerk_user_id, 'FREE')
         
         return {"status": "success", "message": "Subscription updated"}
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
 def handle_subscription_canceled(webhook_data: Dict[str, Any]) -> Dict[str, Any]:
-    """Handle subscription.canceled webhook - downgrade to FREE"""
+    """Handle subscription.canceled webhook - mark as canceled but don't downgrade until period ends"""
     try:
         data = webhook_data.get('data', {})
         subscription_id = data.get('id')
+        cancel_at_period_end = data.get('cancel_at_period_end', True)
+        current_period_end = data.get('current_period_end')
         
         supabase = get_supabase()
-        founder = supabase.table('founders').select('clerk_user_id').eq('subscription_id', subscription_id).execute()
+        founder = supabase.table('founders').select('clerk_user_id, subscription_current_period_end').eq('subscription_id', subscription_id).execute()
         
         if founder.data:
             clerk_user_id = founder.data[0]['clerk_user_id']
-            plan_service.update_founder_plan(clerk_user_id, 'FREE')
-            supabase.table('founders').update({
+            existing_period_end = founder.data[0].get('subscription_current_period_end')
+            
+            # Use period_end from webhook if available, otherwise use existing
+            period_end_to_check = current_period_end or existing_period_end
+            
+            # Only downgrade immediately if cancel_at_period_end is False (immediate cancellation)
+            # Otherwise, user keeps access until period_end
+            if not cancel_at_period_end:
+                plan_service.update_founder_plan(clerk_user_id, 'FREE')
+            
+            update_data = {
                 'subscription_status': 'canceled',
-                'subscription_cancel_at_period_end': True
-            }).eq('subscription_id', subscription_id).execute()
+                'subscription_cancel_at_period_end': cancel_at_period_end
+            }
+            
+            if current_period_end:
+                update_data['subscription_current_period_end'] = current_period_end
+            
+            supabase.table('founders').update(update_data).eq('subscription_id', subscription_id).execute()
         
         return {"status": "success", "message": "Subscription canceled"}
     except Exception as e:

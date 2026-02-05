@@ -170,15 +170,34 @@ def create_workspace_for_match(match_id, founder1_clerk_id=None, founder2_clerk_
     
     workspace_id = workspace.data[0]['id']
     
-    # Create participants
+    # Create participants - use transaction-like pattern to ensure data integrity
     try:
         participants_result = supabase.table('workspace_participants').insert([
             {'workspace_id': workspace_id, 'user_id': founder1_id},
             {'workspace_id': workspace_id, 'user_id': founder2_id}
         ]).execute()
+        
+        if not participants_result.data or len(participants_result.data) < 2:
+            # Participants creation failed - clean up workspace to prevent orphaned workspace
+            from utils.logger import log_error
+            log_error(f"Failed to create participants for workspace {workspace_id}, cleaning up workspace")
+            try:
+                supabase.table('workspaces').delete().eq('id', workspace_id).execute()
+            except Exception as cleanup_error:
+                log_error(f"Failed to cleanup workspace {workspace_id} after participant creation failure", error=cleanup_error)
+            raise ValueError("Failed to create workspace participants")
     except Exception as e:
-        # Don't fail the whole function if participants fail - workspace is still created
-        pass
+        # If this is a ValueError we raised, re-raise it
+        if isinstance(e, ValueError):
+            raise
+        # For other exceptions, log and clean up
+        from utils.logger import log_error
+        log_error(f"Error creating workspace participants: {e}")
+        try:
+            supabase.table('workspaces').delete().eq('id', workspace_id).execute()
+        except Exception as cleanup_error:
+            log_error(f"Failed to cleanup workspace {workspace_id} after participant creation failure", error=cleanup_error)
+        raise ValueError(f"Failed to create workspace: {str(e)}")
     
     return workspace_id
 
@@ -292,7 +311,8 @@ def get_workspace(clerk_user_id, workspace_id):
     # We optimize by fetching only the fields we need
     
     # Get participants with user info (using JOIN to avoid N+1)
-    participants = supabase.table('workspace_participants').select('*, user:founders!user_id(id, name, email)').eq('workspace_id', workspace_id).execute()
+    # Include clerk_user_id so frontend can identify the current user
+    participants = supabase.table('workspace_participants').select('*, user:founders!user_id(id, name, email, clerk_user_id)').eq('workspace_id', workspace_id).execute()
     
     # Get current equity scenario (only one, filtered by is_current)
     equity = supabase.table('workspace_equity_scenarios').select('*').eq('workspace_id', workspace_id).eq('is_current', True).limit(1).execute()
@@ -362,7 +382,8 @@ def get_participants(clerk_user_id, workspace_id):
     _verify_workspace_access(clerk_user_id, workspace_id)
     supabase = get_supabase()
     
-    participants = supabase.table('workspace_participants').select('*, user:founders!user_id(id, name, email)').eq('workspace_id', workspace_id).execute()
+    # Include clerk_user_id so frontend can identify the current user
+    participants = supabase.table('workspace_participants').select('*, user:founders!user_id(id, name, email, clerk_user_id)').eq('workspace_id', workspace_id).execute()
     
     return [{
         'id': p['id'],
@@ -420,13 +441,12 @@ def update_participant(clerk_user_id, workspace_id, user_id, data):
     _log_audit(workspace_id, founder_id, 'update_participant', 'workspace_participant', participant.data[0]['id'], update_data)
     
     # Return complete participant data with user info
-    updated_participant = supabase.table('workspace_participants').select('*, user:founders!user_id(id, name, email)').eq('id', participant.data[0]['id']).execute()
+    updated_participant = supabase.table('workspace_participants').select('*, user:founders!user_id(id, name, email, clerk_user_id)').eq('id', participant.data[0]['id']).execute()
     
     if updated_participant.data:
         return updated_participant.data[0]
     else:
         raise ValueError("Failed to update participant")
-    return participant.data[0]
 
 def get_decisions(clerk_user_id, workspace_id, tag=None, page=1, limit=20):
     """Get decisions for a workspace, optionally filtered by tag"""
@@ -766,35 +786,6 @@ def set_current_equity_scenario(clerk_user_id, scenario_id):
     _log_audit(workspace_id, founder_id, 'set_current_equity_scenario', 'workspace_equity_scenario', scenario_id)
     
     return updated.data[0]
-    
-    # Otherwise, create approval request for setting as current
-    original_data = {
-        'is_current': scenario.data[0].get('is_current', False)
-    }
-    proposed_data = {
-        'is_current': True,
-        'label': scenario.data[0]['label'],
-        'data': scenario.data[0]['data']
-    }
-    
-    approval_id = approval_service.create_approval(
-        clerk_user_id=clerk_user_id,
-        workspace_id=workspace_id,
-        entity_type='EQUITY_SCENARIO',
-        entity_id=scenario_id,
-        proposed_data=proposed_data,
-        original_data=original_data
-    )
-    
-    # Update scenario to pending status
-    updated = supabase.table('workspace_equity_scenarios').update({
-        'approval_status': 'PENDING',
-        'approval_id': approval_id
-    }).eq('id', scenario_id).execute()
-    
-    _log_audit(workspace_id, founder_id, 'request_set_current_equity_scenario', 'workspace_equity_scenario', scenario_id, {'requires_approval': True})
-    
-    return {**updated.data[0], 'approval_id': approval_id, 'approval_status': 'PENDING'}
 
 def update_equity_scenario_note(clerk_user_id, scenario_id, note):
     """Update the note for an equity scenario"""
@@ -889,7 +880,7 @@ def generate_agreement_draft(clerk_user_id, workspace_id):
     draft = {
         'workspaceName': workspace_data.get('title', 'Untitled Workspace'),
         'workspaceId': workspace_id,
-        'generatedAt': datetime.utcnow().isoformat(),
+        'generatedAt': datetime.now(timezone.utc).isoformat(),
         'createdAt': workspace_data.get('created_at'),
         'equity': {
             'vestingYears': equity_data.get('vesting', {}).get('years', 4),

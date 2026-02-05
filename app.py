@@ -368,6 +368,10 @@ def complete_tutorial():
 def create_founder():
     """Create a new founder profile with projects"""
     try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
         data = request.get_json()
         if not data:
             return jsonify({"error": "No data provided"}), 400
@@ -561,23 +565,10 @@ def check_profile():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-@app.route('/api/profile/debug', methods=['GET'])
-def debug_profile():
-    """Debug endpoint to check user profile"""
-    try:
-        clerk_user_id = get_clerk_user_id()
-        if not clerk_user_id:
-            return jsonify({"error": "User ID required"}), 401
-        
-        result = profile_service.debug_profile(clerk_user_id)
-        return jsonify(result)
-    except ValueError as e:
-        return jsonify({"error": str(e)}), 404
-    except Exception as e:
-        error_trace = traceback.format_exc()
-        return jsonify({"error": str(e), "traceback": error_trace}), 500
+# Debug endpoint removed for security - do not expose internal state in production
 
 @app.route('/api/matches', methods=['GET'])
+@limiter.limit(RATE_LIMITS['standard'])
 def get_matches():
     """Get matches for the current user"""
     try:
@@ -881,6 +872,7 @@ def get_workspace_by_match(match_id):
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/workspaces', methods=['GET'])
+@limiter.limit(RATE_LIMITS['standard'])
 def list_workspaces():
     """Get all workspaces for the current user"""
     try:
@@ -896,6 +888,7 @@ def list_workspaces():
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/workspaces/<workspace_id>', methods=['GET'])
+@limiter.limit(RATE_LIMITS['standard'])
 def get_workspace(workspace_id):
     """Get workspace overview"""
     try:
@@ -985,6 +978,16 @@ def create_workspace_decision(workspace_id):
             return jsonify({"error": "User ID required"}), 401
         
         data = request.get_json()
+        if not isinstance(data, dict):
+            return jsonify({"error": "Invalid data format"}), 400
+        
+        # Basic validation
+        if 'content' in data:
+            if not isinstance(data['content'], str):
+                return jsonify({"error": "content must be a string"}), 400
+            if len(data['content']) > 10000:  # Reasonable limit
+                return jsonify({"error": "content too long (max 10000 characters)"}), 400
+        
         decision = workspace_service.create_decision(clerk_user_id, workspace_id, data)
         return jsonify(decision), 201
     except ValueError as e:
@@ -1001,6 +1004,16 @@ def update_workspace_decision(decision_id):
             return jsonify({"error": "User ID required"}), 401
         
         data = request.get_json()
+        if not isinstance(data, dict):
+            return jsonify({"error": "Invalid data format"}), 400
+        
+        # Basic validation
+        if 'content' in data and data['content']:
+            if not isinstance(data['content'], str):
+                return jsonify({"error": "content must be a string"}), 400
+            if len(data['content']) > 10000:  # Reasonable limit
+                return jsonify({"error": "content too long (max 10000 characters)"}), 400
+        
         decision = workspace_service.update_decision(clerk_user_id, decision_id, data)
         return jsonify(decision), 200
     except ValueError as e:
@@ -1363,57 +1376,7 @@ def mark_all_notifications_read():
         log_error("Error marking all notifications read", error=e)
         return jsonify({"error": str(e)}), 500
 
-@app.route('/api/debug/approvals/<workspace_id>', methods=['GET'])
-def debug_approvals(workspace_id):
-    """Debug endpoint to check all approvals for a workspace"""
-    try:
-        clerk_user_id = get_clerk_user_id()
-        if not clerk_user_id:
-            return jsonify({"error": "User ID required"}), 401
-        
-        supabase = get_supabase()
-        
-        # Get founder ID
-        founder = supabase.table('founders').select('id').eq('clerk_user_id', clerk_user_id).execute()
-        founder_id = founder.data[0]['id'] if founder.data else None
-        
-        # Get all approvals for workspace
-        all_approvals = supabase.table('approvals').select('*').eq(
-            'workspace_id', workspace_id
-        ).execute()
-        
-        # Get pending approvals where user is approver
-        pending_as_approver = supabase.table('approvals').select('*').eq(
-            'workspace_id', workspace_id
-        ).eq('approver_user_id', founder_id).eq('status', 'PENDING').execute() if founder_id else None
-        
-        # Get pending approvals where user is proposer
-        pending_as_proposer = supabase.table('approvals').select('*').eq(
-            'workspace_id', workspace_id
-        ).eq('proposed_by_user_id', founder_id).eq('status', 'PENDING').execute() if founder_id else None
-        
-        # Get all notifications for workspace
-        notifications = supabase.table('notifications').select('*').eq(
-            'workspace_id', workspace_id
-        ).execute()
-        
-        return jsonify({
-            'current_user_founder_id': founder_id,
-            'all_approvals': all_approvals.data or [],
-            'pending_as_approver': pending_as_approver.data if pending_as_approver else [],
-            'pending_as_proposer': pending_as_proposer.data if pending_as_proposer else [],
-            'notifications': notifications.data or [],
-            'counts': {
-                'total_approvals': len(all_approvals.data) if all_approvals.data else 0,
-                'pending_for_you': len(pending_as_approver.data) if pending_as_approver and pending_as_approver.data else 0,
-                'pending_from_you': len(pending_as_proposer.data) if pending_as_proposer and pending_as_proposer.data else 0,
-                'notifications': len(notifications.data) if notifications.data else 0
-            }
-        })
-        
-    except Exception as e:
-        log_error("Error in debug", error=e)
-        return jsonify({"error": str(e)}), 500
+# Debug endpoint removed for security - do not expose internal state in production
 
 @app.route('/api/approvals/pending', methods=['GET'])
 def get_pending_approvals():
@@ -1713,7 +1676,8 @@ def advisor_profile():
             user_name = data.get('user_name') or request.headers.get('X-User-Name')
             user_email = data.get('user_email') or request.headers.get('X-User-Email')
             
-            log_info(f"User name: {user_name}, User email: {user_email}")
+            # Don't log PII - log only that user info was provided
+            log_info(f"Creating advisor profile - user info provided: name={'yes' if user_name else 'no'}, email={'yes' if user_email else 'no'}")
             
             # Handle contact info updates separately if provided
             contact_info = {}
@@ -2227,6 +2191,34 @@ def check_feature():
         log_error("Error checking feature", error=e)
         return jsonify({"error": str(e)}), 500
 
+@app.route('/api/workspaces/<workspace_id>/check-feature', methods=['GET'])
+def check_workspace_feature(workspace_id):
+    """Check if workspace has access to a feature based on highest plan tier among participants"""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        # Verify user has access to workspace
+        workspace_service._verify_workspace_access(clerk_user_id, workspace_id)
+        
+        feature_path = request.args.get('feature')
+        if not feature_path:
+            return jsonify({"error": "feature parameter required"}), 400
+        
+        has_access = plan_service.check_workspace_feature_access(workspace_id, feature_path)
+        highest_plan = plan_service.get_workspace_highest_plan(workspace_id)
+        
+        return jsonify({
+            "has_access": has_access,
+            "workspace_plan": highest_plan
+        }), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        log_error("Error checking workspace feature", error=e)
+        return jsonify({"error": str(e)}), 500
+
 @app.route('/api/billing/workspace-limit', methods=['GET'])
 def check_workspace_limit():
     """Check workspace creation limit"""
@@ -2468,10 +2460,6 @@ def get_my_feedback():
 def update_feedback_admin(feedback_id):
     """Admin-only: Update feedback status and reward fields"""
     try:
-        # TODO: Add admin authentication check here
-        # For now, this endpoint exists but should be protected
-        # You can add a check like: if not is_admin(clerk_user_id): return 403
-        
         clerk_user_id = get_clerk_user_id()
         if not clerk_user_id:
             return jsonify({"error": "User ID required"}), 401
@@ -2500,6 +2488,370 @@ def update_feedback_admin(feedback_id):
     except Exception as e:
         log_error("Error updating feedback", error=e)
         return jsonify({"error": str(e)}), 500
+
+# ============================================================================
+# Equity Questionnaire API Endpoints
+# ============================================================================
+
+from services import equity_questionnaire_service, equity_document_service
+
+@app.route('/api/workspaces/<workspace_id>/equity/questionnaire', methods=['POST'])
+@limiter.limit(RATE_LIMITS['moderate'])
+def save_equity_questionnaire(workspace_id):
+    """Save or update a founder's equity questionnaire responses"""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        data = request.get_json()
+        if not isinstance(data, dict):
+            return jsonify({"error": "Invalid data format"}), 400
+        
+        responses = data.get('responses', {})
+        is_complete = data.get('is_complete', False)
+        
+        # Basic validation
+        if not isinstance(responses, dict):
+            return jsonify({"error": "responses must be an object"}), 400
+        if not isinstance(is_complete, bool):
+            return jsonify({"error": "is_complete must be a boolean"}), 400
+        
+        log_info(f"save_equity_questionnaire: workspace={workspace_id}, is_complete={is_complete}, responses_keys={list(responses.keys())}")
+        
+        result = equity_questionnaire_service.save_questionnaire_response(
+            clerk_user_id, workspace_id, responses, is_complete
+        )
+        
+        log_info(f"save_equity_questionnaire result: is_complete in result = {result.get('is_complete')}")
+        
+        return jsonify(result), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        log_error("Error saving equity questionnaire", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/workspaces/<workspace_id>/equity/questionnaire', methods=['GET'])
+def get_equity_questionnaire(workspace_id):
+    """Get all questionnaire responses for a workspace"""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        result = equity_questionnaire_service.get_questionnaire_responses(
+            clerk_user_id, workspace_id
+        )
+        return jsonify(result), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 404
+    except Exception as e:
+        log_error("Error getting equity questionnaire", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/workspaces/<workspace_id>/equity/startup-context', methods=['POST'])
+@limiter.limit(RATE_LIMITS['moderate'])
+def save_startup_context(workspace_id):
+    """Save startup context (Stage, Idea Origin, IP)"""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        data = request.get_json()
+        log_info(f"Startup context POST data: {data}")
+        if not data:
+            return jsonify({"error": "No data provided"}), 400
+        
+        # Extract startup_context from the request body
+        startup_context = data.get('startup_context', data)
+        log_info(f"Extracted startup_context: {startup_context}")
+        
+        if not startup_context:
+            return jsonify({"error": "No startup context provided"}), 400
+        
+        result = equity_questionnaire_service.save_startup_context(
+            clerk_user_id, workspace_id, startup_context
+        )
+        return jsonify(result), 200
+    except ValueError as e:
+        log_error(f"ValueError saving startup context: {str(e)}")
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        log_error("Error saving startup context", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/workspaces/<workspace_id>/equity/startup-context', methods=['GET'])
+def get_startup_context(workspace_id):
+    """Get startup context"""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        result = equity_questionnaire_service.get_startup_context(
+            clerk_user_id, workspace_id
+        )
+        return jsonify(result), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 404
+    except Exception as e:
+        log_error("Error getting startup context", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/workspaces/<workspace_id>/equity/calculate', methods=['POST'])
+def calculate_equity(workspace_id):
+    """Calculate equity scenarios based on questionnaire responses"""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        result = equity_questionnaire_service.calculate_equity(
+            clerk_user_id, workspace_id
+        )
+        return jsonify(result), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        log_error("Error calculating equity", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/workspaces/<workspace_id>/equity/scenarios', methods=['POST'])
+@limiter.limit(RATE_LIMITS['moderate'])
+def create_new_equity_scenario(workspace_id):
+    """Create an equity scenario from a selected option"""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No data provided"}), 400
+        
+        scenario_type = data.get('scenario_type')
+        founder_a_percent = data.get('founder_a_percent')
+        founder_b_percent = data.get('founder_b_percent')
+        vesting_terms = data.get('vesting_terms')
+        calculation_breakdown = data.get('calculation_breakdown')
+        advisor_percent = data.get('advisor_percent')  # Advisor equity allocation
+        
+        if not scenario_type or founder_a_percent is None or founder_b_percent is None:
+            return jsonify({"error": "scenario_type, founder_a_percent, and founder_b_percent are required"}), 400
+        
+        result = equity_questionnaire_service.create_equity_scenario(
+            clerk_user_id, workspace_id,
+            scenario_type, founder_a_percent, founder_b_percent,
+            vesting_terms, calculation_breakdown, advisor_percent
+        )
+        # Wrap in scenario key for frontend compatibility
+        return jsonify({"scenario": result}), 201
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        log_error("Error creating equity scenario", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/workspaces/<workspace_id>/equity/scenarios', methods=['GET'])
+def get_new_equity_scenarios(workspace_id):
+    """Get all equity scenarios for a workspace (new system)"""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        result = equity_questionnaire_service.get_equity_scenarios(
+            clerk_user_id, workspace_id
+        )
+        return jsonify(result), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 404
+    except Exception as e:
+        log_error("Error getting equity scenarios", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/workspaces/<workspace_id>/equity/scenarios/<scenario_id>/approve', methods=['PATCH'])
+@limiter.limit(RATE_LIMITS['moderate'])
+def approve_equity_scenario(workspace_id, scenario_id):
+    """Record approval for a scenario by the current user"""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        result = equity_questionnaire_service.approve_scenario(
+            clerk_user_id, workspace_id, scenario_id
+        )
+        # Wrap in scenario key for frontend compatibility
+        return jsonify({"scenario": result}), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        log_error("Error approving equity scenario", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/workspaces/<workspace_id>/equity/scenarios/<scenario_id>/reject', methods=['PATCH'])
+@limiter.limit(RATE_LIMITS['moderate'])
+def reject_equity_scenario(workspace_id, scenario_id):
+    """Reject a scenario"""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        data = request.get_json() or {}
+        reason = data.get('reason')
+        
+        result = equity_questionnaire_service.reject_scenario(
+            clerk_user_id, workspace_id, scenario_id, reason
+        )
+        return jsonify(result), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        log_error("Error rejecting equity scenario", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/workspaces/<workspace_id>/equity/vesting', methods=['POST'])
+@limiter.limit(RATE_LIMITS['moderate'])
+def update_equity_vesting(workspace_id):
+    """Update vesting terms"""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No data provided"}), 400
+        
+        result = equity_questionnaire_service.update_vesting_terms(
+            clerk_user_id, workspace_id, data
+        )
+        return jsonify(result), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        log_error("Error updating vesting terms", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/workspaces/<workspace_id>/equity/generate-document', methods=['POST'])
+@limiter.limit(RATE_LIMITS['moderate'])
+def generate_equity_document(workspace_id):
+    """Generate agreement document (PDF/DOCX)"""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        data = request.get_json() or {}
+        scenario_id = data.get('scenario_id')
+        
+        result = equity_document_service.generate_and_save_document(
+            clerk_user_id, workspace_id, scenario_id
+        )
+        return jsonify(result), 201
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        log_error("Error generating equity document", error=e)
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/workspaces/<workspace_id>/equity/documents', methods=['GET'])
+def list_equity_documents(workspace_id):
+    """List all generated equity documents for a workspace"""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        result = equity_document_service.list_documents(clerk_user_id, workspace_id)
+        return jsonify({"documents": result}), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 404
+    except Exception as e:
+        log_error("Error listing equity documents", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/workspaces/<workspace_id>/equity/documents/<document_id>', methods=['GET'])
+def get_equity_document(workspace_id, document_id):
+    """Get a specific equity document with signed URLs"""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        result = equity_document_service.get_document(clerk_user_id, workspace_id, document_id)
+        return jsonify(result), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 404
+    except Exception as e:
+        log_error("Error getting equity document", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/workspaces/<workspace_id>/equity/documents/<document_id>/download/<file_type>', methods=['GET'])
+def download_equity_document(workspace_id, document_id, file_type):
+    """
+    Proxy download endpoint for equity documents.
+    Downloads the file server-side and streams it to the client,
+    avoiding exposure of Supabase signed URLs.
+    
+    Args:
+        workspace_id: Workspace ID
+        document_id: Document ID
+        file_type: 'pdf' or 'docx'
+    """
+    from flask import Response
+    
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        # Validate file type
+        if file_type not in ['pdf', 'docx']:
+            return jsonify({"error": "Invalid file type. Use 'pdf' or 'docx'"}), 400
+        
+        # Download file content
+        file_content, content_type, filename = equity_document_service.download_document(
+            clerk_user_id, workspace_id, document_id, file_type
+        )
+        
+        # Return file as response
+        response = Response(
+            file_content,
+            mimetype=content_type,
+            headers={
+                'Content-Disposition': f'attachment; filename="{filename}"',
+                'Content-Length': str(len(file_content)),
+                'Cache-Control': 'private, max-age=3600'
+            }
+        )
+        return response
+        
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 404
+    except Exception as e:
+        log_error("Error downloading equity document", error=e)
+        return jsonify({"error": str(e)}), 500
+
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))

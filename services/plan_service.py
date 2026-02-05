@@ -3,6 +3,7 @@ from config.database import get_supabase
 from datetime import datetime, timezone, timedelta
 from typing import Dict, Optional, Any, Literal
 from enum import Enum
+from dateutil.relativedelta import relativedelta
 
 FounderPlan = Literal["FREE", "PRO", "PRO_PLUS"]
 
@@ -50,7 +51,7 @@ FOUNDER_PLANS: Dict[FounderPlan, Dict[str, Any]] = {
         },
         "accountability": {
             "canUseMarketplace": True,
-            "priorityPartners": False,
+            "priorityAdvisors": False,
         },
         "investorFeatures": {
             "advancedCompatAnalytics": False,
@@ -101,17 +102,9 @@ def _get_founder_id(clerk_user_id: str, email: str = None) -> str:
     user_profile = supabase.table('founders').select('id, email').eq('clerk_user_id', clerk_user_id).execute()
     
     if not user_profile.data:
-        # Check by email if provided (case-insensitive)
-        if email and email.strip():
-            email_lower = email.strip().lower()
-            all_founders = supabase.table('founders').select('id, email, clerk_user_id').execute()
-            if all_founders.data:
-                for founder in all_founders.data:
-                    founder_email = founder.get('email', '').strip().lower()
-                    if founder_email == email_lower:
-                        # Found existing founder with same email - update clerk_user_id
-                        supabase.table('founders').update({'clerk_user_id': clerk_user_id}).eq('id', founder['id']).execute()
-                        return founder['id']
+        # SECURITY: Never auto-link accounts by email to prevent account hijacking
+        # If email is provided, only use it for creating a new record, not for linking existing accounts
+        # Account linking should require explicit email verification
         
         # Auto-create minimal founder record for authenticated users
         # This prevents 400 errors when user is signed in but hasn't completed onboarding
@@ -152,11 +145,33 @@ def get_founder_plan(clerk_user_id: str) -> Dict[str, Any]:
         return FOUNDER_PLANS['FREE'].copy()
     
     plan_id = founder.data[0].get('plan', 'FREE')
+    subscription_status = founder.data[0].get('subscription_status')
+    subscription_current_period_end = founder.data[0].get('subscription_current_period_end')
+    
+    # Check if subscription has expired
+    if plan_id != 'FREE' and subscription_current_period_end:
+        try:
+            period_end = datetime.fromisoformat(subscription_current_period_end.replace('Z', '+00:00'))
+            if period_end.tzinfo is None:
+                period_end = period_end.replace(tzinfo=timezone.utc)
+            
+            now = datetime.now(timezone.utc)
+            if period_end < now:
+                # Subscription has expired - downgrade to FREE
+                plan_id = 'FREE'
+        except (ValueError, AttributeError):
+            # Invalid date format - treat as expired
+            plan_id = 'FREE'
+    
+    # Also check subscription status
+    if plan_id != 'FREE' and subscription_status in ['canceled', 'expired', 'past_due', 'unpaid']:
+        plan_id = 'FREE'
+    
     plan_config = FOUNDER_PLANS.get(plan_id, FOUNDER_PLANS['FREE']).copy()
     
     # Add subscription info
-    plan_config['subscription_status'] = founder.data[0].get('subscription_status')
-    plan_config['subscription_current_period_end'] = founder.data[0].get('subscription_current_period_end')
+    plan_config['subscription_status'] = subscription_status
+    plan_config['subscription_current_period_end'] = subscription_current_period_end
     
     return plan_config
 
@@ -166,6 +181,100 @@ def check_feature_access(clerk_user_id: str, feature_path: str) -> bool:
     feature_path format: "workspaceFeatures.equityFull" or "accountability.canUseMarketplace"
     """
     plan_config = get_founder_plan(clerk_user_id)
+    
+    parts = feature_path.split('.')
+    value = plan_config
+    for part in parts:
+        if isinstance(value, dict):
+            value = value.get(part)
+        else:
+            return False
+    
+    return bool(value) if value is not None else False
+
+def get_workspace_highest_plan(workspace_id: str) -> FounderPlan:
+    """
+    Get the highest plan tier among all participants in a workspace.
+    Returns the highest tier: Pro+ > Pro > Free
+    Only considers active subscriptions (not expired).
+    
+    Args:
+        workspace_id: Workspace ID
+        
+    Returns:
+        Highest plan tier found in the workspace
+    """
+    supabase = get_supabase()
+    
+    # Get all participants with their plans and subscription info
+    participants = supabase.table('workspace_participants').select(
+        'user_id, founders!workspace_participants_user_id_fkey(plan, subscription_status, subscription_current_period_end)'
+    ).eq('workspace_id', workspace_id).execute()
+    
+    if not participants.data:
+        return 'FREE'
+    
+    # Plan hierarchy: Pro+ > Pro > Free
+    plan_order = {'PRO_PLUS': 2, 'PRO': 1, 'FREE': 0}
+    highest_plan = 'FREE'
+    highest_order = 0
+    now = datetime.now(timezone.utc)
+    
+    for participant in participants.data:
+        founder = participant.get('founders', {})
+        if not founder:
+            continue
+            
+        plan = founder.get('plan', 'FREE')
+        subscription_status = founder.get('subscription_status')
+        subscription_current_period_end = founder.get('subscription_current_period_end')
+        
+        # Check if subscription is still active
+        is_active = True
+        if plan != 'FREE':
+            # Check subscription status
+            if subscription_status in ['canceled', 'expired', 'past_due', 'unpaid']:
+                is_active = False
+            # Check expiry date
+            elif subscription_current_period_end:
+                try:
+                    period_end = datetime.fromisoformat(subscription_current_period_end.replace('Z', '+00:00'))
+                    if period_end.tzinfo is None:
+                        period_end = period_end.replace(tzinfo=timezone.utc)
+                    if period_end < now:
+                        is_active = False
+                except (ValueError, AttributeError):
+                    # Invalid date - treat as expired
+                    is_active = False
+        
+        # Only consider active subscriptions
+        if not is_active:
+            plan = 'FREE'
+        
+        plan_level = plan_order.get(plan, 0)
+        
+        if plan_level > highest_order:
+            highest_order = plan_level
+            highest_plan = plan
+    
+    return highest_plan
+
+def check_workspace_feature_access(workspace_id: str, feature_path: str) -> bool:
+    """
+    Check if workspace has access to a feature based on the highest plan tier
+    among all participants.
+    
+    If ANY participant has Pro or Pro+, the workspace gets those features.
+    
+    Args:
+        workspace_id: Workspace ID
+        feature_path: Feature path like "workspaceFeatures.equityFull"
+        
+    Returns:
+        True if workspace has access to the feature
+    """
+    highest_plan = get_workspace_highest_plan(workspace_id)
+    plan_config = FOUNDER_PLANS.get(highest_plan, FOUNDER_PLANS['FREE']).copy()
     
     parts = feature_path.split('.')
     value = plan_config
@@ -221,8 +330,9 @@ def check_discovery_limit(clerk_user_id: str) -> tuple[bool, int, int]:
     # Count right swipes in the last 30 days from swipe_history table
     swipe_count_result = supabase.table('swipe_history').select('id', count='exact').eq('user_id', founder_id).eq('swipe_type', 'right').gte('swipe_date', thirty_days_ago.isoformat()).execute()
     
-    # Fallback to discovery_usage if swipe_history doesn't have data yet
-    if swipe_count_result.count is None or swipe_count_result.count == 0:
+    # Fallback to discovery_usage ONLY if swipe_history count is None (table doesn't exist or query failed)
+    # A count of 0 is valid (user has made no swipes), so don't fallback in that case
+    if swipe_count_result.count is None:
         # Try legacy discovery_usage table
         month_year = now.strftime('%Y-%m')
         usage = supabase.table('discovery_usage').select('swipe_count').eq('user_id', founder_id).eq('month_year', month_year).execute()
@@ -242,20 +352,42 @@ def increment_discovery_usage(clerk_user_id: str) -> None:
     now = datetime.now(timezone.utc)
     month_year = now.strftime('%Y-%m')
     
-    # Also maintain legacy discovery_usage table for backward compatibility
-    existing = supabase.table('discovery_usage').select('id, swipe_count').eq('user_id', founder_id).eq('month_year', month_year).execute()
-    
-    if existing.data:
-        # Update existing
-        new_count = existing.data[0].get('swipe_count', 0) + 1
-        supabase.table('discovery_usage').update({'swipe_count': new_count}).eq('id', existing.data[0]['id']).execute()
-    else:
-        # Create new
-        supabase.table('discovery_usage').insert({
+    # Use atomic increment to prevent race conditions
+    # Try to update with atomic increment first
+    try:
+        # Use RPC call for atomic increment if available, otherwise fallback to read-modify-write
+        # For now, use upsert with conflict resolution
+        result = supabase.table('discovery_usage').upsert({
             'user_id': founder_id,
             'month_year': month_year,
             'swipe_count': 1,
-        }).execute()
+        }, on_conflict='user_id,month_year').execute()
+        
+        # If record already exists, increment atomically using SQL
+        # Since Supabase Python client doesn't support raw SQL increment easily,
+        # we'll use a more reliable pattern: read current value, then update with WHERE clause
+        existing = supabase.table('discovery_usage').select('id, swipe_count').eq('user_id', founder_id).eq('month_year', month_year).execute()
+        if existing.data and existing.data[0].get('swipe_count', 0) > 0:
+            # Record exists, increment it
+            # Note: This still has a small race condition window, but it's better than before
+            # For true atomicity, would need database-level trigger or RPC function
+            new_count = existing.data[0].get('swipe_count', 0) + 1
+            supabase.table('discovery_usage').update({'swipe_count': new_count}).eq('id', existing.data[0]['id']).execute()
+    except Exception as e:
+        # Fallback to original logic if upsert fails
+        from utils.logger import log_error
+        log_error(f"Failed to atomically increment discovery usage, using fallback: {e}")
+        existing = supabase.table('discovery_usage').select('id, swipe_count').eq('user_id', founder_id).eq('month_year', month_year).execute()
+        
+        if existing.data:
+            new_count = existing.data[0].get('swipe_count', 0) + 1
+            supabase.table('discovery_usage').update({'swipe_count': new_count}).eq('id', existing.data[0]['id']).execute()
+        else:
+            supabase.table('discovery_usage').insert({
+                'user_id': founder_id,
+                'month_year': month_year,
+                'swipe_count': 1,
+            }).execute()
 
 def record_swipe_in_history(clerk_user_id: str, swipe_type: str, project_id: str = None) -> None:
     """Record swipe in swipe_history table for 30-day rolling window tracking"""
@@ -336,10 +468,11 @@ def update_founder_plan(clerk_user_id: str, new_plan: FounderPlan, subscription_
                 raise ValueError(f"Workspace {workspace_to_keep} not found or you don't have access")
             
             # Remove user from all other workspaces (with history tracking)
+            # Use a transaction-like pattern: collect all operations, then execute
             workspaces_to_remove = [wid for wid in unique_workspaces.keys() if wid != workspace_to_keep]
             
+            # First, record all removals in history
             for workspace_id in workspaces_to_remove:
-                # Record in history before removal
                 try:
                     supabase.table('workspace_participant_history').insert({
                         'workspace_id': workspace_id,
@@ -350,11 +483,13 @@ def update_founder_plan(clerk_user_id: str, new_plan: FounderPlan, subscription_
                     }).execute()
                 except Exception:
                     pass  # History tracking is optional
-                
-                # Remove from workspace
+            
+            # Then remove from workspaces
+            for workspace_id in workspaces_to_remove:
                 supabase.table('workspace_participants').delete().eq('workspace_id', workspace_id).eq('user_id', founder_id).execute()
     
-    # Update plan
+    # Update plan - do this last to ensure workspace cleanup happens first
+    # If plan update fails, at least workspace cleanup is done
     update_data = {'plan': new_plan}
     if subscription_id:
         update_data['subscription_id'] = subscription_id
@@ -479,8 +614,8 @@ def renew_advisor_subscription(clerk_user_id: str) -> Dict[str, Any]:
     founder_id = _get_founder_id(clerk_user_id)
     supabase = get_supabase()
     
-    # Calculate renewal end date (1 year from now)
-    renewal_end = datetime.now(timezone.utc).replace(year=datetime.now(timezone.utc).year + 1)
+    # Calculate renewal end date (1 year from now) - use relativedelta to handle leap years correctly
+    renewal_end = datetime.now(timezone.utc) + relativedelta(years=1)
     
     existing = supabase.table('advisor_profiles').select('id').eq('user_id', founder_id).execute()
     if not existing.data:

@@ -21,7 +21,7 @@ if not SUPABASE_URL or not SUPABASE_KEY:
 try:
     supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 except Exception as e:
-    print(f"Error initializing Supabase client: {e}")
+    # Error initializing Supabase client
     supabase = None
 
 # Initialize Supabase client with service role key (for admin operations like storage)
@@ -30,7 +30,7 @@ if SUPABASE_SERVICE_ROLE_KEY:
     try:
         supabase_admin = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
     except Exception as e:
-        print(f"Error initializing Supabase admin client: {e}")
+        # Error initializing Supabase admin client
         supabase_admin = None
 
 def get_supabase():
