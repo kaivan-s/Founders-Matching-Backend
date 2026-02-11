@@ -253,15 +253,14 @@ def get_available_founders(clerk_user_id, filters=None, mode='founders'):
                                         workspace_project_ids.add(match_to_project[match_id])
             
             # Single query to get swipes by current user (only for current batch)
-            # Only query if we have valid project IDs
-            # Only filter RIGHT swipes - allow re-swiping after left swipe
+            # Filter ALL swipes (both left and right) - skipped projects should not reappear
             swiped_combinations = set()
             if project_ids:
-                user_swipes = supabase.table('swipes').select('project_id, swiped_id, swipe_type').eq('swiper_id', current_user_id).in_('project_id', project_ids).execute()
+                user_swipes = supabase.table('swipes').select('project_id, swiped_id').eq('swiper_id', current_user_id).in_('project_id', project_ids).execute()
                 if user_swipes.data:
                     for swipe in user_swipes.data:
-                        # Only filter if it was a right swipe (allow re-swiping after left swipe)
-                        if swipe.get('project_id') and swipe.get('swipe_type') == 'right':
+                        # Filter both left (skip) and right (connect) swipes
+                        if swipe.get('project_id'):
                             swiped_combinations.add((swipe['project_id'], swipe['swiped_id']))
             
             
@@ -271,7 +270,7 @@ def get_available_founders(clerk_user_id, filters=None, mode='founders'):
                 project_id = project['id']
                 project_owner_id = project['founder_id']
                 
-                # Skip if project has workspace, has match, or already right-swiped
+                # Skip if project has workspace, has match, or already swiped (left or right)
                 if (project_id not in workspace_project_ids and 
                     project_id not in matched_project_ids and
                     (project_id, project_owner_id) not in swiped_combinations):
