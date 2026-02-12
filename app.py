@@ -10,7 +10,7 @@ from utils.logger import log_error, log_warning, log_info
 from utils.rate_limit import init_rate_limiter, RATE_LIMITS
 from config.database import get_supabase
 from services import founder_service, project_service, swipe_service, profile_service, match_service, waitlist_service, message_service, payment_service, workspace_service, task_service
-from services import plan_service, subscription_service, document_service, feedback_service, advanced_search_service, advisor_service
+from services import plan_service, subscription_service, document_service, feedback_service, advanced_search_service, advisor_service, admin_service
 from services.notification_service import NotificationService, ApprovalService
 
 app = Flask(__name__)
@@ -2139,6 +2139,90 @@ def update_advisor_contact():
         return jsonify({"error": str(e)}), 400
     except Exception as e:
         log_error("Error updating advisor contact info", error=e)
+        return jsonify({"error": str(e)}), 500
+
+# ==================== ADMIN ENDPOINTS ====================
+
+@app.route('/api/admin/check', methods=['GET'])
+def admin_check():
+    """Check if current user is admin (for frontend nav)"""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"is_admin": False}), 200
+        return jsonify({"is_admin": admin_service.is_admin(clerk_user_id)}), 200
+    except Exception as e:
+        log_error("Error checking admin status", error=e)
+        return jsonify({"is_admin": False}), 200
+
+@app.route('/api/admin/advisors/pending', methods=['GET'])
+def admin_list_pending_advisors():
+    """List pending advisor profiles (admin only)"""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        if not admin_service.is_admin(clerk_user_id):
+            return jsonify({"error": "Admin access required"}), 403
+
+        data = admin_service.list_pending_advisors()
+        return jsonify(data), 200
+    except Exception as e:
+        log_error("Error listing pending advisors", error=e)
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/admin/advisors/<advisor_id>', methods=['GET'])
+def admin_get_advisor(advisor_id):
+    """Get full advisor profile for review (admin only)"""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        if not admin_service.is_admin(clerk_user_id):
+            return jsonify({"error": "Admin access required"}), 403
+
+        profile = admin_service.get_advisor_by_id(advisor_id)
+        if not profile:
+            return jsonify({"error": "Advisor not found"}), 404
+        return jsonify(profile), 200
+    except Exception as e:
+        log_error("Error fetching advisor for admin", error=e)
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/admin/advisors/<advisor_id>/approve', methods=['PATCH', 'POST'])
+def admin_approve_advisor(advisor_id):
+    """Approve advisor - set status APPROVED and is_discoverable True (admin only)"""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        if not admin_service.is_admin(clerk_user_id):
+            return jsonify({"error": "Admin access required"}), 403
+
+        profile = admin_service.approve_advisor(advisor_id)
+        if not profile:
+            return jsonify({"error": "Advisor not found or could not be updated"}), 404
+        return jsonify(profile), 200
+    except Exception as e:
+        log_error("Error approving advisor", error=e)
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/admin/advisors/<advisor_id>/reject', methods=['PATCH', 'POST'])
+def admin_reject_advisor(advisor_id):
+    """Reject advisor - set status REJECTED (admin only)"""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        if not admin_service.is_admin(clerk_user_id):
+            return jsonify({"error": "Admin access required"}), 403
+
+        profile = admin_service.reject_advisor(advisor_id)
+        if not profile:
+            return jsonify({"error": "Advisor not found or could not be updated"}), 404
+        return jsonify(profile), 200
+    except Exception as e:
+        log_error("Error rejecting advisor", error=e)
         return jsonify({"error": str(e)}), 500
 
 # ==================== BILLING & PLAN ENDPOINTS ====================

@@ -29,15 +29,16 @@ def get_tasks(clerk_user_id: str, workspace_id: str, owner_filter: Optional[str]
         '*, owner:founders!owner_id(id, name), kpi:workspace_kpis(id, label), decision:workspace_decisions(id, content)'
     ).eq('workspace_id', workspace_id)
     
-    # Apply owner filter
-    if owner_filter == 'me':
-        query = query.eq('owner_id', founder_id)
-    elif owner_filter == 'other':
-        # Get other founder's ID
-        participants = supabase.table('workspace_participants').select('user_id').eq('workspace_id', workspace_id).neq('user_id', founder_id).execute()
-        if participants.data:
-            other_founder_id = participants.data[0]['user_id']
-            query = query.eq('owner_id', other_founder_id)
+    # Apply owner filter: 'me', founder_id (UUID), or None/'all' for all
+    if owner_filter and owner_filter != 'all':
+        if owner_filter == 'me':
+            query = query.eq('owner_id', founder_id)
+        else:
+            # Treat as founder_id - validate they're in the workspace
+            participants = supabase.table('workspace_participants').select('user_id').eq('workspace_id', workspace_id).execute()
+            participant_ids = [p['user_id'] for p in (participants.data or [])]
+            if owner_filter in participant_ids:
+                query = query.eq('owner_id', owner_filter)
     
     # Apply link filter
     if link_filter == 'kpi':
