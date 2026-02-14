@@ -1492,3 +1492,171 @@ def get_checkin_partner_reviews_for_founders(clerk_user_id, workspace_id, checki
     
     return reviews.data or []
 
+
+def get_workspace_context(clerk_user_id, workspace_id):
+    """Get combined workspace context data in a single API call.
+    
+    This endpoint consolidates multiple workspace data fetches to reduce
+    the number of API calls needed when loading workspace tabs.
+    
+    Returns:
+        - workspace: Basic workspace info
+        - participants: All participants with user info
+        - kpis: All KPIs with owner info
+        - decisions: Recent decisions (limited to 20)
+        - roles: All roles with user info
+        - checkins: Recent checkins (limited to 10)
+        - equity: Equity scenarios and current scenario
+        - current_founder_id: The founder ID of the current user
+    """
+    founder_id = _verify_workspace_access(clerk_user_id, workspace_id)
+    supabase = get_supabase()
+    
+    # Get workspace basic info
+    workspace = supabase.table('workspaces').select('*').eq('id', workspace_id).execute()
+    if not workspace.data:
+        raise ValueError("Workspace not found")
+    
+    workspace_data = workspace.data[0]
+    
+    # Fetch all related data in parallel-style queries
+    # These are still sequential at the DB level, but minimize round trips
+    
+    # 1. Participants with user info (includes clerk_user_id for current user identification)
+    participants = supabase.table('workspace_participants').select(
+        '*, user:founders!user_id(id, name, email, clerk_user_id)'
+    ).eq('workspace_id', workspace_id).execute()
+    
+    # 2. KPIs with owner info
+    kpis = supabase.table('workspace_kpis').select(
+        '*, owner:founders!owner_user_id(id, name)'
+    ).eq('workspace_id', workspace_id).order('created_at', desc=True).execute()
+    
+    # 3. Recent decisions with creator info (limit 20 for overview)
+    decisions = supabase.table('workspace_decisions').select(
+        '*, creator:founders!created_by_user_id(id, name)'
+    ).eq('workspace_id', workspace_id).eq('is_active', True).order('created_at', desc=True).limit(20).execute()
+    
+    # 4. Roles with user info
+    roles = supabase.table('workspace_roles').select(
+        '*, user:founders!user_id(id, name)'
+    ).eq('workspace_id', workspace_id).execute()
+    
+    # 5. Recent checkins with creator info (limit 10 for overview)
+    checkins = supabase.table('workspace_checkins').select(
+        '*, creator:founders!created_by_user_id(id, name)'
+    ).eq('workspace_id', workspace_id).order('week_start', desc=True).limit(10).execute()
+    
+    # 6. Equity scenarios with creator info
+    equity_scenarios = supabase.table('workspace_equity_scenarios').select(
+        '*, creator:founders!created_by_user_id(id, name)'
+    ).eq('workspace_id', workspace_id).order('created_at', desc=True).execute()
+    
+    # Process equity data
+    current_equity = None
+    all_scenarios = []
+    for s in (equity_scenarios.data or []):
+        scenario = {
+            'id': s['id'],
+            'workspace_id': s['workspace_id'],
+            'label': s['label'],
+            'data': s['data'],
+            'is_current': s['is_current'],
+            'created_by_user_id': s['created_by_user_id'],
+            'creator': s.get('creator', {}),
+            'created_at': s['created_at'],
+            'updated_at': s['updated_at'],
+            'approval_status': s.get('approval_status', 'PENDING'),
+            'status': s.get('status', 'active'),
+            'note': s.get('note')
+        }
+        if s['is_current']:
+            current_equity = scenario
+        all_scenarios.append(scenario)
+    
+    # Format participants
+    formatted_participants = [{
+        'id': p['id'],
+        'user_id': p['user_id'],
+        'user': p.get('user', {}),
+        'role': p.get('role'),
+        'role_label': p.get('role_label'),
+        'weekly_commitment_hours': p.get('weekly_commitment_hours'),
+        'timezone': p.get('timezone'),
+        'created_at': p['created_at'],
+        'updated_at': p['updated_at']
+    } for p in (participants.data or [])]
+    
+    # Format KPIs
+    formatted_kpis = [{
+        'id': k['id'],
+        'workspace_id': k['workspace_id'],
+        'label': k['label'],
+        'target_value': k.get('target_value'),
+        'target_date': k.get('target_date'),
+        'owner_user_id': k['owner_user_id'],
+        'owner': k.get('owner', {}),
+        'status': k.get('status', 'not_started'),
+        'created_at': k['created_at'],
+        'updated_at': k['updated_at']
+    } for k in (kpis.data or [])]
+    
+    # Format decisions
+    formatted_decisions = [{
+        'id': d['id'],
+        'workspace_id': d['workspace_id'],
+        'created_by_user_id': d['created_by_user_id'],
+        'creator': d.get('creator', {}),
+        'tag': d['tag'],
+        'content': d['content'],
+        'is_active': d['is_active'],
+        'created_at': d['created_at'],
+        'updated_at': d['updated_at']
+    } for d in (decisions.data or [])]
+    
+    # Format roles
+    formatted_roles = [{
+        'id': r['id'],
+        'workspace_id': r['workspace_id'],
+        'user_id': r['user_id'],
+        'user': r.get('user', {}),
+        'role_title': r['role_title'],
+        'responsibilities': r.get('responsibilities'),
+        'created_at': r['created_at'],
+        'updated_at': r['updated_at']
+    } for r in (roles.data or [])]
+    
+    # Format checkins
+    formatted_checkins = [{
+        'id': c['id'],
+        'workspace_id': c['workspace_id'],
+        'week_start': c['week_start'],
+        'summary': c.get('summary'),
+        'status': c.get('status', 'on_track'),
+        'progress_percent': c.get('progress_percent'),
+        'created_by_user_id': c['created_by_user_id'],
+        'creator': c.get('creator', {}),
+        'created_at': c['created_at']
+    } for c in (checkins.data or [])]
+    
+    return {
+        'workspace': {
+            'id': workspace_data['id'],
+            'match_id': workspace_data['match_id'],
+            'title': workspace_data.get('title'),
+            'stage': workspace_data.get('stage'),
+            'created_at': workspace_data['created_at'],
+            'updated_at': workspace_data['updated_at'],
+        },
+        'participants': formatted_participants,
+        'kpis': formatted_kpis,
+        'decisions': formatted_decisions,
+        'roles': formatted_roles,
+        'checkins': formatted_checkins,
+        'equity': {
+            'scenarios': all_scenarios,
+            'current': current_equity
+        },
+        'current_founder_id': founder_id
+    }
+

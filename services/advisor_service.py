@@ -399,21 +399,6 @@ def get_available_advisors(workspace_id, filters=None, clerk_user_id=None):
     """Get available partners for marketplace, filtered by workspace attributes"""
     supabase = get_supabase()
     
-    # Check if advisor_profiles table exists
-    try:
-        # Try to query the table to see if it exists
-        test_query = supabase.table('advisor_profiles').select('id').limit(1).execute()
-    except Exception as e:
-        error_msg = str(e)
-        if 'PGRST205' in error_msg or 'Could not find the table' in error_msg:
-            raise ValueError(
-                "The advisor_profiles table does not exist in the database. "
-                "Please run the database migration in Supabase SQL Editor: "
-                "backend/migrations/001_create_accountability_partner_tables.sql"
-            ) from e
-        # Re-raise other exceptions
-        raise
-    
     # Get workspace info for filtering (only select stage, domain column may not exist)
     try:
         workspace = supabase.table('workspaces').select('stage, domain').eq('id', workspace_id).execute()

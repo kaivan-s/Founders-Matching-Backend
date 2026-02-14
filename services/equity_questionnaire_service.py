@@ -227,7 +227,8 @@ def get_questionnaire_responses(
 
 def calculate_equity(
     clerk_user_id: str,
-    workspace_id: str
+    workspace_id: str,
+    override_advisor_percent: Optional[float] = None
 ) -> Dict[str, Any]:
     """
     Calculate equity scenarios based on questionnaire responses.
@@ -236,6 +237,7 @@ def calculate_equity(
     Args:
         clerk_user_id: Clerk user ID
         workspace_id: Workspace ID
+        override_advisor_percent: Optional advisor equity percentage to use instead of stored value
     
     Returns:
         Dict with recommended, equal, and custom scenario options
@@ -267,14 +269,17 @@ def calculate_equity(
         raise ValueError(f"Startup context incomplete: {', '.join(errors_ctx)}")
     
     # Extract advisor equity from vesting terms (can be set by either founder)
-    # Use the one that has it set, or default to 0
+    # Use override if provided (from current UI state), otherwise use stored value
     vesting_a = founder_a_responses.get('vesting_terms', {})
     vesting_b = founder_b_responses.get('vesting_terms', {})
-    advisor_equity_percent = (
-        vesting_a.get('advisor_equity_percent') or 
-        vesting_b.get('advisor_equity_percent') or 
-        0.0
-    )
+    if override_advisor_percent is not None:
+        advisor_equity_percent = override_advisor_percent
+    else:
+        advisor_equity_percent = (
+            vesting_a.get('advisor_equity_percent') or 
+            vesting_b.get('advisor_equity_percent') or 
+            0.0
+        )
     
     # Generate all scenarios (with advisor equity deducted)
     scenarios = generate_all_scenarios(

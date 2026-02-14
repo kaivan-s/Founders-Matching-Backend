@@ -33,6 +33,17 @@ CORS(app, resources={
 # Initialize rate limiter
 limiter = init_rate_limiter(app)
 
+# Shared helper to get founder_id from clerk_user_id (reduces duplicate code)
+def _get_founder_id_from_clerk(clerk_user_id):
+    """Get founder ID from clerk_user_id. Returns (founder_id, error_response) tuple.
+    If successful, error_response is None. If failed, founder_id is None.
+    """
+    supabase = get_supabase()
+    founder = supabase.table('founders').select('id').eq('clerk_user_id', clerk_user_id).execute()
+    if not founder.data:
+        return None, (jsonify({"error": "Founder not found"}), 404)
+    return founder.data[0]['id'], None
+
 @app.route('/')
 def home():
     return jsonify({
@@ -111,19 +122,20 @@ def save_onboarding():
         # Check if founder exists by clerk_user_id
         existing = supabase.table('founders').select('id, email').eq('clerk_user_id', clerk_user_id).execute()
         
-        # If not found by clerk_user_id, check by email (case-insensitive)
+        # If not found by clerk_user_id, check by email (case-insensitive) using database query
         if not existing.data and data.get('email'):
-            email = data.get('email', '').strip().lower()
+            email = data.get('email', '').strip()
             if email:
-                all_founders = supabase.table('founders').select('id, email, clerk_user_id').execute()
-                if all_founders.data:
-                    for founder in all_founders.data:
-                        founder_email = founder.get('email', '').strip().lower()
-                        if founder_email == email:
-                            # Found existing founder with same email - update clerk_user_id
-                            supabase.table('founders').update({'clerk_user_id': clerk_user_id}).eq('id', founder['id']).execute()
-                            existing = supabase.table('founders').select('id').eq('id', founder['id']).execute()
-                            break
+                # Use ilike for case-insensitive email match instead of loading all founders
+                email_match = supabase.table('founders').select('id, email, clerk_user_id').ilike(
+                    'email', email
+                ).limit(1).execute()
+                if email_match.data:
+                    founder = email_match.data[0]
+                    # Found existing founder with same email - update clerk_user_id
+                    supabase.table('founders').update({'clerk_user_id': clerk_user_id}).eq('id', founder['id']).execute()
+                    # Reuse the found founder data instead of re-querying
+                    existing = {'data': [{'id': founder['id'], 'email': founder.get('email')}]}
         
         if existing.data:
             # Update existing founder
@@ -157,6 +169,8 @@ def save_onboarding():
                 existing_projects = supabase.table('projects').select('display_order').eq('founder_id', founder_id).execute()
                 max_order = max([p['display_order'] for p in existing_projects.data], default=-1) if existing_projects.data else -1
                 
+                # Batch collect valid projects
+                project_rows = []
                 for idx, project in enumerate(data['projects'][:10]):  # Limit to 10 projects
                     title = sanitize_string(project.get('title'), max_length=200)
                     description = sanitize_string(project.get('description'), max_length=5000)
@@ -165,18 +179,21 @@ def save_onboarding():
                                          case_sensitive=False) or 'idea'
                     
                     if title and description:
-                        try:
-                            project_data = {
-                                'founder_id': founder_id,
-                                'title': title,
-                                'description': description,
-                                'stage': stage,
-                                'display_order': max_order + idx + 1
-                            }
-                            supabase.table('projects').insert(project_data).execute()
-                        except Exception as project_error:
-                            # Log but don't fail if project insert fails (might be duplicate)
-                            log_warning(f"Failed to insert project: {str(project_error)}")
+                        project_rows.append({
+                            'founder_id': founder_id,
+                            'title': title,
+                            'description': description,
+                            'stage': stage,
+                            'display_order': max_order + idx + 1
+                        })
+                
+                # Batch insert all projects at once
+                if project_rows:
+                    try:
+                        supabase.table('projects').insert(project_rows).execute()
+                    except Exception as project_error:
+                        # Log but don't fail if project insert fails (might be duplicate)
+                        log_warning(f"Failed to insert projects: {str(project_error)}")
             
             return jsonify(result.data[0]), 200
         else:
@@ -214,22 +231,25 @@ def save_onboarding():
             
             founder_id = result.data[0]['id']
             
-            # Add projects if provided
+            # Add projects if provided - batch insert for efficiency
             if data.get('projects'):
-                for idx, project in enumerate(data['projects']):
+                project_rows = []
+                for idx, project in enumerate(data['projects'][:10]):  # Limit to 10 projects
                     if project.get('title') and project.get('description'):
-                        try:
-                            project_data = {
-                                'founder_id': founder_id,
-                                'title': project['title'],
-                                'description': project['description'],
-                                'stage': project.get('stage', 'idea'),
-                                'display_order': idx
-                            }
-                            supabase.table('projects').insert(project_data).execute()
-                        except Exception as project_error:
-                            # Log but don't fail if project insert fails
-                            log_warning(f"Failed to insert project: {str(project_error)}")
+                        project_rows.append({
+                            'founder_id': founder_id,
+                            'title': project['title'],
+                            'description': project['description'],
+                            'stage': project.get('stage', 'idea'),
+                            'display_order': idx
+                        })
+                
+                if project_rows:
+                    try:
+                        supabase.table('projects').insert(project_rows).execute()
+                    except Exception as project_error:
+                        # Log but don't fail if project insert fails
+                        log_warning(f"Failed to insert projects: {str(project_error)}")
             
             return jsonify(result.data[0]), 201
             
@@ -919,6 +939,26 @@ def update_workspace(workspace_id):
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+@app.route('/api/workspaces/<workspace_id>/context', methods=['GET'])
+@limiter.limit(RATE_LIMITS['standard'])
+def get_workspace_context(workspace_id):
+    """Get combined workspace context data in a single API call.
+    
+    This endpoint consolidates multiple data fetches (participants, KPIs, decisions,
+    roles, checkins, equity) to reduce the number of API calls when loading workspace tabs.
+    """
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        context = workspace_service.get_workspace_context(clerk_user_id, workspace_id)
+        return jsonify(context), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 404
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 @app.route('/api/workspaces/<workspace_id>/participants', methods=['GET'])
 def get_workspace_participants(workspace_id):
     """Get workspace participants"""
@@ -1235,32 +1275,41 @@ def get_notifications_summary():
         if not workspace_ids:
             return jsonify({"error": "workspace_ids required"}), 400
         
-        # Get founder ID
+        # Get founder ID using shared helper
+        founder_id, error_response = _get_founder_id_from_clerk(clerk_user_id)
+        if error_response:
+            return error_response
+        
         supabase = get_supabase()
-        founder = supabase.table('founders').select('id').eq('clerk_user_id', clerk_user_id).execute()
-        if not founder.data:
-            return jsonify({"error": "Founder not found"}), 404
         
-        founder_id = founder.data[0]['id']
+        # Batch query: Get all pending approvals for requested workspaces in one query
+        all_approvals = supabase.table('approvals').select('workspace_id').eq(
+            'approver_user_id', founder_id
+        ).eq('status', 'PENDING').in_('workspace_id', workspace_ids).execute()
         
-        # Get summaries for each workspace
+        # Batch query: Get all unread notifications for requested workspaces in one query
+        # A notification is considered "unread" when read_at IS NULL
+        all_notifications = supabase.table('notifications').select('workspace_id').eq(
+            'user_id', founder_id
+        ).in_('workspace_id', workspace_ids).is_('read_at', 'null').execute()
+        
+        # Aggregate counts by workspace_id in Python
+        approval_counts = {}
+        for approval in (all_approvals.data or []):
+            ws_id = approval['workspace_id']
+            approval_counts[ws_id] = approval_counts.get(ws_id, 0) + 1
+        
+        notification_counts = {}
+        for notification in (all_notifications.data or []):
+            ws_id = notification['workspace_id']
+            notification_counts[ws_id] = notification_counts.get(ws_id, 0) + 1
+        
+        # Build summaries for each requested workspace
         summaries = {}
         for workspace_id in workspace_ids:
-            # Get pending approvals count
-            approvals = supabase.table('approvals').select('id').eq(
-                'workspace_id', workspace_id
-            ).eq('approver_user_id', founder_id).eq('status', 'PENDING').execute()
-            
-            # Get unread notifications count
-            # A notification is considered "unread" when read_at IS NULL
-            # This ensures the badge only shows when there are actually unread notifications
-            notifications = supabase.table('notifications').select('id').eq(
-                'user_id', founder_id
-            ).eq('workspace_id', workspace_id).is_('read_at', 'null').execute()
-            
             summaries[workspace_id] = {
-                'pending_approvals': len(approvals.data) if approvals.data else 0,
-                'unread_updates': len(notifications.data) if notifications.data else 0
+                'pending_approvals': approval_counts.get(workspace_id, 0),
+                'unread_updates': notification_counts.get(workspace_id, 0)
                 # Note: unread_updates will be 0 when all notifications have read_at set
                 # The badge will automatically disappear when this count reaches 0
             }
@@ -1283,13 +1332,12 @@ def get_notifications():
         if not workspace_id:
             return jsonify({"error": "workspace_id required"}), 400
         
-        # Get founder ID
-        supabase = get_supabase()
-        founder = supabase.table('founders').select('id').eq('clerk_user_id', clerk_user_id).execute()
-        if not founder.data:
-            return jsonify({"error": "Founder not found"}), 404
+        # Get founder ID using shared helper
+        founder_id, error_response = _get_founder_id_from_clerk(clerk_user_id)
+        if error_response:
+            return error_response
         
-        founder_id = founder.data[0]['id']
+        supabase = get_supabase()
         
         # Get notifications
         query = supabase.table('notifications').select(
@@ -1317,13 +1365,12 @@ def mark_notification_read(notification_id):
         if not clerk_user_id:
             return jsonify({"error": "User ID required"}), 401
         
-        # Get founder ID
-        supabase = get_supabase()
-        founder = supabase.table('founders').select('id').eq('clerk_user_id', clerk_user_id).execute()
-        if not founder.data:
-            return jsonify({"error": "Founder not found"}), 404
+        # Get founder ID using shared helper
+        founder_id, error_response = _get_founder_id_from_clerk(clerk_user_id)
+        if error_response:
+            return error_response
         
-        founder_id = founder.data[0]['id']
+        supabase = get_supabase()
         
         # Update notification
         from datetime import datetime
@@ -1353,13 +1400,12 @@ def mark_all_notifications_read():
         if not workspace_id:
             return jsonify({"error": "workspace_id required"}), 400
         
-        # Get founder ID
-        supabase = get_supabase()
-        founder = supabase.table('founders').select('id').eq('clerk_user_id', clerk_user_id).execute()
-        if not founder.data:
-            return jsonify({"error": "Founder not found"}), 404
+        # Get founder ID using shared helper
+        founder_id, error_response = _get_founder_id_from_clerk(clerk_user_id)
+        if error_response:
+            return error_response
         
-        founder_id = founder.data[0]['id']
+        supabase = get_supabase()
         
         # Update all unread notifications
         from datetime import datetime
@@ -1486,13 +1532,12 @@ def notification_preferences():
         if not workspace_id:
             return jsonify({"error": "workspace_id required"}), 400
         
-        # Get founder ID
-        supabase = get_supabase()
-        founder = supabase.table('founders').select('id').eq('clerk_user_id', clerk_user_id).execute()
-        if not founder.data:
-            return jsonify({"error": "Founder not found"}), 404
+        # Get founder ID using shared helper
+        founder_id, error_response = _get_founder_id_from_clerk(clerk_user_id)
+        if error_response:
+            return error_response
         
-        founder_id = founder.data[0]['id']
+        supabase = get_supabase()
         
         if request.method == 'GET':
             # Get preferences
@@ -1819,13 +1864,12 @@ def get_advisor_notifications():
         if not clerk_user_id:
             return jsonify({"error": "User ID required"}), 401
         
-        # Get founder ID
-        supabase = get_supabase()
-        founder = supabase.table('founders').select('id').eq('clerk_user_id', clerk_user_id).execute()
-        if not founder.data:
-            return jsonify({"error": "Founder not found"}), 404
+        # Get founder ID using shared helper
+        founder_id, error_response = _get_founder_id_from_clerk(clerk_user_id)
+        if error_response:
+            return error_response
         
-        founder_id = founder.data[0]['id']
+        supabase = get_supabase()
         
         # Get all workspaces where user is an advisor
         try:
@@ -2696,8 +2740,12 @@ def calculate_equity(workspace_id):
         if not clerk_user_id:
             return jsonify({"error": "User ID required"}), 401
         
+        # Get optional advisor_percent from request body (uses current UI state)
+        data = request.get_json(silent=True) or {}
+        override_advisor_percent = data.get('advisor_percent')
+        
         result = equity_questionnaire_service.calculate_equity(
-            clerk_user_id, workspace_id
+            clerk_user_id, workspace_id, override_advisor_percent
         )
         return jsonify(result), 200
     except ValueError as e:
