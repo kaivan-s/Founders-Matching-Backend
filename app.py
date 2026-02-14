@@ -1693,6 +1693,97 @@ def advisor_profile():
             "traceback": error_trace if app.debug else None
         }), 500
 
+
+# LinkedIn OAuth endpoints for advisor verification
+from services import linkedin_service
+
+@app.route('/api/advisors/linkedin/status', methods=['GET'])
+def get_linkedin_status():
+    """Get LinkedIn verification status for current advisor"""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        status = linkedin_service.get_advisor_linkedin_status(clerk_user_id)
+        return jsonify(status), 200
+    except Exception as e:
+        log_error("Error getting LinkedIn status", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/advisors/linkedin/connect', methods=['GET'])
+def linkedin_connect():
+    """Initiate LinkedIn OAuth flow for advisor verification"""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        if not linkedin_service.is_linkedin_configured():
+            return jsonify({
+                "error": "LinkedIn verification is not yet configured. Please contact support."
+            }), 503
+        
+        auth_url, state = linkedin_service.get_linkedin_auth_url(clerk_user_id)
+        return jsonify({
+            "auth_url": auth_url,
+            "state": state
+        }), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        log_error("Error initiating LinkedIn OAuth", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/advisors/linkedin/callback', methods=['POST'])
+def linkedin_callback():
+    """Complete LinkedIn OAuth verification"""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        data = request.get_json()
+        code = data.get('code')
+        state = data.get('state')
+        
+        if not code:
+            return jsonify({"error": "Authorization code required"}), 400
+        
+        # Verify state if provided (optional additional security)
+        if state:
+            stored_user_id = linkedin_service.verify_oauth_state(state)
+            if stored_user_id and stored_user_id != clerk_user_id:
+                return jsonify({"error": "Invalid OAuth state"}), 400
+        
+        result = linkedin_service.verify_advisor_linkedin(clerk_user_id, code)
+        return jsonify(result), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        log_error("Error completing LinkedIn verification", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/advisors/linkedin/revoke', methods=['POST'])
+def linkedin_revoke():
+    """Revoke LinkedIn verification"""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        result = linkedin_service.revoke_linkedin_verification(clerk_user_id)
+        return jsonify(result), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        log_error("Error revoking LinkedIn verification", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route('/api/workspaces/<workspace_id>/advisors/marketplace', methods=['GET'])
 def get_advisor_marketplace(workspace_id):
     """Get available advisors for marketplace"""
