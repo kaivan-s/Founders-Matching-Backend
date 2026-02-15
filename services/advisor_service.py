@@ -658,6 +658,19 @@ def get_advisor_requests(clerk_user_id, status=None):
                 'founders': [{'name': p.get('founders', {}).get('name', 'Unknown')} for p in (participants.data or [])]
             }
             
+            # Get advisor equity offered (from equity questionnaire vesting terms)
+            advisor_equity_percent = None
+            try:
+                eq_responses = supabase.table('equity_questionnaire_responses').select('responses').eq('workspace_id', workspace_id).execute()
+                for r in (eq_responses.data or []):
+                    vesting = (r.get('responses') or {}).get('vesting_terms', {})
+                    if 'advisor_equity_percent' in vesting:
+                        pct = float(vesting.get('advisor_equity_percent', 0) or 0)
+                        if advisor_equity_percent is None or pct > advisor_equity_percent:
+                            advisor_equity_percent = pct
+            except Exception:
+                pass
+            
             # Get match/project info if available (one project, two founders)
             workspace_data = request.get('workspace', {})
             match_id = workspace_data.get('match_id') if isinstance(workspace_data, dict) else None
@@ -687,7 +700,8 @@ def get_advisor_requests(clerk_user_id, status=None):
                 'decisions': decision_summary,
                 'participants': participant_summary,
                 'match_id': match_id,
-                'projects': projects_info
+                'projects': projects_info,
+                'advisor_equity_percent': advisor_equity_percent
             }
         
         enriched_requests.append(request)

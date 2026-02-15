@@ -10,7 +10,7 @@ from utils.logger import log_error, log_warning, log_info
 from utils.rate_limit import init_rate_limiter, RATE_LIMITS
 from config.database import get_supabase
 from services import founder_service, project_service, swipe_service, profile_service, match_service, waitlist_service, message_service, payment_service, workspace_service, task_service
-from services import plan_service, subscription_service, document_service, feedback_service, advanced_search_service, advisor_service, admin_service
+from services import plan_service, subscription_service, document_service, feedback_service, advanced_search_service, advisor_service, admin_service, feed_service
 from services.notification_service import NotificationService, ApprovalService
 
 app = Flask(__name__)
@@ -1781,6 +1781,232 @@ def linkedin_revoke():
         return jsonify({"error": str(e)}), 400
     except Exception as e:
         log_error("Error revoking LinkedIn verification", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
+# ============================================
+# WORKSPACE FEED & COLLABORATION ROUTES
+# ============================================
+
+@app.route('/api/workspaces/<workspace_id>/feed', methods=['GET'])
+def get_workspace_feed(workspace_id):
+    """Get activity feed for a workspace"""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        limit = request.args.get('limit', 50, type=int)
+        offset = request.args.get('offset', 0, type=int)
+        
+        posts = feed_service.get_feed_posts(clerk_user_id, workspace_id, limit, offset)
+        return jsonify(posts), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        log_error("Error fetching feed", error=e)
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/workspaces/<workspace_id>/feed', methods=['POST'])
+def create_workspace_feed_post(workspace_id):
+    """Create a new feed post"""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        data = request.get_json() or {}
+        content = data.get('content', '')
+        post_type = data.get('post_type', 'message')
+        
+        post = feed_service.create_feed_post(clerk_user_id, workspace_id, content, post_type)
+        return jsonify(post), 201
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        log_error("Error creating feed post", error=e)
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/workspaces/<workspace_id>/feed/<post_id>/replies', methods=['POST'])
+def create_feed_reply(workspace_id, post_id):
+    """Create a reply to a feed post"""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        data = request.get_json() or {}
+        content = data.get('content', '')
+        
+        reply = feed_service.create_feed_reply(clerk_user_id, workspace_id, post_id, content)
+        return jsonify(reply), 201
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        log_error("Error creating feed reply", error=e)
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/workspaces/<workspace_id>/feed/<post_id>', methods=['DELETE'])
+def delete_feed_post(workspace_id, post_id):
+    """Delete a feed post"""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        feed_service.delete_feed_post(clerk_user_id, workspace_id, post_id)
+        return jsonify({"success": True}), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        log_error("Error deleting feed post", error=e)
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/workspaces/<workspace_id>/meetings', methods=['GET'])
+def get_workspace_meetings(workspace_id):
+    """Get meetings for a workspace"""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        meetings = feed_service.get_meetings(clerk_user_id, workspace_id)
+        return jsonify(meetings), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        log_error("Error fetching meetings", error=e)
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/workspaces/<workspace_id>/meetings', methods=['POST'])
+def create_workspace_meeting(workspace_id):
+    """Log a new meeting"""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        data = request.get_json() or {}
+        meeting = feed_service.create_meeting(clerk_user_id, workspace_id, data)
+        return jsonify(meeting), 201
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        log_error("Error creating meeting", error=e)
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/workspaces/<workspace_id>/engagement-checkins/status', methods=['GET'])
+def get_engagement_checkin_status(workspace_id):
+    """Check if user needs to complete a monthly engagement check-in"""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        status = feed_service.get_checkin_status(clerk_user_id, workspace_id)
+        return jsonify(status), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        log_error("Error checking engagement check-in status", error=e)
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/workspaces/<workspace_id>/engagement-checkins', methods=['GET'])
+def get_engagement_checkins(workspace_id):
+    """Get all engagement check-ins for a workspace (advisor-founder relationship)"""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        checkins = feed_service.get_checkins(clerk_user_id, workspace_id)
+        return jsonify(checkins), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        log_error("Error fetching engagement check-ins", error=e)
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/workspaces/<workspace_id>/engagement-checkins', methods=['POST'])
+def create_engagement_checkin(workspace_id):
+    """Submit a monthly engagement check-in"""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        data = request.get_json() or {}
+        checkin = feed_service.create_checkin(clerk_user_id, workspace_id, data)
+        return jsonify(checkin), 201
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        log_error("Error creating engagement check-in", error=e)
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/workspaces/<workspace_id>/activity-logs', methods=['GET'])
+def get_workspace_activity_logs(workspace_id):
+    """Get activity logs for a workspace"""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        logs = feed_service.get_activity_logs(clerk_user_id, workspace_id)
+        return jsonify(logs), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        log_error("Error fetching activity logs", error=e)
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/workspaces/<workspace_id>/activity-logs', methods=['POST'])
+def create_workspace_activity_log(workspace_id):
+    """Log advisor activity/hours"""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        data = request.get_json() or {}
+        log = feed_service.create_activity_log(clerk_user_id, workspace_id, data)
+        return jsonify(log), 201
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        log_error("Error creating activity log", error=e)
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/workspaces/<workspace_id>/activity-summary', methods=['GET'])
+def get_workspace_activity_summary(workspace_id):
+    """Get summary of advisor activity for a workspace"""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        summary = feed_service.get_activity_summary(clerk_user_id, workspace_id)
+        return jsonify(summary), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        log_error("Error fetching activity summary", error=e)
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/workspaces/<workspace_id>/participants-with-roles', methods=['GET'])
+def get_participants_with_roles(workspace_id):
+    """Get all participants with their roles (for attendee selection, etc.)"""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        participants = feed_service.get_workspace_participants_with_roles(clerk_user_id, workspace_id)
+        return jsonify(participants), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        log_error("Error fetching participants", error=e)
         return jsonify({"error": str(e)}), 500
 
 
