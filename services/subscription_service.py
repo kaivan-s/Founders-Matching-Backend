@@ -297,7 +297,9 @@ def handle_subscription_webhook(webhook_data: Dict[str, Any]) -> Dict[str, Any]:
     
     Events handled:
     - checkout.created: When a checkout is created
-    - order.created: When an order is created and paid - activate subscription
+    - checkout.updated: When checkout status changes (including completion)
+    - order.created: When an order is created (may still be pending)
+    - order.paid: When an order payment is confirmed - activate subscription
     - subscription.created: When a subscription is created
     - subscription.updated: When subscription status changes
     - subscription.canceled: When subscription is canceled
@@ -305,12 +307,25 @@ def handle_subscription_webhook(webhook_data: Dict[str, Any]) -> Dict[str, Any]:
     Returns:
         dict: Result of webhook processing
     """
+    from utils.logger import log_info
+    
     event_type = webhook_data.get('type')
+    
+    # Log webhook event for debugging
+    log_info(f"Received webhook event: {event_type}", metadata={
+        "event_type": event_type,
+        "data_keys": list(webhook_data.get('data', {}).keys()) if webhook_data.get('data') else []
+    })
     
     if event_type == 'checkout.created':
         return handle_checkout_created(webhook_data)
+    elif event_type == 'checkout.updated':
+        return handle_checkout_updated(webhook_data)
     elif event_type == 'order.created':
         return handle_order_created(webhook_data)
+    elif event_type == 'order.paid':
+        # order.paid is the definitive payment confirmation
+        return handle_order_paid(webhook_data)
     elif event_type == 'subscription.created':
         return handle_subscription_created(webhook_data)
     elif event_type == 'subscription.updated':
@@ -320,11 +335,55 @@ def handle_subscription_webhook(webhook_data: Dict[str, Any]) -> Dict[str, Any]:
     else:
         return {"status": "ignored", "message": f"Event {event_type} not handled"}
 
+def _extract_metadata(data: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Extract customer metadata from webhook data.
+    Polar stores metadata in different locations depending on the event type:
+    - checkout events: data.customer_metadata or data.metadata
+    - order events: data.customer.metadata or data.metadata
+    - subscription events: data.customer.metadata or data.metadata
+    """
+    from utils.logger import log_info
+    
+    metadata = {}
+    
+    # Try direct metadata field first
+    if data.get('metadata'):
+        metadata = data.get('metadata', {})
+    
+    # Try customer_metadata (used in checkout creation)
+    if not metadata and data.get('customer_metadata'):
+        metadata = data.get('customer_metadata', {})
+    
+    # Try nested customer.metadata
+    if not metadata and data.get('customer'):
+        customer = data.get('customer', {})
+        if customer.get('metadata'):
+            metadata = customer.get('metadata', {})
+    
+    # Try checkout field (for orders linked to checkouts)
+    if not metadata and data.get('checkout'):
+        checkout = data.get('checkout', {})
+        if checkout.get('customer_metadata'):
+            metadata = checkout.get('customer_metadata', {})
+        elif checkout.get('metadata'):
+            metadata = checkout.get('metadata', {})
+    
+    # Log where we found metadata for debugging
+    log_info(f"Extracted metadata", metadata={
+        "found_metadata": bool(metadata),
+        "metadata_keys": list(metadata.keys()) if metadata else [],
+        "data_keys": list(data.keys())
+    })
+    
+    return metadata
+
+
 def handle_checkout_created(webhook_data: Dict[str, Any]) -> Dict[str, Any]:
     """Handle checkout.created webhook - store checkout info"""
     try:
         data = webhook_data.get('data', {})
-        metadata = data.get('metadata', {})
+        metadata = _extract_metadata(data)
         subscription_type = metadata.get('subscription_type')
         
         if subscription_type == 'founder_plan':
@@ -362,55 +421,49 @@ def handle_checkout_created(webhook_data: Dict[str, Any]) -> Dict[str, Any]:
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
-def handle_order_created(webhook_data: Dict[str, Any]) -> Dict[str, Any]:
-    """Handle order.created webhook - activate subscription or process advisor payment"""
+
+def handle_checkout_updated(webhook_data: Dict[str, Any]) -> Dict[str, Any]:
+    """Handle checkout.updated webhook - process completed checkouts"""
+    from utils.logger import log_info
+    
     try:
         data = webhook_data.get('data', {})
-        order_id = data.get('id')
-        metadata = data.get('metadata', {})
+        checkout_id = data.get('id')
+        status = data.get('status')
+        
+        log_info(f"Checkout updated: {checkout_id} -> {status}")
+        
+        # Only process succeeded checkouts
+        if status != 'succeeded':
+            return {"status": "ignored", "message": f"Checkout status {status} - not processing"}
+        
+        metadata = _extract_metadata(data)
         subscription_type = metadata.get('subscription_type')
         clerk_user_id = metadata.get('clerk_user_id')
         
         if not clerk_user_id:
-            return {"status": "error", "message": "Missing clerk_user_id"}
+            log_info(f"No clerk_user_id in checkout metadata, checking customer email")
+            # Try to find user by email
+            customer_email = data.get('customer_email') or data.get('customer', {}).get('email')
+            if customer_email:
+                supabase = get_supabase()
+                founder = supabase.table('founders').select('clerk_user_id').eq('email', customer_email).execute()
+                if founder.data:
+                    clerk_user_id = founder.data[0].get('clerk_user_id')
         
-        if not order_id:
-            return {"status": "error", "message": "Missing order ID"}
+        if not clerk_user_id:
+            return {"status": "error", "message": "Could not identify user from checkout"}
         
         supabase = get_supabase()
-        
-        # Check if this webhook was already processed (idempotency)
-        # Use a simple table to track processed webhooks
-        try:
-            processed_check = supabase.table('webhook_processing_log').select('id').eq('webhook_id', order_id).eq('webhook_type', 'order.created').execute()
-            if processed_check.data:
-                # Already processed - return success without re-processing
-                return {"status": "success", "message": "Webhook already processed", "idempotent": True}
-        except Exception:
-            # Table might not exist yet - continue processing
-            pass
         
         if subscription_type == 'founder_plan':
             plan_id = metadata.get('plan_id')
             if not plan_id:
-                return {"status": "error", "message": "Missing plan_id"}
+                return {"status": "error", "message": "Missing plan_id in checkout"}
             
-            # Get actual subscription period from webhook data
-            # Polar webhooks include current_period_end, use that instead of hardcoding
-            current_period_end = None
-            if data.get('current_period_end'):
-                # Convert Unix timestamp to datetime if needed
-                period_end_value = data.get('current_period_end')
-                if isinstance(period_end_value, (int, float)):
-                    current_period_end = datetime.fromtimestamp(period_end_value, tz=timezone.utc)
-                elif isinstance(period_end_value, str):
-                    current_period_end = datetime.fromisoformat(period_end_value.replace('Z', '+00:00'))
-            else:
-                # Fallback: calculate from billing period if available
-                # Default to 30 days if no period info available
-                current_period_end = datetime.now(timezone.utc) + timedelta(days=30)
+            # Activate the plan
+            current_period_end = datetime.now(timezone.utc) + timedelta(days=30)
             
-            # Update user's plan
             plan_service.update_founder_plan(
                 clerk_user_id,
                 plan_id,
@@ -419,98 +472,313 @@ def handle_order_created(webhook_data: Dict[str, Any]) -> Dict[str, Any]:
                 current_period_end=current_period_end
             )
             
-            # Log successful processing
+            # Update checkout status
             try:
-                supabase.table('webhook_processing_log').insert({
-                    'webhook_id': order_id,
-                    'webhook_type': 'order.created',
-                    'processed_at': datetime.now(timezone.utc).isoformat(),
-                    'status': 'success'
-                }).execute()
+                supabase.table('subscription_checkouts').update({
+                    'status': 'completed'
+                }).eq('checkout_id', checkout_id).execute()
             except Exception:
-                # Log but don't fail if logging fails
                 pass
             
+            log_info(f"Plan activated via checkout.updated: {plan_id} for {clerk_user_id}")
+            return {"status": "success", "message": f"Plan {plan_id} activated via checkout"}
+            
+        elif subscription_type == 'advisor_onboarding':
+            plan_service.update_advisor_billing(clerk_user_id, onboarding_paid=True)
+            log_info(f"Advisor onboarding activated via checkout.updated for {clerk_user_id}")
+            return {"status": "success", "message": "Advisor onboarding paid via checkout"}
+            
+        elif subscription_type == 'advisor_renewal':
+            plan_service.renew_advisor_subscription(clerk_user_id)
+            log_info(f"Advisor renewal activated via checkout.updated for {clerk_user_id}")
+            return {"status": "success", "message": "Advisor subscription renewed via checkout"}
+            
+        elif subscription_type == 'advisor_project_accept':
+            request_id = metadata.get('request_id')
+            if request_id:
+                try:
+                    supabase.table('advisor_project_payments').insert({
+                        'clerk_user_id': clerk_user_id,
+                        'request_id': request_id,
+                        'order_id': checkout_id,
+                        'paid_at': datetime.now(timezone.utc).isoformat(),
+                        'amount_usd': 69
+                    }).execute()
+                except Exception:
+                    pass
+                log_info(f"Advisor project accept payment recorded via checkout.updated for {clerk_user_id}")
+                return {"status": "success", "message": f"Project accept payment recorded for request {request_id}"}
+        
+        return {"status": "ignored", "message": f"Unknown subscription type: {subscription_type}"}
+    except Exception as e:
+        from utils.logger import log_error
+        log_error(f"Error handling checkout.updated: {e}")
+        return {"status": "error", "message": str(e)}
+
+def handle_order_created(webhook_data: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Handle order.created webhook.
+    
+    NOTE: order.created may arrive with status 'pending' (not yet paid).
+    For payment confirmation, we now primarily rely on order.paid event.
+    This handler now only logs the order and waits for order.paid to activate.
+    """
+    from utils.logger import log_info
+    
+    try:
+        data = webhook_data.get('data', {})
+        order_id = data.get('id')
+        order_status = data.get('status')
+        is_paid = data.get('paid', False)
+        
+        log_info(f"Order created: {order_id}, status: {order_status}, paid: {is_paid}")
+        
+        # If order is already paid (sometimes Polar sends it this way), process it
+        if is_paid or order_status == 'paid':
+            log_info(f"Order {order_id} is already paid, processing immediately")
+            return _process_paid_order(webhook_data, 'order.created')
+        
+        # Otherwise, just log and wait for order.paid event
+        metadata = _extract_metadata(data)
+        clerk_user_id = metadata.get('clerk_user_id')
+        subscription_type = metadata.get('subscription_type')
+        
+        supabase = get_supabase()
+        
+        # Store pending order for tracking
+        try:
+            supabase.table('webhook_processing_log').insert({
+                'webhook_id': order_id,
+                'webhook_type': 'order.created',
+                'processed_at': datetime.now(timezone.utc).isoformat(),
+                'status': 'pending',
+                'error_message': f"Waiting for payment. clerk_user_id: {clerk_user_id}, type: {subscription_type}"
+            }).execute()
+        except Exception:
+            pass
+        
+        return {"status": "success", "message": f"Order {order_id} created, waiting for payment confirmation"}
+        
+    except Exception as e:
+        from utils.logger import log_error
+        log_error(f"Error handling order.created: {e}")
+        return {"status": "error", "message": str(e)}
+
+
+def handle_order_paid(webhook_data: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Handle order.paid webhook - this is the definitive payment confirmation.
+    Activates subscriptions and processes payments here.
+    """
+    from utils.logger import log_info
+    
+    log_info("Processing order.paid webhook")
+    return _process_paid_order(webhook_data, 'order.paid')
+
+
+def _process_paid_order(webhook_data: Dict[str, Any], event_type: str) -> Dict[str, Any]:
+    """
+    Common handler for processing a paid order.
+    Called by both order.created (if already paid) and order.paid events.
+    """
+    from utils.logger import log_info, log_error
+    
+    try:
+        data = webhook_data.get('data', {})
+        order_id = data.get('id')
+        
+        if not order_id:
+            return {"status": "error", "message": "Missing order ID"}
+        
+        supabase = get_supabase()
+        
+        # Check if this order was already processed (idempotency)
+        try:
+            processed_check = supabase.table('webhook_processing_log').select('id, status').eq('webhook_id', order_id).eq('status', 'success').execute()
+            if processed_check.data:
+                log_info(f"Order {order_id} already processed successfully")
+                return {"status": "success", "message": "Order already processed", "idempotent": True}
+        except Exception:
+            pass
+        
+        # Extract metadata using the robust extractor
+        metadata = _extract_metadata(data)
+        subscription_type = metadata.get('subscription_type')
+        clerk_user_id = metadata.get('clerk_user_id')
+        
+        log_info(f"Processing paid order: {order_id}", metadata={
+            "subscription_type": subscription_type,
+            "clerk_user_id": clerk_user_id,
+            "has_metadata": bool(metadata)
+        })
+        
+        # If no clerk_user_id in metadata, try to find by email
+        if not clerk_user_id:
+            log_info("No clerk_user_id in metadata, attempting lookup by email")
+            customer_email = data.get('customer_email') or (data.get('customer', {}) or {}).get('email')
+            if customer_email:
+                founder = supabase.table('founders').select('clerk_user_id').eq('email', customer_email).execute()
+                if founder.data:
+                    clerk_user_id = founder.data[0].get('clerk_user_id')
+                    log_info(f"Found clerk_user_id by email: {clerk_user_id}")
+        
+        if not clerk_user_id:
+            log_error(f"Cannot process order {order_id}: no clerk_user_id found")
+            return {"status": "error", "message": "Missing clerk_user_id - cannot identify user"}
+        
+        # Try to determine subscription_type from product if not in metadata
+        if not subscription_type:
+            log_info("No subscription_type in metadata, checking product")
+            # Check product IDs to determine type
+            items = data.get('items', []) or data.get('line_items', [])
+            for item in items:
+                product_id = item.get('product_id') or (item.get('product', {}) or {}).get('id')
+                if product_id == POLAR_PRODUCT_PRO_ID:
+                    subscription_type = 'founder_plan'
+                    metadata['plan_id'] = 'PRO'
+                    break
+                elif product_id == POLAR_PRODUCT_PRO_PLUS_ID:
+                    subscription_type = 'founder_plan'
+                    metadata['plan_id'] = 'PRO_PLUS'
+                    break
+                elif product_id == POLAR_PRODUCT_ADVISOR_ONBOARDING_ID:
+                    subscription_type = 'advisor_onboarding'
+                    break
+                elif product_id == POLAR_PRODUCT_ADVISOR_RENEWAL_ID:
+                    subscription_type = 'advisor_renewal'
+                    break
+            
+            log_info(f"Determined subscription_type from product: {subscription_type}")
+        
+        if subscription_type == 'founder_plan':
+            plan_id = metadata.get('plan_id')
+            if not plan_id:
+                log_error(f"Missing plan_id for order {order_id}")
+                return {"status": "error", "message": "Missing plan_id"}
+            
+            # Get subscription period from webhook data
+            current_period_end = None
+            if data.get('current_period_end'):
+                period_end_value = data.get('current_period_end')
+                if isinstance(period_end_value, (int, float)):
+                    current_period_end = datetime.fromtimestamp(period_end_value, tz=timezone.utc)
+                elif isinstance(period_end_value, str):
+                    current_period_end = datetime.fromisoformat(period_end_value.replace('Z', '+00:00'))
+            
+            # Also try subscription object for period info
+            subscription = data.get('subscription', {})
+            if not current_period_end and subscription.get('current_period_end'):
+                period_end_value = subscription.get('current_period_end')
+                if isinstance(period_end_value, (int, float)):
+                    current_period_end = datetime.fromtimestamp(period_end_value, tz=timezone.utc)
+                elif isinstance(period_end_value, str):
+                    current_period_end = datetime.fromisoformat(period_end_value.replace('Z', '+00:00'))
+            
+            if not current_period_end:
+                current_period_end = datetime.now(timezone.utc) + timedelta(days=30)
+            
+            # Get subscription_id
+            subscription_id = data.get('subscription_id') or subscription.get('id')
+            
+            # Update user's plan
+            plan_service.update_founder_plan(
+                clerk_user_id,
+                plan_id,
+                subscription_id=subscription_id,
+                subscription_status='active',
+                current_period_end=current_period_end
+            )
+            
+            # Log successful processing
+            try:
+                supabase.table('webhook_processing_log').upsert({
+                    'webhook_id': order_id,
+                    'webhook_type': event_type,
+                    'processed_at': datetime.now(timezone.utc).isoformat(),
+                    'status': 'success'
+                }, on_conflict='webhook_id').execute()
+            except Exception:
+                pass
+            
+            log_info(f"Plan {plan_id} activated for {clerk_user_id}")
             return {"status": "success", "message": f"Plan {plan_id} activated"}
             
         elif subscription_type == 'advisor_onboarding':
-            # Mark advisor onboarding as paid
             plan_service.update_advisor_billing(clerk_user_id, onboarding_paid=True)
             
-            # Log successful processing
             try:
-                supabase.table('webhook_processing_log').insert({
+                supabase.table('webhook_processing_log').upsert({
                     'webhook_id': order_id,
-                    'webhook_type': 'order.created',
+                    'webhook_type': event_type,
                     'processed_at': datetime.now(timezone.utc).isoformat(),
                     'status': 'success'
-                }).execute()
+                }, on_conflict='webhook_id').execute()
             except Exception:
                 pass
             
+            log_info(f"Advisor onboarding paid for {clerk_user_id}")
             return {"status": "success", "message": "Advisor onboarding paid"}
             
         elif subscription_type == 'advisor_renewal':
-            # Renew advisor subscription
             plan_service.renew_advisor_subscription(clerk_user_id)
             
-            # Log successful processing
             try:
-                supabase.table('webhook_processing_log').insert({
+                supabase.table('webhook_processing_log').upsert({
                     'webhook_id': order_id,
-                    'webhook_type': 'order.created',
+                    'webhook_type': event_type,
                     'processed_at': datetime.now(timezone.utc).isoformat(),
                     'status': 'success'
-                }).execute()
+                }, on_conflict='webhook_id').execute()
             except Exception:
                 pass
             
+            log_info(f"Advisor subscription renewed for {clerk_user_id}")
             return {"status": "success", "message": "Advisor subscription renewed"}
         
         elif subscription_type == 'advisor_project_accept':
-            # Record payment for accepting a specific project
             request_id = metadata.get('request_id')
             if not request_id:
                 return {"status": "error", "message": "Missing request_id for project accept"}
             
-            # Record the paid accept
             try:
                 supabase.table('advisor_project_payments').insert({
                     'clerk_user_id': clerk_user_id,
                     'request_id': request_id,
                     'order_id': order_id,
                     'paid_at': datetime.now(timezone.utc).isoformat(),
-                    'amount_usd': 69  # Fixed fee
-                }).execute()
-            except Exception as e:
-                # Table might not exist - log and continue
-                pass
-            
-            # Log successful processing
-            try:
-                supabase.table('webhook_processing_log').insert({
-                    'webhook_id': order_id,
-                    'webhook_type': 'order.created',
-                    'processed_at': datetime.now(timezone.utc).isoformat(),
-                    'status': 'success'
+                    'amount_usd': 69
                 }).execute()
             except Exception:
                 pass
             
+            try:
+                supabase.table('webhook_processing_log').upsert({
+                    'webhook_id': order_id,
+                    'webhook_type': event_type,
+                    'processed_at': datetime.now(timezone.utc).isoformat(),
+                    'status': 'success'
+                }, on_conflict='webhook_id').execute()
+            except Exception:
+                pass
+            
+            log_info(f"Project accept payment recorded for {clerk_user_id}, request {request_id}")
             return {"status": "success", "message": f"Project accept payment recorded for request {request_id}"}
         
+        log_info(f"Unknown or missing subscription_type: {subscription_type}")
         return {"status": "ignored", "message": f"Unknown subscription type: {subscription_type}"}
+        
     except Exception as e:
-        # Log failed processing
+        from utils.logger import log_error
+        log_error(f"Error processing paid order: {e}")
         try:
             supabase = get_supabase()
-            supabase.table('webhook_processing_log').insert({
+            supabase.table('webhook_processing_log').upsert({
                 'webhook_id': webhook_data.get('data', {}).get('id', 'unknown'),
-                'webhook_type': 'order.created',
+                'webhook_type': event_type,
                 'processed_at': datetime.now(timezone.utc).isoformat(),
                 'status': 'error',
                 'error_message': str(e)
-            }).execute()
+            }, on_conflict='webhook_id').execute()
         except Exception:
             pass
         return {"status": "error", "message": str(e)}
