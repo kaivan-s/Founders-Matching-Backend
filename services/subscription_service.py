@@ -11,7 +11,8 @@ from utils.auth import get_clerk_user_email
 
 # Polar API configuration
 POLAR_ACCESS_TOKEN = os.getenv('POLAR_ACCESS_TOKEN')
-FRONTEND_URL = os.getenv('FRONTEND_URL', 'http://localhost:3000')
+# Strip trailing slash to avoid double slashes in URLs
+FRONTEND_URL = os.getenv('FRONTEND_URL', 'http://localhost:3000').rstrip('/')
 
 # Product IDs - These need to be set in Polar dashboard
 # Set these as environment variables: POLAR_PRODUCT_PRO_ID, POLAR_PRODUCT_PRO_PLUS_ID
