@@ -152,6 +152,73 @@ def create_advisor_onboarding_checkout(clerk_user_id: str) -> Dict[str, str]:
         error_msg = str(e)
         raise ValueError(f"Failed to create checkout session: {error_msg}")
 
+def create_advisor_project_accept_checkout(clerk_user_id: str, request_id: str) -> Dict[str, str]:
+    """
+    Create a Polar checkout session for advisor to accept a project.
+    This is a per-project fee charged each time an advisor accepts a project.
+    
+    Args:
+        clerk_user_id: The Clerk user ID
+        request_id: The advisor request ID being accepted
+    
+    Returns:
+        dict: Checkout session data with checkout_url
+    """
+    # Use the same product as onboarding (same $69 fee)
+    if not POLAR_ACCESS_TOKEN or not POLAR_PRODUCT_ADVISOR_ONBOARDING_ID:
+        raise ValueError("Polar API or product ID not configured for advisor project accept.")
+    
+    supabase = get_supabase()
+    
+    # Get email from founders table
+    profile = supabase.table('founders').select('id, email, name').eq('clerk_user_id', clerk_user_id).execute()
+    
+    if not profile.data:
+        raise ValueError("Profile not found. Please complete your advisor registration first.")
+    
+    user_email = profile.data[0].get('email', '').strip()
+    
+    # If email is missing, try to get from Clerk
+    if not user_email:
+        try:
+            clerk_email = get_clerk_user_email(clerk_user_id)
+            if clerk_email and clerk_email.strip():
+                user_email = clerk_email.strip()
+                founder_id = profile.data[0].get('id')
+                supabase.table('founders').update({'email': user_email}).eq('id', founder_id).execute()
+        except Exception:
+            pass
+    
+    if not user_email:
+        raise ValueError("Email address is required for checkout.")
+    
+    # Validate email format
+    import re
+    email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+    if not re.match(email_pattern, user_email):
+        raise ValueError(f"Invalid email address format: {user_email}")
+    
+    try:
+        with Polar(access_token=POLAR_ACCESS_TOKEN) as polar:
+            res = polar.checkouts.create(request={
+                "products": [POLAR_PRODUCT_ADVISOR_ONBOARDING_ID],
+                "success_url": f"{FRONTEND_URL}/advisor/dashboard?payment=success&request_id={request_id}",
+                "customer_email": user_email,
+                "customer_metadata": {
+                    "clerk_user_id": clerk_user_id,
+                    "subscription_type": "advisor_project_accept",
+                    "request_id": request_id
+                }
+            })
+            
+            return {
+                "checkout_url": res.url,
+                "checkout_id": res.id
+            }
+    except Exception as e:
+        error_msg = str(e)
+        raise ValueError(f"Failed to create checkout session: {error_msg}")
+
 def create_advisor_renewal_checkout(clerk_user_id: str) -> Dict[str, str]:
     """
     Create a Polar checkout session for advisor annual renewal
@@ -399,6 +466,38 @@ def handle_order_created(webhook_data: Dict[str, Any]) -> Dict[str, Any]:
                 pass
             
             return {"status": "success", "message": "Advisor subscription renewed"}
+        
+        elif subscription_type == 'advisor_project_accept':
+            # Record payment for accepting a specific project
+            request_id = metadata.get('request_id')
+            if not request_id:
+                return {"status": "error", "message": "Missing request_id for project accept"}
+            
+            # Record the paid accept
+            try:
+                supabase.table('advisor_project_payments').insert({
+                    'clerk_user_id': clerk_user_id,
+                    'request_id': request_id,
+                    'order_id': order_id,
+                    'paid_at': datetime.now(timezone.utc).isoformat(),
+                    'amount_usd': 69  # Fixed fee
+                }).execute()
+            except Exception as e:
+                # Table might not exist - log and continue
+                pass
+            
+            # Log successful processing
+            try:
+                supabase.table('webhook_processing_log').insert({
+                    'webhook_id': order_id,
+                    'webhook_type': 'order.created',
+                    'processed_at': datetime.now(timezone.utc).isoformat(),
+                    'status': 'success'
+                }).execute()
+            except Exception:
+                pass
+            
+            return {"status": "success", "message": f"Project accept payment recorded for request {request_id}"}
         
         return {"status": "ignored", "message": f"Unknown subscription type: {subscription_type}"}
     except Exception as e:

@@ -171,10 +171,14 @@ def create_advisor_profile(clerk_user_id, data, user_name=None, user_email=None)
             raise
         raise ValueError(f"max_active_workspaces must be a number between 1 and 10. Received: {max_workspaces}")
     
-    # Validate LinkedIn URL if provided
+    # Validate LinkedIn URL (required)
     linkedin_url = data.get('linkedin_url', '').strip()
-    if linkedin_url and not (linkedin_url.startswith('http://') or linkedin_url.startswith('https://')):
-        raise ValueError("LinkedIn URL must be a valid URL starting with http:// or https://")
+    if not linkedin_url:
+        raise ValueError("LinkedIn URL is required")
+    if not linkedin_url.startswith('https://'):
+        raise ValueError("LinkedIn URL must start with https://")
+    if 'linkedin.com' not in linkedin_url and 'linked.in' not in linkedin_url:
+        raise ValueError("LinkedIn URL must be a valid LinkedIn profile URL")
     
     # Validate Twitter/X URL if provided
     twitter_url = data.get('twitter_url', '').strip()
@@ -192,9 +196,8 @@ def create_advisor_profile(clerk_user_id, data, user_name=None, user_email=None)
         'max_active_workspaces': max_workspaces,
         'preferred_cadence': data.get('preferred_cadence', 'weekly'),
         'contact_email': data.get('contact_email'),
-        'meeting_link': data.get('meeting_link'),
         'contact_note': data.get('contact_note'),
-        'linkedin_url': linkedin_url if linkedin_url else None,
+        'linkedin_url': linkedin_url,
         'twitter_url': twitter_url if twitter_url else None,
     }
     

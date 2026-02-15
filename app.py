@@ -1853,8 +1853,34 @@ def respond_to_advisor_request(request_id):
         if not data or not data.get('response'):
             return jsonify({"error": "response is required (accept or decline)"}), 400
         
+        response_type = data['response']
+        
+        # For accepts, verify payment was made (per-project fee)
+        if response_type == 'accept':
+            payment_verified = data.get('payment_verified', False)
+            if payment_verified:
+                # Frontend claims payment was made after checkout redirect - verify it
+                supabase = get_supabase()
+                
+                # Check for payment record (with small retry for webhook race condition)
+                import time
+                payment_found = False
+                for attempt in range(3):
+                    payment_check = supabase.table('advisor_project_payments').select('id').eq('request_id', request_id).eq('clerk_user_id', clerk_user_id).execute()
+                    if payment_check.data:
+                        payment_found = True
+                        break
+                    if attempt < 2:
+                        time.sleep(1)  # Wait 1 second before retry
+                
+                if not payment_found:
+                    return jsonify({"error": "Payment verification pending. Please wait a moment and try again."}), 402
+            else:
+                # No payment_verified flag - this means user is trying to accept without going through payment
+                return jsonify({"error": "Payment required to accept this project", "payment_required": True}), 402
+        
         result = advisor_service.respond_to_advisor_request(
-            clerk_user_id, request_id, data['response']
+            clerk_user_id, request_id, response_type
         )
         return jsonify(result), 200
     except ValueError as e:
@@ -2494,22 +2520,27 @@ def get_advisor_billing_profile():
         log_error("Error getting advisor billing profile", error=e)
         return jsonify({"error": str(e)}), 500
 
-@app.route('/api/billing/advisor/onboarding', methods=['POST'])
-def pay_advisor_onboarding():
-    """Pay advisor onboarding fee using Polar"""
+@app.route('/api/billing/advisor/accept-project', methods=['POST'])
+def pay_advisor_accept_project():
+    """Pay to accept a project - per-project fee"""
     try:
         clerk_user_id = get_clerk_user_id()
         if not clerk_user_id:
             return jsonify({"error": "User ID required"}), 401
         
-        # Create Polar checkout session
-        checkout = subscription_service.create_advisor_onboarding_checkout(clerk_user_id)
+        data = request.get_json() or {}
+        request_id = data.get('request_id')
+        if not request_id:
+            return jsonify({"error": "request_id is required"}), 400
+        
+        # Create Polar checkout session with request_id
+        checkout = subscription_service.create_advisor_project_accept_checkout(clerk_user_id, request_id)
         
         return jsonify(checkout), 200
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
     except Exception as e:
-        log_error("Error creating advisor onboarding checkout", error=e)
+        log_error("Error creating advisor project accept checkout", error=e)
         import traceback
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
