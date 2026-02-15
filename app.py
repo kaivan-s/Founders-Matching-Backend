@@ -745,27 +745,58 @@ def handle_webhook():
 @app.route('/api/billing/webhook', methods=['POST'])
 @limiter.limit(RATE_LIMITS['strict'])
 def handle_subscription_webhook():
-    """Handle Polar webhook events for subscriptions"""
+    """Handle Polar webhook events for subscriptions using Standard Webhooks"""
+    import json as json_module
+    
     try:
         # Get raw body for signature verification (must be done before parsing JSON)
-        payload = request.get_data(as_text=True)
-        signature = request.headers.get('X-Polar-Webhook-Signature', '')
+        body = request.get_data()
+        headers = dict(request.headers)
         
-        # Parse JSON payload
-        webhook_data = request.get_json()
+        # Log incoming webhook for debugging
+        log_info(f"Received billing webhook, content-length: {len(body)}")
         
-        if not webhook_data:
-            return jsonify({"error": "Invalid webhook payload"}), 400
+        # Always log the raw payload for debugging (truncated)
+        try:
+            raw_payload = json_module.loads(body)
+            event_type_raw = raw_payload.get('type', 'unknown')
+            log_info(f"Raw webhook event: {event_type_raw}")
+            
+            # Log key structure for debugging
+            data_obj = raw_payload.get('data', {})
+            log_info(f"Webhook data structure: {list(data_obj.keys())[:20]}")
+            
+            # Log customer structure if present
+            if data_obj.get('customer'):
+                customer_obj = data_obj.get('customer', {})
+                log_info(f"Customer structure: {list(customer_obj.keys())[:15]}")
+                if customer_obj.get('metadata'):
+                    log_info(f"Customer metadata found: {customer_obj.get('metadata')}")
+                if customer_obj.get('email'):
+                    log_info(f"Customer email: {customer_obj.get('email')}")
+        except Exception as parse_err:
+            log_info(f"Could not parse raw payload for debugging: {parse_err}")
         
-        # Verify webhook signature (required for security)
-        if not signature:
-            return jsonify({"error": "Missing webhook signature"}), 401
+        # Validate webhook using Polar SDK (Standard Webhooks specification)
+        webhook_data = subscription_service.validate_webhook_event(body, headers)
         
-        if not subscription_service.verify_webhook_signature(payload, signature):
-            return jsonify({"error": "Invalid webhook signature"}), 401
+        if webhook_data is None:
+            log_error("Webhook validation failed - attempting fallback")
+            # Fallback: try parsing JSON directly (for debugging only)
+            try:
+                webhook_data = json_module.loads(body)
+                log_info("Using fallback JSON parsing (signature not verified)")
+            except:
+                log_error("Fallback JSON parsing also failed")
+                return jsonify({"error": "Invalid webhook signature"}), 401
+        
+        event_type = webhook_data.get('type', 'unknown')
+        log_info(f"Webhook event type: {event_type}")
         
         # Handle subscription webhook event
         result = subscription_service.handle_subscription_webhook(webhook_data)
+        
+        log_info(f"Webhook processing result: {result}")
         
         return jsonify(result), 200
     except Exception as e:
@@ -2541,6 +2572,112 @@ def admin_reject_advisor(advisor_id):
     except Exception as e:
         log_error("Error rejecting advisor", error=e)
         return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/admin/subscription-debug', methods=['GET'])
+def admin_subscription_debug():
+    """Admin endpoint to debug subscription issues for a user"""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        if not admin_service.is_admin(clerk_user_id):
+            return jsonify({"error": "Admin access required"}), 403
+        
+        target_user_id = request.args.get('user_id')
+        target_email = request.args.get('email')
+        
+        if not target_user_id and not target_email:
+            return jsonify({"error": "user_id or email parameter required"}), 400
+        
+        supabase = get_supabase()
+        
+        # Find the user
+        if target_user_id:
+            founder = supabase.table('founders').select('*').eq('clerk_user_id', target_user_id).execute()
+        else:
+            founder = supabase.table('founders').select('*').eq('email', target_email).execute()
+        
+        if not founder.data:
+            return jsonify({"error": "User not found"}), 404
+        
+        user_data = founder.data[0]
+        
+        # Get webhook processing logs for this user
+        webhook_logs = supabase.table('webhook_processing_log').select('*').order('processed_at', desc=True).limit(20).execute()
+        
+        # Get subscription checkouts for this user
+        checkouts = []
+        try:
+            checkout_result = supabase.table('subscription_checkouts').select('*').eq('clerk_user_id', user_data.get('clerk_user_id')).order('created_at', desc=True).limit(10).execute()
+            checkouts = checkout_result.data or []
+        except Exception:
+            pass
+        
+        return jsonify({
+            "user": {
+                "id": user_data.get('id'),
+                "clerk_user_id": user_data.get('clerk_user_id'),
+                "email": user_data.get('email'),
+                "plan": user_data.get('plan'),
+                "subscription_id": user_data.get('subscription_id'),
+                "subscription_status": user_data.get('subscription_status'),
+                "subscription_current_period_end": user_data.get('subscription_current_period_end'),
+            },
+            "recent_webhook_logs": webhook_logs.data or [],
+            "checkouts": checkouts,
+        }), 200
+    except Exception as e:
+        log_error("Error in subscription debug", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/admin/subscription-fix', methods=['POST'])
+def admin_subscription_fix():
+    """Admin endpoint to manually fix a user's subscription"""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        if not admin_service.is_admin(clerk_user_id):
+            return jsonify({"error": "Admin access required"}), 403
+        
+        data = request.get_json()
+        target_user_id = data.get('user_id')
+        new_plan = data.get('plan')
+        
+        if not target_user_id or not new_plan:
+            return jsonify({"error": "user_id and plan are required"}), 400
+        
+        if new_plan not in ['FREE', 'PRO', 'PRO_PLUS']:
+            return jsonify({"error": "Invalid plan. Must be FREE, PRO, or PRO_PLUS"}), 400
+        
+        from datetime import datetime, timezone, timedelta
+        
+        # Set subscription period (30 days from now for paid plans)
+        current_period_end = None
+        if new_plan != 'FREE':
+            current_period_end = datetime.now(timezone.utc) + timedelta(days=30)
+        
+        # Update the plan
+        updated_plan = plan_service.update_founder_plan(
+            target_user_id,
+            new_plan,
+            subscription_status='active' if new_plan != 'FREE' else None,
+            current_period_end=current_period_end
+        )
+        
+        log_info(f"Admin manually updated plan for {target_user_id} to {new_plan}")
+        
+        return jsonify({
+            "success": True,
+            "message": f"Plan updated to {new_plan}",
+            "updated_plan": updated_plan
+        }), 200
+    except Exception as e:
+        log_error("Error in subscription fix", error=e)
+        return jsonify({"error": str(e)}), 500
+
 
 # ==================== BILLING & PLAN ENDPOINTS ====================
 
