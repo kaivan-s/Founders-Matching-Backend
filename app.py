@@ -2829,7 +2829,7 @@ def subscribe_plan():
 @app.route('/api/billing/founder/cancel', methods=['POST'])
 @limiter.limit(RATE_LIMITS['moderate'])
 def cancel_subscription():
-    """Cancel subscription (downgrade to FREE)"""
+    """Cancel subscription in Polar and downgrade to FREE plan"""
     try:
         clerk_user_id = get_clerk_user_id()
         if not clerk_user_id:
@@ -2857,10 +2857,29 @@ def cancel_subscription():
                     "max_allowed": 1
                 }), 400
         
-        # Downgrade to FREE (will auto-handle workspace selection if needed)
-        updated_plan = plan_service.update_founder_plan(clerk_user_id, 'FREE', workspace_to_keep=workspace_to_keep)
+        # STEP 1: Cancel subscription in Polar FIRST (to stop billing)
+        from services import subscription_service
+        try:
+            polar_result = subscription_service.cancel_polar_subscription(clerk_user_id)
+            log_info(f"Polar subscription cancellation result for {clerk_user_id}: {polar_result}")
+        except Exception as polar_error:
+            # Log but don't fail - we still want to downgrade the user in our DB
+            # This handles edge cases where Polar subscription doesn't exist but user is on paid plan
+            log_error(f"Failed to cancel Polar subscription for {clerk_user_id}: {polar_error}")
         
-        return jsonify(updated_plan), 200
+        # STEP 2: Downgrade to FREE in our database
+        # Update subscription_status to 'canceled' when downgrading
+        updated_plan = plan_service.update_founder_plan(
+            clerk_user_id, 
+            'FREE', 
+            workspace_to_keep=workspace_to_keep,
+            subscription_status='canceled'
+        )
+        
+        return jsonify({
+            **updated_plan,
+            "message": "Subscription cancelled successfully. You have been downgraded to the Free plan."
+        }), 200
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
     except Exception as e:

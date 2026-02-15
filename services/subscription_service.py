@@ -268,6 +268,106 @@ def create_advisor_renewal_checkout(clerk_user_id: str) -> Dict[str, str]:
         error_msg = str(e)
         raise ValueError(f"Failed to create checkout session: {error_msg}")
 
+
+def cancel_polar_subscription(clerk_user_id: str) -> Dict[str, Any]:
+    """
+    Cancel a user's subscription in Polar (revoke immediately).
+    
+    This should be called BEFORE updating the database to FREE plan
+    to ensure Polar stops billing the user.
+    
+    Args:
+        clerk_user_id: The Clerk user ID
+        
+    Returns:
+        dict: Result with status and details
+    """
+    from utils.logger import log_info, log_error, log_warning
+    
+    if not POLAR_ACCESS_TOKEN:
+        raise ValueError("Polar API not configured. Please set POLAR_ACCESS_TOKEN.")
+    
+    # Get user's subscription_id from database
+    supabase = get_supabase()
+    founder = supabase.table('founders').select(
+        'subscription_id, subscription_status, plan'
+    ).eq('clerk_user_id', clerk_user_id).execute()
+    
+    if not founder.data:
+        raise ValueError("User not found")
+    
+    user_data = founder.data[0]
+    subscription_id = user_data.get('subscription_id')
+    current_plan = user_data.get('plan', 'FREE')
+    subscription_status = user_data.get('subscription_status')
+    
+    # If user is on FREE plan or has no subscription_id, nothing to cancel
+    if current_plan == 'FREE':
+        log_info(f"User {clerk_user_id} is already on FREE plan, no subscription to cancel")
+        return {
+            "success": True,
+            "message": "User is already on free plan",
+            "already_free": True
+        }
+    
+    if not subscription_id:
+        log_warning(f"User {clerk_user_id} has plan {current_plan} but no subscription_id in database")
+        # Still allow the downgrade - subscription might have been set up differently
+        return {
+            "success": True,
+            "message": "No active Polar subscription found to cancel",
+            "no_subscription": True
+        }
+    
+    # Check if already canceled
+    if subscription_status in ['canceled', 'cancelled', 'revoked']:
+        log_info(f"Subscription {subscription_id} already canceled for user {clerk_user_id}")
+        return {
+            "success": True,
+            "message": "Subscription already canceled",
+            "already_canceled": True
+        }
+    
+    try:
+        # Cancel subscription in Polar using the SDK
+        with Polar(access_token=POLAR_ACCESS_TOKEN) as polar:
+            # Use revoke to immediately cancel the subscription
+            result = polar.subscriptions.revoke(id=subscription_id)
+            
+            log_info(f"Successfully canceled subscription {subscription_id} in Polar for user {clerk_user_id}")
+            
+            return {
+                "success": True,
+                "message": "Subscription canceled successfully in Polar",
+                "subscription_id": subscription_id,
+                "canceled_at": datetime.now(timezone.utc).isoformat()
+            }
+            
+    except Exception as e:
+        error_msg = str(e)
+        
+        # Check if it's already canceled error (403 response)
+        if 'AlreadyCanceledSubscription' in error_msg or '403' in error_msg:
+            log_info(f"Subscription {subscription_id} was already canceled in Polar")
+            return {
+                "success": True,
+                "message": "Subscription was already canceled",
+                "already_canceled": True
+            }
+        
+        # Check if subscription not found (404 response)
+        if 'ResourceNotFound' in error_msg or '404' in error_msg:
+            log_warning(f"Subscription {subscription_id} not found in Polar - may have been deleted")
+            return {
+                "success": True,
+                "message": "Subscription not found in Polar (may have been already removed)",
+                "not_found": True
+            }
+        
+        log_error(f"Failed to cancel subscription {subscription_id} in Polar: {error_msg}")
+        raise ValueError(f"Failed to cancel subscription in Polar: {error_msg}")
+
+
 def verify_webhook_signature(payload: str, signature: str) -> bool:
     """
     Verify Polar webhook signature using Standard Webhooks specification.
