@@ -475,7 +475,9 @@ def respond_to_like(clerk_user_id, swipe_id, response_type):
         return {"message": "Like rejected"}
 
 def unmatch(clerk_user_id, match_id):
-    """Remove a match (unmatch)"""
+    """Remove a match (unmatch) and dissolve the partnership"""
+    from utils.logger import log_error, log_info
+    
     supabase = get_supabase()
     
     # Get current user's founder ID
@@ -502,12 +504,33 @@ def unmatch(clerk_user_id, match_id):
         workspace = supabase.table('workspaces').select('id').eq('match_id', match_id).execute()
         if workspace.data:
             workspace_id = workspace.data[0]['id']
-            # Delete workspace participants first (foreign key constraint)
+            
+            # STEP 1: Find any advisors in this workspace BEFORE deleting participants
+            advisor_user_ids = []
+            try:
+                advisors = supabase.table('workspace_participants').select('user_id').eq(
+                    'workspace_id', workspace_id
+                ).eq('role', 'ADVISOR').execute()
+                if advisors.data:
+                    advisor_user_ids = [a['user_id'] for a in advisors.data]
+                    log_info(f"Found {len(advisor_user_ids)} advisor(s) to free up in workspace {workspace_id}")
+            except Exception as advisor_err:
+                log_error(f"Failed to get advisors for workspace {workspace_id}", error=advisor_err)
+            
+            # STEP 2: Delete workspace participants (all roles)
             supabase.table('workspace_participants').delete().eq('workspace_id', workspace_id).execute()
-            # Delete workspace
+            
+            # STEP 3: Update advisor profiles - decrement count and re-enable discoverability
+            for advisor_user_id in advisor_user_ids:
+                try:
+                    _free_advisor_slot(supabase, advisor_user_id)
+                    log_info(f"Freed advisor slot for user {advisor_user_id}")
+                except Exception as free_err:
+                    log_error(f"Failed to free advisor slot for {advisor_user_id}", error=free_err)
+            
+            # STEP 4: Delete workspace
             supabase.table('workspaces').delete().eq('id', workspace_id).execute()
     except Exception as e:
-        from utils.logger import log_error
         log_error(f"Failed to delete workspace after unmatch {match_id}", error=e)
         # Continue with match deletion even if workspace deletion fails
     
@@ -519,9 +542,39 @@ def unmatch(clerk_user_id, match_id):
         try:
             supabase.table('projects').update({'seeking_cofounder': True}).eq('id', project_id).execute()
         except Exception as e:
-            from utils.logger import log_error
             log_error(f"Failed to restore project state after unmatch {match_id}", error=e)
             # Don't fail the whole operation, but log the error
     
     return {"message": "Match removed successfully"}
+
+
+def _free_advisor_slot(supabase, advisor_user_id):
+    """
+    Free up an advisor slot when they're removed from a workspace.
+    Updates current_active_workspaces count and re-enables discoverability if below capacity.
+    """
+    # Get advisor profile
+    advisor_profile = supabase.table('advisor_profiles').select(
+        'id, max_active_workspaces'
+    ).eq('user_id', advisor_user_id).execute()
+    
+    if not advisor_profile.data:
+        return  # Not an advisor or no profile
+    
+    # Count remaining active workspaces for this advisor
+    active_count_result = supabase.table('workspace_participants').select('workspace_id').eq(
+        'user_id', advisor_user_id
+    ).eq('role', 'ADVISOR').execute()
+    
+    current_active = len(active_count_result.data) if active_count_result.data else 0
+    max_active = advisor_profile.data[0].get('max_active_workspaces', 0)
+    
+    # Update the profile
+    update_data = {'current_active_workspaces': current_active}
+    
+    # Re-enable discoverability if now below capacity
+    if current_active < max_active:
+        update_data['is_discoverable'] = True
+    
+    supabase.table('advisor_profiles').update(update_data).eq('user_id', advisor_user_id).execute()
 

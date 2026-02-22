@@ -192,9 +192,12 @@ def create_advisor_profile(clerk_user_id, data, user_name=None, user_email=None)
         'timezone': data.get('timezone', 'UTC'),
         'languages': data.get('languages', []),
         'expertise_stages': data.get('expertise_stages', []),
+        'preferred_stages': data.get('preferred_stages', []),  # Stages they prefer to advise
+        'advisory_types': data.get('advisory_types', []),  # Types of advisory they provide
         'domains': data.get('domains', []),
         'max_active_workspaces': max_workspaces,
         'preferred_cadence': data.get('preferred_cadence', 'weekly'),
+        'availability_hours_per_week': data.get('availability_hours_per_week'),  # Structured hours selection
         'contact_email': data.get('contact_email'),
         'contact_note': data.get('contact_note'),
         'linkedin_url': linkedin_url,
