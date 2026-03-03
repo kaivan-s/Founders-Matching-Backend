@@ -1,29 +1,46 @@
-"""Subscription service for Polar integration"""
+"""Subscription service for Dodo Payments integration"""
 import os
 import hmac
 import hashlib
+import json
 from datetime import datetime, timezone, timedelta
 from typing import Dict, Optional, Any
 from config.database import get_supabase
-from polar_sdk import Polar
 from services import plan_service
 from utils.auth import get_clerk_user_email
 
-# Polar API configuration
-POLAR_ACCESS_TOKEN = os.getenv('POLAR_ACCESS_TOKEN')
+# Dodo Payments API configuration
+DODO_API_KEY = os.getenv('DODO_PAYMENTS_API_KEY', '').strip('"')
+DODO_ENVIRONMENT = os.getenv('DODO_ENVIRONMENT', 'live_mode')
+DODO_WEBHOOK_SECRET = os.getenv('DODO_WEBHOOK_SECRET', '')
+
 # Strip trailing slash to avoid double slashes in URLs
 FRONTEND_URL = os.getenv('FRONTEND_URL', 'http://localhost:3000').rstrip('/')
 
-# Product IDs - These need to be set in Polar dashboard
-# Set these as environment variables: POLAR_PRODUCT_PRO_ID, POLAR_PRODUCT_PRO_PLUS_ID
-POLAR_PRODUCT_PRO_ID = os.getenv('POLAR_PRODUCT_PRO_ID')
-POLAR_PRODUCT_PRO_PLUS_ID = os.getenv('POLAR_PRODUCT_PRO_PLUS_ID')
-POLAR_PRODUCT_ADVISOR_ONBOARDING_ID = os.getenv('POLAR_PRODUCT_ADVISOR_ONBOARDING_ID')
-POLAR_PRODUCT_ADVISOR_RENEWAL_ID = os.getenv('POLAR_PRODUCT_ADVISOR_RENEWAL_ID')
+# Product IDs from Dodo Payments dashboard
+DODO_PRODUCT_PRO_ID = os.getenv('DODO_PRODUCT_PRO_ID')
+DODO_PRODUCT_PRO_PLUS_ID = os.getenv('DODO_PRODUCT_PRO_PLUS_ID')
+DODO_PRODUCT_ADVISOR_PROJECT_ID = os.getenv('DODO_PRODUCT_ADVISOR_PROJECT_ID')
+
+# Dodo API base URL
+DODO_API_BASE = 'https://live.dodopayments.com' if DODO_ENVIRONMENT == 'live_mode' else 'https://test.dodopayments.com'
+
+
+def _get_dodo_client():
+    """Get Dodo Payments client"""
+    try:
+        from dodopayments import DodoPayments
+        return DodoPayments(
+            bearer_token=DODO_API_KEY,
+            environment=DODO_ENVIRONMENT
+        )
+    except ImportError:
+        raise ValueError("dodopayments package not installed. Run: pip install dodopayments")
+
 
 def create_subscription_checkout(clerk_user_id: str, plan_id: str) -> Dict[str, str]:
     """
-    Create a Polar checkout session for a subscription plan
+    Create a Dodo Payments checkout session for a subscription plan
     
     Args:
         clerk_user_id: The Clerk user ID
@@ -32,20 +49,20 @@ def create_subscription_checkout(clerk_user_id: str, plan_id: str) -> Dict[str, 
     Returns:
         dict: Checkout session data with checkout_url
     """
-    if not POLAR_ACCESS_TOKEN:
-        raise ValueError("Polar API not configured. Please set POLAR_ACCESS_TOKEN.")
+    if not DODO_API_KEY:
+        raise ValueError("Dodo Payments API not configured. Please set DODO_PAYMENTS_API_KEY.")
     
     # Get product ID for the plan
     product_id = None
     if plan_id == 'PRO':
-        product_id = POLAR_PRODUCT_PRO_ID
+        product_id = DODO_PRODUCT_PRO_ID
     elif plan_id == 'PRO_PLUS':
-        product_id = POLAR_PRODUCT_PRO_PLUS_ID
+        product_id = DODO_PRODUCT_PRO_PLUS_ID
     else:
         raise ValueError(f"Invalid plan ID: {plan_id}")
     
     if not product_id:
-        raise ValueError(f"Polar product ID not configured for plan {plan_id}")
+        raise ValueError(f"Dodo product ID not configured for plan {plan_id}")
     
     # Get user's email from profile, fallback to Clerk API
     supabase = get_supabase()
@@ -66,97 +83,36 @@ def create_subscription_checkout(clerk_user_id: str, plan_id: str) -> Dict[str, 
         raise ValueError("User email not found. Please complete your profile or ensure your email is set in Clerk.")
     
     try:
-        # Create checkout session using Polar SDK
-        with Polar(access_token=POLAR_ACCESS_TOKEN) as polar:
-            res = polar.checkouts.create(request={
-                "products": [product_id],
-                "success_url": f"{FRONTEND_URL}/pricing?subscription=success&plan={plan_id}",
-                "customer_email": user_email,
-                "customer_metadata": {
-                    "clerk_user_id": clerk_user_id,
-                    "plan_id": plan_id,
-                    "subscription_type": "founder_plan"
-                }
-            })
-            
-            return {
-                "checkout_url": res.url,
-                "checkout_id": res.id
+        client = _get_dodo_client()
+        
+        session = client.checkout_sessions.create(
+            product_cart=[{"product_id": product_id, "quantity": 1}],
+            customer={
+                "email": user_email,
+                "name": user_name or user_email.split('@')[0]
+            },
+            return_url=f"{FRONTEND_URL}/pricing?subscription=success&plan={plan_id}",
+            metadata={
+                "clerk_user_id": clerk_user_id,
+                "plan_id": plan_id,
+                "subscription_type": "founder_plan"
             }
+        )
+        
+        return {
+            "checkout_url": session.checkout_url,
+            "checkout_id": session.session_id
+        }
         
     except Exception as e:
         error_msg = str(e)
         raise ValueError(f"Failed to create checkout session: {error_msg}")
 
-def create_advisor_onboarding_checkout(clerk_user_id: str) -> Dict[str, str]:
-    """
-    Create a Polar checkout session for advisor onboarding fee
-    
-    Args:
-        clerk_user_id: The Clerk user ID
-    
-    Returns:
-        dict: Checkout session data with checkout_url
-    """
-    if not POLAR_ACCESS_TOKEN or not POLAR_PRODUCT_ADVISOR_ONBOARDING_ID:
-        raise ValueError("Polar API or product ID not configured for advisor onboarding.")
-    
-    supabase = get_supabase()
-    
-    # Get email from founders table (should always exist after registration)
-    profile = supabase.table('founders').select('id, email, name').eq('clerk_user_id', clerk_user_id).execute()
-    
-    if not profile.data:
-        raise ValueError("Profile not found. Please complete your advisor registration first.")
-    
-    user_email = profile.data[0].get('email', '').strip()
-    
-    # If email is missing, try to get from Clerk and update founders table
-    if not user_email:
-        try:
-            clerk_email = get_clerk_user_email(clerk_user_id)
-            if clerk_email and clerk_email.strip():
-                user_email = clerk_email.strip()
-                # Update founders table with email
-                founder_id = profile.data[0].get('id')
-                supabase.table('founders').update({'email': user_email}).eq('id', founder_id).execute()
-        except Exception as e:
-            pass
-    
-    # Validate email exists
-    if not user_email:
-        raise ValueError("Email address is required for checkout. Please ensure your account has a valid email address.")
-    
-    # Validate email format
-    import re
-    email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
-    if not re.match(email_pattern, user_email):
-        raise ValueError(f"Invalid email address format: {user_email}")
-    
-    try:
-        with Polar(access_token=POLAR_ACCESS_TOKEN) as polar:
-            res = polar.checkouts.create(request={
-                "products": [POLAR_PRODUCT_ADVISOR_ONBOARDING_ID],
-                "success_url": f"{FRONTEND_URL}/advisor/dashboard?onboarding=success",
-                "customer_email": user_email,
-                "customer_metadata": {
-                    "clerk_user_id": clerk_user_id,
-                    "subscription_type": "advisor_onboarding"
-                }
-            })
-            
-            return {
-                "checkout_url": res.url,
-                "checkout_id": res.id
-            }
-    except Exception as e:
-        error_msg = str(e)
-        raise ValueError(f"Failed to create checkout session: {error_msg}")
 
 def create_advisor_project_accept_checkout(clerk_user_id: str, request_id: str) -> Dict[str, str]:
     """
-    Create a Polar checkout session for advisor to accept a project.
-    This is a per-project fee charged each time an advisor accepts a project.
+    Create a Dodo Payments checkout session for advisor to accept a project.
+    This is a per-project fee charged each time an advisor accepts a project ($69).
     
     Args:
         clerk_user_id: The Clerk user ID
@@ -165,9 +121,8 @@ def create_advisor_project_accept_checkout(clerk_user_id: str, request_id: str) 
     Returns:
         dict: Checkout session data with checkout_url
     """
-    # Use the same product as onboarding (same $69 fee)
-    if not POLAR_ACCESS_TOKEN or not POLAR_PRODUCT_ADVISOR_ONBOARDING_ID:
-        raise ValueError("Polar API or product ID not configured for advisor project accept.")
+    if not DODO_API_KEY or not DODO_PRODUCT_ADVISOR_PROJECT_ID:
+        raise ValueError("Dodo Payments API or product ID not configured for advisor project accept.")
     
     supabase = get_supabase()
     
@@ -178,6 +133,7 @@ def create_advisor_project_accept_checkout(clerk_user_id: str, request_id: str) 
         raise ValueError("Profile not found. Please complete your advisor registration first.")
     
     user_email = profile.data[0].get('email', '').strip()
+    user_name = profile.data[0].get('name', '')
     
     # If email is missing, try to get from Clerk
     if not user_email:
@@ -200,81 +156,37 @@ def create_advisor_project_accept_checkout(clerk_user_id: str, request_id: str) 
         raise ValueError(f"Invalid email address format: {user_email}")
     
     try:
-        with Polar(access_token=POLAR_ACCESS_TOKEN) as polar:
-            res = polar.checkouts.create(request={
-                "products": [POLAR_PRODUCT_ADVISOR_ONBOARDING_ID],
-                "success_url": f"{FRONTEND_URL}/advisor/dashboard?payment=success&request_id={request_id}",
-                "customer_email": user_email,
-                "customer_metadata": {
-                    "clerk_user_id": clerk_user_id,
-                    "subscription_type": "advisor_project_accept",
-                    "request_id": request_id
-                }
-            })
-            
-            return {
-                "checkout_url": res.url,
-                "checkout_id": res.id
+        client = _get_dodo_client()
+        
+        session = client.checkout_sessions.create(
+            product_cart=[{"product_id": DODO_PRODUCT_ADVISOR_PROJECT_ID, "quantity": 1}],
+            customer={
+                "email": user_email,
+                "name": user_name or user_email.split('@')[0]
+            },
+            return_url=f"{FRONTEND_URL}/advisor/dashboard?payment=success&request_id={request_id}",
+            metadata={
+                "clerk_user_id": clerk_user_id,
+                "subscription_type": "advisor_project_accept",
+                "request_id": request_id
             }
-    except Exception as e:
-        error_msg = str(e)
-        raise ValueError(f"Failed to create checkout session: {error_msg}")
-
-def create_advisor_renewal_checkout(clerk_user_id: str) -> Dict[str, str]:
-    """
-    Create a Polar checkout session for advisor annual renewal
-    
-    Args:
-        clerk_user_id: The Clerk user ID
-    
-    Returns:
-        dict: Checkout session data with checkout_url
-    """
-    if not POLAR_ACCESS_TOKEN or not POLAR_PRODUCT_ADVISOR_RENEWAL_ID:
-        raise ValueError("Polar API or product ID not configured for advisor renewal.")
-    
-    supabase = get_supabase()
-    profile = supabase.table('founders').select('email, name').eq('clerk_user_id', clerk_user_id).execute()
-    
-    user_email = None
-    
-    if profile.data:
-        user_email = profile.data[0].get('email')
-    
-    # If email is missing or empty, get it from Clerk API
-    if not user_email or '@' not in user_email:
-        user_email = get_clerk_user_email(clerk_user_id)
-    
-    if not user_email or '@' not in user_email:
-        raise ValueError("User email not found. Please complete your profile or ensure your email is set in Clerk.")
-    
-    try:
-        with Polar(access_token=POLAR_ACCESS_TOKEN) as polar:
-            res = polar.checkouts.create(request={
-                "products": [POLAR_PRODUCT_ADVISOR_RENEWAL_ID],
-                "success_url": f"{FRONTEND_URL}/advisor/dashboard?renewal=success",
-                "customer_email": user_email,
-                "customer_metadata": {
-                    "clerk_user_id": clerk_user_id,
-                    "subscription_type": "advisor_renewal"
-                }
-            })
-            
-            return {
-                "checkout_url": res.url,
-                "checkout_id": res.id
-            }
+        )
+        
+        return {
+            "checkout_url": session.checkout_url,
+            "checkout_id": session.session_id
+        }
     except Exception as e:
         error_msg = str(e)
         raise ValueError(f"Failed to create checkout session: {error_msg}")
 
 
-def cancel_polar_subscription(clerk_user_id: str) -> Dict[str, Any]:
+def cancel_subscription(clerk_user_id: str) -> Dict[str, Any]:
     """
-    Cancel a user's subscription in Polar (revoke immediately).
+    Cancel a user's subscription in Dodo Payments.
     
     This should be called BEFORE updating the database to FREE plan
-    to ensure Polar stops billing the user.
+    to ensure Dodo stops billing the user.
     
     Args:
         clerk_user_id: The Clerk user ID
@@ -284,8 +196,8 @@ def cancel_polar_subscription(clerk_user_id: str) -> Dict[str, Any]:
     """
     from utils.logger import log_info, log_error, log_warning
     
-    if not POLAR_ACCESS_TOKEN:
-        raise ValueError("Polar API not configured. Please set POLAR_ACCESS_TOKEN.")
+    if not DODO_API_KEY:
+        raise ValueError("Dodo Payments API not configured. Please set DODO_PAYMENTS_API_KEY.")
     
     # Get user's subscription_id from database
     supabase = get_supabase()
@@ -312,10 +224,9 @@ def cancel_polar_subscription(clerk_user_id: str) -> Dict[str, Any]:
     
     if not subscription_id:
         log_warning(f"User {clerk_user_id} has plan {current_plan} but no subscription_id in database")
-        # Still allow the downgrade - subscription might have been set up differently
         return {
             "success": True,
-            "message": "No active Polar subscription found to cancel",
+            "message": "No active subscription found to cancel",
             "no_subscription": True
         }
     
@@ -329,63 +240,51 @@ def cancel_polar_subscription(clerk_user_id: str) -> Dict[str, Any]:
         }
     
     try:
-        # Cancel subscription in Polar using the SDK
-        with Polar(access_token=POLAR_ACCESS_TOKEN) as polar:
-            # Use revoke to immediately cancel the subscription
-            result = polar.subscriptions.revoke(id=subscription_id)
-            
-            log_info(f"Successfully canceled subscription {subscription_id} in Polar for user {clerk_user_id}")
-            
-            return {
-                "success": True,
-                "message": "Subscription canceled successfully in Polar",
-                "subscription_id": subscription_id,
-                "canceled_at": datetime.now(timezone.utc).isoformat()
-            }
-            
+        client = _get_dodo_client()
+        
+        # Cancel subscription in Dodo
+        client.subscriptions.cancel(subscription_id)
+        
+        log_info(f"Successfully canceled subscription {subscription_id} in Dodo for user {clerk_user_id}")
+        
+        return {
+            "success": True,
+            "message": "Subscription canceled successfully",
+            "subscription_id": subscription_id,
+            "canceled_at": datetime.now(timezone.utc).isoformat()
+        }
+        
     except Exception as e:
         error_msg = str(e)
         
-        # Check if it's already canceled error (403 response)
-        if 'AlreadyCanceledSubscription' in error_msg or '403' in error_msg:
-            log_info(f"Subscription {subscription_id} was already canceled in Polar")
+        # Check if already canceled error
+        if 'already' in error_msg.lower() and 'cancel' in error_msg.lower():
+            log_info(f"Subscription {subscription_id} was already canceled in Dodo")
             return {
                 "success": True,
                 "message": "Subscription was already canceled",
                 "already_canceled": True
             }
         
-        # Check if subscription not found (404 response)
-        if 'ResourceNotFound' in error_msg or '404' in error_msg:
-            log_warning(f"Subscription {subscription_id} not found in Polar - may have been deleted")
+        # Check if subscription not found
+        if '404' in error_msg or 'not found' in error_msg.lower():
+            log_warning(f"Subscription {subscription_id} not found in Dodo - may have been deleted")
             return {
                 "success": True,
-                "message": "Subscription not found in Polar (may have been already removed)",
+                "message": "Subscription not found (may have been already removed)",
                 "not_found": True
             }
         
-        log_error(f"Failed to cancel subscription {subscription_id} in Polar: {error_msg}")
-        raise ValueError(f"Failed to cancel subscription in Polar: {error_msg}")
+        log_error(f"Failed to cancel subscription {subscription_id} in Dodo: {error_msg}")
+        raise ValueError(f"Failed to cancel subscription: {error_msg}")
 
 
-def verify_webhook_signature(payload: str, signature: str) -> bool:
-    """
-    Verify Polar webhook signature using Standard Webhooks specification.
-    
-    Note: This is now a legacy function. Use validate_webhook_event() instead
-    which uses the Polar SDK's built-in validation.
-    """
-    # This function is kept for backward compatibility but always returns True
-    # Actual verification is done in validate_webhook_event()
-    return True
-
-
+# Keep old function name for backward compatibility
 def validate_webhook_event(body: bytes, headers: dict) -> Optional[Dict[str, Any]]:
     """
-    Validate and parse Polar webhook event using the Polar SDK.
+    Validate and parse Dodo Payments webhook event.
     
-    Polar follows Standard Webhooks specification. This function handles
-    signature verification automatically.
+    Dodo follows Standard Webhooks specification.
     
     Args:
         body: Raw request body as bytes
@@ -396,78 +295,86 @@ def validate_webhook_event(body: bytes, headers: dict) -> Optional[Dict[str, Any
     """
     from utils.logger import log_info, log_error
     
-    webhook_secret = os.getenv('POLAR_WEBHOOK_SECRET')
-    
-    if not webhook_secret:
-        log_error("POLAR_WEBHOOK_SECRET not configured")
-        return None
+    if not DODO_WEBHOOK_SECRET:
+        log_error("DODO_WEBHOOK_SECRET not configured - accepting webhook without verification")
+        # In development, allow unverified webhooks
+        try:
+            return json.loads(body)
+        except:
+            return None
     
     try:
-        # Use Polar SDK's built-in webhook validation
-        from polar_sdk.webhooks import validate_event, WebhookVerificationError
+        # Dodo uses Standard Webhooks specification
+        # Headers: webhook-id, webhook-timestamp, webhook-signature
+        webhook_id = headers.get('webhook-id') or headers.get('Webhook-Id')
+        webhook_timestamp = headers.get('webhook-timestamp') or headers.get('Webhook-Timestamp')
+        webhook_signature = headers.get('webhook-signature') or headers.get('Webhook-Signature')
         
-        event = validate_event(
-            body=body,
-            headers=headers,
-            secret=webhook_secret,
+        if not all([webhook_id, webhook_timestamp, webhook_signature]):
+            log_error("Missing webhook headers")
+            return None
+        
+        # Verify signature using HMAC-SHA256
+        # Signature format: v1,<base64-signature>
+        expected_sig = _compute_webhook_signature(
+            webhook_id, webhook_timestamp, body.decode('utf-8'), DODO_WEBHOOK_SECRET
         )
         
+        # Compare signatures (webhook_signature may have multiple versions)
+        signatures = webhook_signature.split(' ')
+        verified = False
+        for sig in signatures:
+            if sig.startswith('v1,'):
+                if hmac.compare_digest(sig, expected_sig):
+                    verified = True
+                    break
+        
+        if not verified:
+            log_error("Webhook signature verification failed")
+            return None
+        
+        event = json.loads(body)
         log_info(f"Webhook event validated successfully: {event.get('type', 'unknown')}")
         return event
         
-    except WebhookVerificationError as e:
-        log_error(f"Webhook verification failed: {e}")
-        return None
-    except ImportError:
-        # Fallback if polar_sdk.webhooks is not available
-        log_info("polar_sdk.webhooks not available, attempting manual validation")
-        return _manual_webhook_validation(body, headers, webhook_secret)
     except Exception as e:
         log_error(f"Error validating webhook: {e}")
         return None
 
 
-def _manual_webhook_validation(body: bytes, headers: dict, webhook_secret: str) -> Optional[Dict[str, Any]]:
-    """
-    Manual webhook validation fallback using Standard Webhooks specification.
-    Uses svix library if available, otherwise attempts basic validation.
-    """
-    from utils.logger import log_info, log_error
-    import json
+def _compute_webhook_signature(webhook_id: str, timestamp: str, body: str, secret: str) -> str:
+    """Compute expected webhook signature using Standard Webhooks spec"""
+    import base64
     
-    try:
-        # Try using svix library (Standard Webhooks reference implementation)
-        from svix.webhooks import Webhook
-        
-        wh = Webhook(webhook_secret)
-        payload = wh.verify(body, headers)
-        log_info("Webhook verified using svix library")
-        return payload
-        
-    except ImportError:
-        log_info("svix library not available, attempting basic JSON parse")
-        # If no verification library available, just parse the JSON
-        # WARNING: This is insecure - should only be used in development
-        try:
-            return json.loads(body)
-        except:
-            return None
-    except Exception as e:
-        log_error(f"Manual webhook validation failed: {e}")
-        return None
+    # Message to sign: id.timestamp.body
+    signed_content = f"{webhook_id}.{timestamp}.{body}"
+    
+    # Decode secret (may be base64 encoded with prefix)
+    secret_bytes = secret.encode('utf-8')
+    if secret.startswith('whsec_'):
+        secret_bytes = base64.b64decode(secret[6:])
+    
+    # Compute HMAC-SHA256
+    signature = hmac.new(
+        secret_bytes,
+        signed_content.encode('utf-8'),
+        hashlib.sha256
+    ).digest()
+    
+    return f"v1,{base64.b64encode(signature).decode('utf-8')}"
+
 
 def handle_subscription_webhook(webhook_data: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Handle Polar webhook events for subscriptions
+    Handle Dodo Payments webhook events for subscriptions
     
     Events handled:
-    - checkout.created: When a checkout is created
-    - checkout.updated: When checkout status changes (including completion)
-    - order.created: When an order is created (may still be pending)
-    - order.paid: When an order payment is confirmed - activate subscription
-    - subscription.created: When a subscription is created
+    - payment.succeeded: When payment is successful
+    - subscription.active: When subscription is activated
+    - subscription.renewed: When subscription is renewed
     - subscription.updated: When subscription status changes
-    - subscription.canceled: When subscription is canceled
+    - subscription.cancelled: When subscription is canceled
+    - subscription.on_hold: When subscription is put on hold
     
     Returns:
         dict: Result of webhook processing
@@ -477,43 +384,38 @@ def handle_subscription_webhook(webhook_data: Dict[str, Any]) -> Dict[str, Any]:
     event_type = webhook_data.get('type')
     
     # Log webhook event for debugging
-    log_info(f"Received webhook event: {event_type}", metadata={
+    log_info(f"Received Dodo webhook event: {event_type}", metadata={
         "event_type": event_type,
         "data_keys": list(webhook_data.get('data', {}).keys()) if webhook_data.get('data') else []
     })
     
-    if event_type == 'checkout.created':
-        return handle_checkout_created(webhook_data)
-    elif event_type == 'checkout.updated':
-        return handle_checkout_updated(webhook_data)
-    elif event_type == 'order.created':
-        return handle_order_created(webhook_data)
-    elif event_type == 'order.paid':
-        # order.paid is the definitive payment confirmation
-        return handle_order_paid(webhook_data)
-    elif event_type == 'subscription.created':
-        return handle_subscription_created(webhook_data)
+    if event_type == 'payment.succeeded':
+        return handle_payment_succeeded(webhook_data)
+    elif event_type == 'subscription.active':
+        return handle_subscription_active(webhook_data)
+    elif event_type == 'subscription.renewed':
+        return handle_subscription_renewed(webhook_data)
     elif event_type == 'subscription.updated':
         return handle_subscription_updated(webhook_data)
-    elif event_type == 'subscription.canceled':
+    elif event_type == 'subscription.cancelled':
         return handle_subscription_canceled(webhook_data)
+    elif event_type == 'subscription.on_hold':
+        return handle_subscription_on_hold(webhook_data)
+    elif event_type == 'subscription.failed':
+        return handle_subscription_failed(webhook_data)
     else:
         return {"status": "ignored", "message": f"Event {event_type} not handled"}
 
+
 def _extract_metadata(data: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Extract customer metadata from webhook data.
+    Extract metadata from Dodo webhook data.
     
-    According to Polar documentation, customer_metadata set during checkout
-    is copied to the Customer's metadata field after successful checkout.
-    
-    Polar stores metadata in different locations depending on the event type:
-    - checkout events: data.customer_metadata or data.metadata
-    - order events: data.customer.metadata (customer object's metadata)
-    - subscription events: data.customer.metadata
+    Dodo stores metadata in different locations:
+    - data.metadata: Direct metadata on the object
+    - data.checkout.metadata: From the checkout session
     """
     from utils.logger import log_info
-    import json
     
     metadata = {}
     source = "none"
@@ -521,361 +423,89 @@ def _extract_metadata(data: Dict[str, Any]) -> Dict[str, Any]:
     # Log all available keys for debugging
     log_info(f"_extract_metadata: data keys = {list(data.keys())}")
     
-    # 1. Try customer.metadata first (most common for order.paid)
-    if data.get('customer'):
-        customer = data.get('customer', {})
-        if isinstance(customer, dict):
-            log_info(f"_extract_metadata: customer keys = {list(customer.keys())}")
-            if customer.get('metadata') and isinstance(customer.get('metadata'), dict):
-                metadata = customer.get('metadata', {})
-                source = "customer.metadata"
-    
-    # 2. Try direct metadata field
-    if not metadata and data.get('metadata') and isinstance(data.get('metadata'), dict):
+    # 1. Try direct metadata
+    if data.get('metadata') and isinstance(data.get('metadata'), dict):
         metadata = data.get('metadata', {})
         source = "data.metadata"
     
-    # 3. Try customer_metadata (used in checkout events)
-    if not metadata and data.get('customer_metadata') and isinstance(data.get('customer_metadata'), dict):
-        metadata = data.get('customer_metadata', {})
-        source = "data.customer_metadata"
-    
-    # 4. Try checkout field (for orders linked to checkouts)
+    # 2. Try checkout metadata
     if not metadata and data.get('checkout'):
         checkout = data.get('checkout', {})
-        if isinstance(checkout, dict):
-            log_info(f"_extract_metadata: checkout keys = {list(checkout.keys())}")
-            if checkout.get('customer_metadata') and isinstance(checkout.get('customer_metadata'), dict):
-                metadata = checkout.get('customer_metadata', {})
-                source = "checkout.customer_metadata"
-            elif checkout.get('metadata') and isinstance(checkout.get('metadata'), dict):
-                metadata = checkout.get('metadata', {})
-                source = "checkout.metadata"
+        if isinstance(checkout, dict) and checkout.get('metadata'):
+            metadata = checkout.get('metadata', {})
+            source = "checkout.metadata"
     
-    # 5. Try subscription.customer.metadata
+    # 3. Try subscription metadata
     if not metadata and data.get('subscription'):
         subscription = data.get('subscription', {})
-        if isinstance(subscription, dict) and subscription.get('customer'):
-            sub_customer = subscription.get('customer', {})
-            if isinstance(sub_customer, dict) and sub_customer.get('metadata'):
-                metadata = sub_customer.get('metadata', {})
-                source = "subscription.customer.metadata"
+        if isinstance(subscription, dict) and subscription.get('metadata'):
+            metadata = subscription.get('metadata', {})
+            source = "subscription.metadata"
     
-    # Log where we found metadata and its contents for debugging
     log_info(f"_extract_metadata result", metadata={
         "source": source,
         "found_metadata": bool(metadata),
-        "metadata_content": metadata if metadata else {},
         "clerk_user_id": metadata.get('clerk_user_id', 'NOT_FOUND'),
         "subscription_type": metadata.get('subscription_type', 'NOT_FOUND'),
-        "plan_id": metadata.get('plan_id', 'NOT_FOUND')
     })
     
     return metadata
 
 
-def handle_checkout_created(webhook_data: Dict[str, Any]) -> Dict[str, Any]:
-    """Handle checkout.created webhook - store checkout info"""
-    try:
-        data = webhook_data.get('data', {})
-        metadata = _extract_metadata(data)
-        subscription_type = metadata.get('subscription_type')
-        
-        if subscription_type == 'founder_plan':
-            # Store checkout info for founder subscription
-            clerk_user_id = metadata.get('clerk_user_id')
-            plan_id = metadata.get('plan_id')
-            
-            if not clerk_user_id or not plan_id:
-                return {"status": "error", "message": "Missing metadata"}
-            
-            # Store in database for tracking
-            supabase = get_supabase()
-            supabase.table('subscription_checkouts').insert({
-                'clerk_user_id': clerk_user_id,
-                'checkout_id': data.get('id'),
-                'plan_id': plan_id,
-                'status': 'pending',
-                'created_at': datetime.now(timezone.utc).isoformat()
-            }).execute()
-            
-        elif subscription_type in ['advisor_onboarding', 'advisor_renewal']:
-            # Store advisor checkout info
-            clerk_user_id = metadata.get('clerk_user_id')
-            if clerk_user_id:
-                supabase = get_supabase()
-                supabase.table('subscription_checkouts').insert({
-                    'clerk_user_id': clerk_user_id,
-                    'checkout_id': data.get('id'),
-                    'plan_id': subscription_type,
-                    'status': 'pending',
-                    'created_at': datetime.now(timezone.utc).isoformat()
-                }).execute()
-        
-        return {"status": "success", "message": "Checkout created"}
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
-
-
-def handle_checkout_updated(webhook_data: Dict[str, Any]) -> Dict[str, Any]:
-    """Handle checkout.updated webhook - process completed checkouts"""
-    from utils.logger import log_info
-    
-    try:
-        data = webhook_data.get('data', {})
-        checkout_id = data.get('id')
-        status = data.get('status')
-        
-        log_info(f"Checkout updated: {checkout_id} -> {status}")
-        
-        # Only process succeeded checkouts
-        if status != 'succeeded':
-            return {"status": "ignored", "message": f"Checkout status {status} - not processing"}
-        
-        metadata = _extract_metadata(data)
-        subscription_type = metadata.get('subscription_type')
-        clerk_user_id = metadata.get('clerk_user_id')
-        
-        if not clerk_user_id:
-            log_info(f"No clerk_user_id in checkout metadata, checking customer email")
-            # Try to find user by email
-            customer_email = data.get('customer_email') or data.get('customer', {}).get('email')
-            if customer_email:
-                supabase = get_supabase()
-                founder = supabase.table('founders').select('clerk_user_id').eq('email', customer_email).execute()
-                if founder.data:
-                    clerk_user_id = founder.data[0].get('clerk_user_id')
-        
-        if not clerk_user_id:
-            return {"status": "error", "message": "Could not identify user from checkout"}
-        
-        supabase = get_supabase()
-        
-        if subscription_type == 'founder_plan':
-            plan_id = metadata.get('plan_id')
-            if not plan_id:
-                return {"status": "error", "message": "Missing plan_id in checkout"}
-            
-            # Activate the plan
-            current_period_end = datetime.now(timezone.utc) + timedelta(days=30)
-            
-            plan_service.update_founder_plan(
-                clerk_user_id,
-                plan_id,
-                subscription_id=data.get('subscription_id'),
-                subscription_status='active',
-                current_period_end=current_period_end
-            )
-            
-            # Update checkout status
-            try:
-                supabase.table('subscription_checkouts').update({
-                    'status': 'completed'
-                }).eq('checkout_id', checkout_id).execute()
-            except Exception:
-                pass
-            
-            log_info(f"Plan activated via checkout.updated: {plan_id} for {clerk_user_id}")
-            return {"status": "success", "message": f"Plan {plan_id} activated via checkout"}
-            
-        elif subscription_type == 'advisor_onboarding':
-            plan_service.update_advisor_billing(clerk_user_id, onboarding_paid=True)
-            log_info(f"Advisor onboarding activated via checkout.updated for {clerk_user_id}")
-            return {"status": "success", "message": "Advisor onboarding paid via checkout"}
-            
-        elif subscription_type == 'advisor_renewal':
-            plan_service.renew_advisor_subscription(clerk_user_id)
-            log_info(f"Advisor renewal activated via checkout.updated for {clerk_user_id}")
-            return {"status": "success", "message": "Advisor subscription renewed via checkout"}
-            
-        elif subscription_type == 'advisor_project_accept':
-            request_id = metadata.get('request_id')
-            if request_id:
-                try:
-                    supabase.table('advisor_project_payments').insert({
-                        'clerk_user_id': clerk_user_id,
-                        'request_id': request_id,
-                        'order_id': checkout_id,
-                        'paid_at': datetime.now(timezone.utc).isoformat(),
-                        'amount_usd': 69
-                    }).execute()
-                except Exception:
-                    pass
-                log_info(f"Advisor project accept payment recorded via checkout.updated for {clerk_user_id}")
-                return {"status": "success", "message": f"Project accept payment recorded for request {request_id}"}
-        
-        return {"status": "ignored", "message": f"Unknown subscription type: {subscription_type}"}
-    except Exception as e:
-        from utils.logger import log_error
-        log_error(f"Error handling checkout.updated: {e}")
-        return {"status": "error", "message": str(e)}
-
-def handle_order_created(webhook_data: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Handle order.created webhook.
-    
-    NOTE: order.created may arrive with status 'pending' (not yet paid).
-    For payment confirmation, we now primarily rely on order.paid event.
-    This handler now only logs the order and waits for order.paid to activate.
-    """
-    from utils.logger import log_info
-    
-    try:
-        data = webhook_data.get('data', {})
-        order_id = data.get('id')
-        order_status = data.get('status')
-        is_paid = data.get('paid', False)
-        
-        log_info(f"Order created: {order_id}, status: {order_status}, paid: {is_paid}")
-        
-        # If order is already paid (sometimes Polar sends it this way), process it
-        if is_paid or order_status == 'paid':
-            log_info(f"Order {order_id} is already paid, processing immediately")
-            return _process_paid_order(webhook_data, 'order.created')
-        
-        # Otherwise, just log and wait for order.paid event
-        metadata = _extract_metadata(data)
-        clerk_user_id = metadata.get('clerk_user_id')
-        subscription_type = metadata.get('subscription_type')
-        
-        supabase = get_supabase()
-        
-        # Store pending order for tracking
-        try:
-            supabase.table('webhook_processing_log').insert({
-                'webhook_id': order_id,
-                'webhook_type': 'order.created',
-                'processed_at': datetime.now(timezone.utc).isoformat(),
-                'status': 'pending',
-                'error_message': f"Waiting for payment. clerk_user_id: {clerk_user_id}, type: {subscription_type}"
-            }).execute()
-        except Exception:
-            pass
-        
-        return {"status": "success", "message": f"Order {order_id} created, waiting for payment confirmation"}
-        
-    except Exception as e:
-        from utils.logger import log_error
-        log_error(f"Error handling order.created: {e}")
-        return {"status": "error", "message": str(e)}
-
-
-def handle_order_paid(webhook_data: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Handle order.paid webhook - this is the definitive payment confirmation.
-    Activates subscriptions and processes payments here.
-    """
-    from utils.logger import log_info
-    
-    log_info("Processing order.paid webhook")
-    return _process_paid_order(webhook_data, 'order.paid')
-
-
-def _process_paid_order(webhook_data: Dict[str, Any], event_type: str) -> Dict[str, Any]:
-    """
-    Common handler for processing a paid order.
-    Called by both order.created (if already paid) and order.paid events.
-    """
+def handle_payment_succeeded(webhook_data: Dict[str, Any]) -> Dict[str, Any]:
+    """Handle payment.succeeded webhook - process successful payments"""
     from utils.logger import log_info, log_error
     
     try:
         data = webhook_data.get('data', {})
-        order_id = data.get('id')
+        payment_id = data.get('payment_id') or data.get('id')
         
-        if not order_id:
-            return {"status": "error", "message": "Missing order ID"}
+        log_info(f"Processing payment.succeeded: {payment_id}")
         
-        supabase = get_supabase()
-        
-        # Check if this order was already processed (idempotency)
-        try:
-            processed_check = supabase.table('webhook_processing_log').select('id, status').eq('webhook_id', order_id).eq('status', 'success').execute()
-            if processed_check.data:
-                log_info(f"Order {order_id} already processed successfully")
-                return {"status": "success", "message": "Order already processed", "idempotent": True}
-        except Exception:
-            pass
-        
-        # Extract metadata using the robust extractor
         metadata = _extract_metadata(data)
         subscription_type = metadata.get('subscription_type')
         clerk_user_id = metadata.get('clerk_user_id')
         
-        log_info(f"Processing paid order: {order_id}", metadata={
-            "subscription_type": subscription_type,
-            "clerk_user_id": clerk_user_id,
-            "has_metadata": bool(metadata)
-        })
+        supabase = get_supabase()
         
         # If no clerk_user_id in metadata, try to find by email
         if not clerk_user_id:
-            log_info("No clerk_user_id in metadata, attempting lookup by email")
-            customer_email = data.get('customer_email') or (data.get('customer', {}) or {}).get('email')
+            customer = data.get('customer', {})
+            customer_email = customer.get('email') if isinstance(customer, dict) else None
             if customer_email:
                 founder = supabase.table('founders').select('clerk_user_id').eq('email', customer_email).execute()
                 if founder.data:
                     clerk_user_id = founder.data[0].get('clerk_user_id')
-                    log_info(f"Found clerk_user_id by email: {clerk_user_id}")
         
         if not clerk_user_id:
-            log_error(f"Cannot process order {order_id}: no clerk_user_id found")
-            return {"status": "error", "message": "Missing clerk_user_id - cannot identify user"}
+            log_error(f"Cannot process payment {payment_id}: no clerk_user_id found")
+            return {"status": "error", "message": "Missing clerk_user_id"}
         
-        # Try to determine subscription_type from product if not in metadata
-        if not subscription_type:
-            log_info("No subscription_type in metadata, checking product")
-            # Check product IDs to determine type
-            items = data.get('items', []) or data.get('line_items', [])
-            for item in items:
-                product_id = item.get('product_id') or (item.get('product', {}) or {}).get('id')
-                if product_id == POLAR_PRODUCT_PRO_ID:
-                    subscription_type = 'founder_plan'
-                    metadata['plan_id'] = 'PRO'
-                    break
-                elif product_id == POLAR_PRODUCT_PRO_PLUS_ID:
-                    subscription_type = 'founder_plan'
-                    metadata['plan_id'] = 'PRO_PLUS'
-                    break
-                elif product_id == POLAR_PRODUCT_ADVISOR_ONBOARDING_ID:
-                    subscription_type = 'advisor_onboarding'
-                    break
-                elif product_id == POLAR_PRODUCT_ADVISOR_RENEWAL_ID:
-                    subscription_type = 'advisor_renewal'
-                    break
-            
-            log_info(f"Determined subscription_type from product: {subscription_type}")
+        # Check idempotency
+        try:
+            processed_check = supabase.table('webhook_processing_log').select('id, status').eq('webhook_id', payment_id).eq('status', 'success').execute()
+            if processed_check.data:
+                log_info(f"Payment {payment_id} already processed successfully")
+                return {"status": "success", "message": "Payment already processed", "idempotent": True}
+        except Exception:
+            pass
         
         if subscription_type == 'founder_plan':
             plan_id = metadata.get('plan_id')
             if not plan_id:
-                log_error(f"Missing plan_id for order {order_id}")
+                # Try to determine from product
+                product_id = data.get('product_id')
+                if product_id == DODO_PRODUCT_PRO_ID:
+                    plan_id = 'PRO'
+                elif product_id == DODO_PRODUCT_PRO_PLUS_ID:
+                    plan_id = 'PRO_PLUS'
+            
+            if not plan_id:
                 return {"status": "error", "message": "Missing plan_id"}
             
-            # Get subscription period from webhook data
-            current_period_end = None
-            if data.get('current_period_end'):
-                period_end_value = data.get('current_period_end')
-                if isinstance(period_end_value, (int, float)):
-                    current_period_end = datetime.fromtimestamp(period_end_value, tz=timezone.utc)
-                elif isinstance(period_end_value, str):
-                    current_period_end = datetime.fromisoformat(period_end_value.replace('Z', '+00:00'))
+            subscription_id = data.get('subscription_id')
+            current_period_end = datetime.now(timezone.utc) + timedelta(days=30)
             
-            # Also try subscription object for period info
-            subscription = data.get('subscription', {})
-            if not current_period_end and subscription.get('current_period_end'):
-                period_end_value = subscription.get('current_period_end')
-                if isinstance(period_end_value, (int, float)):
-                    current_period_end = datetime.fromtimestamp(period_end_value, tz=timezone.utc)
-                elif isinstance(period_end_value, str):
-                    current_period_end = datetime.fromisoformat(period_end_value.replace('Z', '+00:00'))
-            
-            if not current_period_end:
-                current_period_end = datetime.now(timezone.utc) + timedelta(days=30)
-            
-            # Get subscription_id
-            subscription_id = data.get('subscription_id') or subscription.get('id')
-            
-            # Update user's plan
             plan_service.update_founder_plan(
                 clerk_user_id,
                 plan_id,
@@ -884,52 +514,10 @@ def _process_paid_order(webhook_data: Dict[str, Any], event_type: str) -> Dict[s
                 current_period_end=current_period_end
             )
             
-            # Log successful processing
-            try:
-                supabase.table('webhook_processing_log').upsert({
-                    'webhook_id': order_id,
-                    'webhook_type': event_type,
-                    'processed_at': datetime.now(timezone.utc).isoformat(),
-                    'status': 'success'
-                }, on_conflict='webhook_id').execute()
-            except Exception:
-                pass
-            
+            _log_webhook_success(supabase, payment_id, 'payment.succeeded')
             log_info(f"Plan {plan_id} activated for {clerk_user_id}")
             return {"status": "success", "message": f"Plan {plan_id} activated"}
             
-        elif subscription_type == 'advisor_onboarding':
-            plan_service.update_advisor_billing(clerk_user_id, onboarding_paid=True)
-            
-            try:
-                supabase.table('webhook_processing_log').upsert({
-                    'webhook_id': order_id,
-                    'webhook_type': event_type,
-                    'processed_at': datetime.now(timezone.utc).isoformat(),
-                    'status': 'success'
-                }, on_conflict='webhook_id').execute()
-            except Exception:
-                pass
-            
-            log_info(f"Advisor onboarding paid for {clerk_user_id}")
-            return {"status": "success", "message": "Advisor onboarding paid"}
-            
-        elif subscription_type == 'advisor_renewal':
-            plan_service.renew_advisor_subscription(clerk_user_id)
-            
-            try:
-                supabase.table('webhook_processing_log').upsert({
-                    'webhook_id': order_id,
-                    'webhook_type': event_type,
-                    'processed_at': datetime.now(timezone.utc).isoformat(),
-                    'status': 'success'
-                }, on_conflict='webhook_id').execute()
-            except Exception:
-                pass
-            
-            log_info(f"Advisor subscription renewed for {clerk_user_id}")
-            return {"status": "success", "message": "Advisor subscription renewed"}
-        
         elif subscription_type == 'advisor_project_accept':
             request_id = metadata.get('request_id')
             if not request_id:
@@ -939,153 +527,190 @@ def _process_paid_order(webhook_data: Dict[str, Any], event_type: str) -> Dict[s
                 supabase.table('advisor_project_payments').insert({
                     'clerk_user_id': clerk_user_id,
                     'request_id': request_id,
-                    'order_id': order_id,
+                    'order_id': payment_id,
                     'paid_at': datetime.now(timezone.utc).isoformat(),
                     'amount_usd': 69
                 }).execute()
             except Exception:
                 pass
             
-            try:
-                supabase.table('webhook_processing_log').upsert({
-                    'webhook_id': order_id,
-                    'webhook_type': event_type,
-                    'processed_at': datetime.now(timezone.utc).isoformat(),
-                    'status': 'success'
-                }, on_conflict='webhook_id').execute()
-            except Exception:
-                pass
-            
+            _log_webhook_success(supabase, payment_id, 'payment.succeeded')
             log_info(f"Project accept payment recorded for {clerk_user_id}, request {request_id}")
-            return {"status": "success", "message": f"Project accept payment recorded for request {request_id}"}
+            return {"status": "success", "message": f"Project accept payment recorded"}
         
-        log_info(f"Unknown or missing subscription_type: {subscription_type}")
         return {"status": "ignored", "message": f"Unknown subscription type: {subscription_type}"}
         
     except Exception as e:
         from utils.logger import log_error
-        log_error(f"Error processing paid order: {e}")
-        try:
-            supabase = get_supabase()
-            supabase.table('webhook_processing_log').upsert({
-                'webhook_id': webhook_data.get('data', {}).get('id', 'unknown'),
-                'webhook_type': event_type,
-                'processed_at': datetime.now(timezone.utc).isoformat(),
-                'status': 'error',
-                'error_message': str(e)
-            }, on_conflict='webhook_id').execute()
-        except Exception:
-            pass
+        log_error(f"Error handling payment.succeeded: {e}")
         return {"status": "error", "message": str(e)}
 
-def handle_subscription_created(webhook_data: Dict[str, Any]) -> Dict[str, Any]:
-    """Handle subscription.created webhook"""
+
+def handle_subscription_active(webhook_data: Dict[str, Any]) -> Dict[str, Any]:
+    """Handle subscription.active webhook - subscription is now active"""
+    from utils.logger import log_info
+    
     try:
         data = webhook_data.get('data', {})
-        subscription_id = data.get('id')
-        status = data.get('status')
+        subscription_id = data.get('subscription_id') or data.get('id')
         
-        # Update subscription status in database
+        log_info(f"Subscription active: {subscription_id}")
+        
+        metadata = _extract_metadata(data)
+        clerk_user_id = metadata.get('clerk_user_id')
+        
         supabase = get_supabase()
-        supabase.table('founders').update({
-            'subscription_id': subscription_id,
-            'subscription_status': status
-        }).eq('subscription_id', subscription_id).execute()
         
-        return {"status": "success", "message": "Subscription created"}
+        # Find user by subscription_id if no clerk_user_id
+        if not clerk_user_id and subscription_id:
+            founder = supabase.table('founders').select('clerk_user_id').eq('subscription_id', subscription_id).execute()
+            if founder.data:
+                clerk_user_id = founder.data[0].get('clerk_user_id')
+        
+        if clerk_user_id:
+            supabase.table('founders').update({
+                'subscription_status': 'active'
+            }).eq('clerk_user_id', clerk_user_id).execute()
+        
+        return {"status": "success", "message": "Subscription activated"}
+        
     except Exception as e:
         return {"status": "error", "message": str(e)}
+
+
+def handle_subscription_renewed(webhook_data: Dict[str, Any]) -> Dict[str, Any]:
+    """Handle subscription.renewed webhook - subscription renewed for next period"""
+    from utils.logger import log_info
+    
+    try:
+        data = webhook_data.get('data', {})
+        subscription_id = data.get('subscription_id') or data.get('id')
+        
+        log_info(f"Subscription renewed: {subscription_id}")
+        
+        supabase = get_supabase()
+        
+        # Update subscription period
+        current_period_end = datetime.now(timezone.utc) + timedelta(days=30)
+        
+        supabase.table('founders').update({
+            'subscription_status': 'active',
+            'subscription_current_period_end': current_period_end.isoformat()
+        }).eq('subscription_id', subscription_id).execute()
+        
+        return {"status": "success", "message": "Subscription renewed"}
+        
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
 
 def handle_subscription_updated(webhook_data: Dict[str, Any]) -> Dict[str, Any]:
     """Handle subscription.updated webhook - update subscription status"""
+    from utils.logger import log_info
+    
     try:
         data = webhook_data.get('data', {})
-        subscription_id = data.get('id')
+        subscription_id = data.get('subscription_id') or data.get('id')
         status = data.get('status')
-        current_period_end = data.get('current_period_end')
+        
+        log_info(f"Subscription updated: {subscription_id} -> {status}")
         
         supabase = get_supabase()
-        update_data = {
-            'subscription_status': status
-        }
         
-        if current_period_end:
-            update_data['subscription_current_period_end'] = datetime.fromisoformat(
-                current_period_end.replace('Z', '+00:00')
-            ).isoformat()
+        update_data = {}
+        if status:
+            update_data['subscription_status'] = status
         
-        supabase.table('founders').update(update_data).eq('subscription_id', subscription_id).execute()
-        
-        # If subscription is canceled or expired, check if period has ended before downgrading
-        if status in ['canceled', 'expired', 'past_due']:
-            founder = supabase.table('founders').select('clerk_user_id, subscription_current_period_end').eq('subscription_id', subscription_id).execute()
-            if founder.data:
-                clerk_user_id = founder.data[0]['clerk_user_id']
-                period_end_str = founder.data[0].get('subscription_current_period_end')
-                
-                # Only downgrade if period has actually ended
-                should_downgrade = False
-                if status == 'expired':
-                    # Expired means period has definitely ended
-                    should_downgrade = True
-                elif period_end_str:
-                    # Check if current_period_end has passed
-                    try:
-                        from datetime import datetime, timezone
-                        period_end = datetime.fromisoformat(period_end_str.replace('Z', '+00:00'))
-                        if period_end.tzinfo is None:
-                            period_end = period_end.replace(tzinfo=timezone.utc)
-                        now = datetime.now(timezone.utc)
-                        if period_end < now:
-                            should_downgrade = True
-                    except (ValueError, AttributeError):
-                        # Invalid date - assume expired
-                        should_downgrade = True
-                else:
-                    # No period_end date - assume expired
-                    should_downgrade = True
-                
-                if should_downgrade:
-                    plan_service.update_founder_plan(clerk_user_id, 'FREE')
-        
-        return {"status": "success", "message": "Subscription updated"}
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
-
-def handle_subscription_canceled(webhook_data: Dict[str, Any]) -> Dict[str, Any]:
-    """Handle subscription.canceled webhook - mark as canceled but don't downgrade until period ends"""
-    try:
-        data = webhook_data.get('data', {})
-        subscription_id = data.get('id')
-        cancel_at_period_end = data.get('cancel_at_period_end', True)
-        current_period_end = data.get('current_period_end')
-        
-        supabase = get_supabase()
-        founder = supabase.table('founders').select('clerk_user_id, subscription_current_period_end').eq('subscription_id', subscription_id).execute()
-        
-        if founder.data:
-            clerk_user_id = founder.data[0]['clerk_user_id']
-            existing_period_end = founder.data[0].get('subscription_current_period_end')
-            
-            # Use period_end from webhook if available, otherwise use existing
-            period_end_to_check = current_period_end or existing_period_end
-            
-            # Only downgrade immediately if cancel_at_period_end is False (immediate cancellation)
-            # Otherwise, user keeps access until period_end
-            if not cancel_at_period_end:
-                plan_service.update_founder_plan(clerk_user_id, 'FREE')
-            
-            update_data = {
-                'subscription_status': 'canceled',
-                'subscription_cancel_at_period_end': cancel_at_period_end
-            }
-            
-            if current_period_end:
-                update_data['subscription_current_period_end'] = current_period_end
-            
+        if update_data:
             supabase.table('founders').update(update_data).eq('subscription_id', subscription_id).execute()
         
-        return {"status": "success", "message": "Subscription canceled"}
+        return {"status": "success", "message": "Subscription updated"}
+        
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
+
+def handle_subscription_canceled(webhook_data: Dict[str, Any]) -> Dict[str, Any]:
+    """Handle subscription.cancelled webhook"""
+    from utils.logger import log_info
+    
+    try:
+        data = webhook_data.get('data', {})
+        subscription_id = data.get('subscription_id') or data.get('id')
+        
+        log_info(f"Subscription canceled: {subscription_id}")
+        
+        supabase = get_supabase()
+        
+        # Update status to canceled
+        supabase.table('founders').update({
+            'subscription_status': 'canceled'
+        }).eq('subscription_id', subscription_id).execute()
+        
+        # Optionally downgrade to free (depends on business logic)
+        founder = supabase.table('founders').select('clerk_user_id').eq('subscription_id', subscription_id).execute()
+        if founder.data:
+            clerk_user_id = founder.data[0]['clerk_user_id']
+            plan_service.update_founder_plan(clerk_user_id, 'FREE')
+        
+        return {"status": "success", "message": "Subscription canceled"}
+        
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+def handle_subscription_on_hold(webhook_data: Dict[str, Any]) -> Dict[str, Any]:
+    """Handle subscription.on_hold webhook - subscription paused due to payment failure"""
+    from utils.logger import log_info
+    
+    try:
+        data = webhook_data.get('data', {})
+        subscription_id = data.get('subscription_id') or data.get('id')
+        
+        log_info(f"Subscription on hold: {subscription_id}")
+        
+        supabase = get_supabase()
+        
+        supabase.table('founders').update({
+            'subscription_status': 'on_hold'
+        }).eq('subscription_id', subscription_id).execute()
+        
+        return {"status": "success", "message": "Subscription on hold"}
+        
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+def handle_subscription_failed(webhook_data: Dict[str, Any]) -> Dict[str, Any]:
+    """Handle subscription.failed webhook - subscription creation failed"""
+    from utils.logger import log_info, log_error
+    
+    try:
+        data = webhook_data.get('data', {})
+        subscription_id = data.get('subscription_id') or data.get('id')
+        
+        log_error(f"Subscription failed: {subscription_id}")
+        
+        supabase = get_supabase()
+        
+        supabase.table('founders').update({
+            'subscription_status': 'failed'
+        }).eq('subscription_id', subscription_id).execute()
+        
+        return {"status": "success", "message": "Subscription failure recorded"}
+        
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+def _log_webhook_success(supabase, webhook_id: str, webhook_type: str):
+    """Log successful webhook processing"""
+    try:
+        supabase.table('webhook_processing_log').upsert({
+            'webhook_id': webhook_id,
+            'webhook_type': webhook_type,
+            'processed_at': datetime.now(timezone.utc).isoformat(),
+            'status': 'success'
+        }, on_conflict='webhook_id').execute()
+    except Exception:
+        pass

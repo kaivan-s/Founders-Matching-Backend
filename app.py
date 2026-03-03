@@ -711,41 +711,10 @@ def get_unread_count():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-@app.route('/api/payments/webhook', methods=['POST'])
-@limiter.limit(RATE_LIMITS['strict'])
-def handle_webhook():
-    """Handle Polar webhook events (legacy - kept for backward compatibility)"""
-    try:
-        # Get raw body for signature verification (must be done before parsing JSON)
-        payload = request.get_data(as_text=True)
-        signature = request.headers.get('X-Polar-Webhook-Signature', '')
-        
-        # Parse JSON payload
-        webhook_data = request.get_json()
-        
-        if not webhook_data:
-            return jsonify({"error": "Invalid webhook payload"}), 400
-        
-        # Verify webhook signature (required for security)
-        if not signature:
-            return jsonify({"error": "Missing webhook signature"}), 401
-        
-        if not payment_service.verify_webhook_signature(payload, signature):
-            return jsonify({"error": "Invalid webhook signature"}), 401
-        
-        # Handle webhook event
-        result = payment_service.handle_webhook(webhook_data)
-        
-        return jsonify(result), 200
-    except Exception as e:
-        error_trace = traceback.format_exc()
-        log_error("Error handling webhook", traceback_str=error_trace)
-        return jsonify({"error": str(e)}), 500
-
 @app.route('/api/billing/webhook', methods=['POST'])
 @limiter.limit(RATE_LIMITS['strict'])
 def handle_subscription_webhook():
-    """Handle Polar webhook events for subscriptions using Standard Webhooks"""
+    """Handle Dodo Payments webhook events for subscriptions using Standard Webhooks"""
     import json as json_module
     
     try:
@@ -754,7 +723,7 @@ def handle_subscription_webhook():
         headers = dict(request.headers)
         
         # Log incoming webhook for debugging
-        log_info(f"Received billing webhook, content-length: {len(body)}")
+        log_info(f"Received Dodo billing webhook, content-length: {len(body)}")
         
         # Always log the raw payload for debugging (truncated)
         try:
@@ -766,18 +735,16 @@ def handle_subscription_webhook():
             data_obj = raw_payload.get('data', {})
             log_info(f"Webhook data structure: {list(data_obj.keys())[:20]}")
             
-            # Log customer structure if present
+            # Log metadata if present
+            if data_obj.get('metadata'):
+                log_info(f"Metadata found: {data_obj.get('metadata')}")
             if data_obj.get('customer'):
                 customer_obj = data_obj.get('customer', {})
-                log_info(f"Customer structure: {list(customer_obj.keys())[:15]}")
-                if customer_obj.get('metadata'):
-                    log_info(f"Customer metadata found: {customer_obj.get('metadata')}")
-                if customer_obj.get('email'):
-                    log_info(f"Customer email: {customer_obj.get('email')}")
+                log_info(f"Customer email: {customer_obj.get('email')}")
         except Exception as parse_err:
             log_info(f"Could not parse raw payload for debugging: {parse_err}")
         
-        # Validate webhook using Polar SDK (Standard Webhooks specification)
+        # Validate webhook using Standard Webhooks specification
         webhook_data = subscription_service.validate_webhook_event(body, headers)
         
         if webhook_data is None:
@@ -2800,7 +2767,7 @@ def check_discovery_limit():
 @app.route('/api/billing/founder/subscribe', methods=['POST'])
 @limiter.limit(RATE_LIMITS['strict'])
 def subscribe_plan():
-    """Subscribe to a plan using Polar"""
+    """Subscribe to a plan using Dodo Payments"""
     try:
         clerk_user_id = get_clerk_user_id()
         if not clerk_user_id:
@@ -2814,7 +2781,7 @@ def subscribe_plan():
         if new_plan not in ['PRO', 'PRO_PLUS']:
             return jsonify({"error": "Invalid plan. Must be PRO or PRO_PLUS"}), 400
         
-        # Create Polar checkout session
+        # Create Dodo checkout session
         checkout = subscription_service.create_subscription_checkout(clerk_user_id, new_plan)
         
         return jsonify(checkout), 200
@@ -2829,7 +2796,7 @@ def subscribe_plan():
 @app.route('/api/billing/founder/cancel', methods=['POST'])
 @limiter.limit(RATE_LIMITS['moderate'])
 def cancel_subscription():
-    """Cancel subscription in Polar and downgrade to FREE plan"""
+    """Cancel subscription and downgrade to FREE plan"""
     try:
         clerk_user_id = get_clerk_user_id()
         if not clerk_user_id:
@@ -2857,15 +2824,15 @@ def cancel_subscription():
                     "max_allowed": 1
                 }), 400
         
-        # STEP 1: Cancel subscription in Polar FIRST (to stop billing)
+        # STEP 1: Cancel subscription in Dodo FIRST (to stop billing)
         from services import subscription_service
         try:
-            polar_result = subscription_service.cancel_polar_subscription(clerk_user_id)
-            log_info(f"Polar subscription cancellation result for {clerk_user_id}: {polar_result}")
-        except Exception as polar_error:
+            cancel_result = subscription_service.cancel_subscription(clerk_user_id)
+            log_info(f"Subscription cancellation result for {clerk_user_id}: {cancel_result}")
+        except Exception as cancel_error:
             # Log but don't fail - we still want to downgrade the user in our DB
-            # This handles edge cases where Polar subscription doesn't exist but user is on paid plan
-            log_error(f"Failed to cancel Polar subscription for {clerk_user_id}: {polar_error}")
+            # This handles edge cases where subscription doesn't exist but user is on paid plan
+            log_error(f"Failed to cancel subscription for {clerk_user_id}: {cancel_error}")
         
         # STEP 2: Downgrade to FREE in our database
         # Update subscription_status to 'canceled' when downgrading
@@ -2915,7 +2882,7 @@ def pay_advisor_accept_project():
         if not request_id:
             return jsonify({"error": "request_id is required"}), 400
         
-        # Create Polar checkout session with request_id
+        # Create Dodo checkout session with request_id
         checkout = subscription_service.create_advisor_project_accept_checkout(clerk_user_id, request_id)
         
         return jsonify(checkout), 200
@@ -2923,26 +2890,6 @@ def pay_advisor_accept_project():
         return jsonify({"error": str(e)}), 400
     except Exception as e:
         log_error("Error creating advisor project accept checkout", error=e)
-        import traceback
-        traceback.print_exc()
-        return jsonify({"error": str(e)}), 500
-
-@app.route('/api/billing/advisor/renewal', methods=['POST'])
-def renew_advisor_subscription():
-    """Renew advisor annual subscription using Polar"""
-    try:
-        clerk_user_id = get_clerk_user_id()
-        if not clerk_user_id:
-            return jsonify({"error": "User ID required"}), 401
-        
-        # Create Polar checkout session
-        checkout = subscription_service.create_advisor_renewal_checkout(clerk_user_id)
-        
-        return jsonify(checkout), 200
-    except ValueError as e:
-        return jsonify({"error": str(e)}), 400
-    except Exception as e:
-        log_error("Error creating advisor renewal checkout", error=e)
         import traceback
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
