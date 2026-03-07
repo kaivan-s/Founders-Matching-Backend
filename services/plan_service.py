@@ -13,7 +13,8 @@ FOUNDER_PLANS: Dict[FounderPlan, Dict[str, Any]] = {
         "monthlyPriceUSD": 0,
         "maxWorkspaces": 1,
         "discovery": {
-            "maxMatchesPerMonth": 10,
+            "maxSwipesPerMonth": 3,
+            "maxAccessRequestsPerMonth": 3,
             "showCompatDimensions": False,
         },
         "workspaceFeatures": {
@@ -38,7 +39,8 @@ FOUNDER_PLANS: Dict[FounderPlan, Dict[str, Any]] = {
         "monthlyPriceUSD": 15,
         "maxWorkspaces": 2,
         "discovery": {
-            "maxMatchesPerMonth": "UNLIMITED",
+            "maxSwipesPerMonth": "UNLIMITED",
+            "maxAccessRequestsPerMonth": "UNLIMITED",
             "showCompatDimensions": True,
         },
         "workspaceFeatures": {
@@ -63,7 +65,8 @@ FOUNDER_PLANS: Dict[FounderPlan, Dict[str, Any]] = {
         "monthlyPriceUSD": 35,
         "maxWorkspaces": 5,
         "discovery": {
-            "maxMatchesPerMonth": "UNLIMITED",
+            "maxSwipesPerMonth": "UNLIMITED",
+            "maxAccessRequestsPerMonth": "UNLIMITED",
             "showCompatDimensions": True,
         },
         "workspaceFeatures": {
@@ -318,9 +321,9 @@ def check_discovery_limit(clerk_user_id: str) -> tuple[bool, int, int]:
     supabase = get_supabase()
     
     plan_config = get_founder_plan(clerk_user_id)
-    max_matches = plan_config.get('discovery', {}).get('maxMatchesPerMonth', 10)
+    max_swipes = plan_config.get('discovery', {}).get('maxSwipesPerMonth', 3)
     
-    if max_matches == "UNLIMITED":
+    if max_swipes == "UNLIMITED":
         return (True, 0, -1)  # -1 means unlimited
     
     # Use 30-day rolling window instead of calendar month
@@ -340,9 +343,38 @@ def check_discovery_limit(clerk_user_id: str) -> tuple[bool, int, int]:
     else:
         current_count = swipe_count_result.count
     
-    can_swipe = current_count < max_matches
+    can_swipe = current_count < max_swipes
     
-    return (can_swipe, current_count, max_matches)
+    return (can_swipe, current_count, max_swipes)
+
+
+def check_access_request_limit(clerk_user_id: str) -> tuple[bool, int, int]:
+    """
+    Check if user can send more access requests using 30-day rolling window.
+    Returns: (can_request, current_count, max_allowed)
+    """
+    founder_id = _get_founder_id(clerk_user_id)
+    supabase = get_supabase()
+    
+    plan_config = get_founder_plan(clerk_user_id)
+    max_requests = plan_config.get('discovery', {}).get('maxAccessRequestsPerMonth', 3)
+    
+    if max_requests == "UNLIMITED":
+        return (True, 0, -1)  # -1 means unlimited
+    
+    # Use 30-day rolling window
+    now = datetime.now(timezone.utc)
+    thirty_days_ago = now - timedelta(days=30)
+    
+    # Count access requests sent in the last 30 days
+    request_count_result = supabase.table('project_access_requests').select(
+        'id', count='exact'
+    ).eq('requester_id', founder_id).gte('created_at', thirty_days_ago.isoformat()).execute()
+    
+    current_count = request_count_result.count if request_count_result.count is not None else 0
+    can_request = current_count < max_requests
+    
+    return (can_request, current_count, max_requests)
 
 def increment_discovery_usage(clerk_user_id: str) -> None:
     """Increment discovery swipe count - now uses 30-day rolling window via swipe_history"""

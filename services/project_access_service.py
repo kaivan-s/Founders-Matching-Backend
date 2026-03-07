@@ -182,6 +182,13 @@ def request_project_access(clerk_user_id: str, project_id: str, message: str = N
             # Allow re-requesting after decline (update existing record)
             pass
     
+    # Check access request limit (only for new requests, not re-requests after decline)
+    if not existing.data:
+        from services import plan_service
+        can_request, current_count, max_allowed = plan_service.check_access_request_limit(clerk_user_id)
+        if not can_request:
+            raise ValueError(f"Access request limit reached ({current_count}/{max_allowed} this month). Upgrade to Pro for unlimited requests.")
+    
     # Calculate expiry
     expires_days = project_data.get('request_expires_days', 7)
     expires_at = datetime.now(timezone.utc) + timedelta(days=expires_days)

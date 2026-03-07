@@ -2904,6 +2904,27 @@ def check_discovery_limit():
         log_error("Error checking discovery limit", error=e)
         return jsonify({"error": str(e)}), 500
 
+@app.route('/api/billing/access-request-limit', methods=['GET'])
+def check_access_request_limit():
+    """Check access request limit for project visibility"""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        can_request, current_count, max_allowed = plan_service.check_access_request_limit(clerk_user_id)
+        return jsonify({
+            "can_request": can_request,
+            "current_count": current_count,
+            "max_allowed": max_allowed,
+            "remaining": max_allowed - current_count if max_allowed != -1 else -1
+        }), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        log_error("Error checking access request limit", error=e)
+        return jsonify({"error": str(e)}), 500
+
 @app.route('/api/billing/founder/subscribe', methods=['POST'])
 @limiter.limit(RATE_LIMITS['strict'])
 def subscribe_plan():
