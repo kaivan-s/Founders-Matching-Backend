@@ -321,6 +321,28 @@ def get_available_founders(clerk_user_id, filters=None, mode='founders'):
         # Format projects as founder-like objects for UI compatibility
         # Each project becomes a separate card
         formatted_results = []
+        
+        # Get all project IDs to check access grants
+        project_ids_for_access = [p['id'] for p in available_projects]
+        access_grant_set = set()
+        pending_request_set = set()
+        
+        # Only check access tables if they exist (may not be migrated yet)
+        try:
+            if project_ids_for_access:
+                grants = supabase.table('project_access_grants').select('project_id').eq('user_id', current_user_id).in_('project_id', project_ids_for_access).execute()
+                if grants.data:
+                    access_grant_set = {g['project_id'] for g in grants.data}
+            
+            # Check pending requests for current user
+            if project_ids_for_access:
+                pending = supabase.table('project_access_requests').select('project_id').eq('requester_id', current_user_id).eq('status', 'pending').in_('project_id', project_ids_for_access).execute()
+                if pending.data:
+                    pending_request_set = {p['project_id'] for p in pending.data}
+        except Exception:
+            # Tables may not exist yet (migration not run), default to empty
+            pass
+        
         for project in available_projects:
             founder_info = project.get('founder', {})
             
@@ -349,6 +371,29 @@ def get_available_founders(clerk_user_id, filters=None, mode='founders'):
             
             # Use project ID as the unique identifier
             # This avoids the composite ID issue that was causing UUID parsing errors
+            
+            # Determine visibility and access status
+            visibility = project.get('visibility', 'open')
+            project_id = project['id']
+            
+            # Calculate has_access based on visibility type
+            has_access = True  # Default: full access
+            access_status = 'granted'  # 'granted', 'pending', 'no_access'
+            
+            if visibility == 'open':
+                has_access = True
+                access_status = 'granted'
+            elif visibility == 'request_access':
+                if project_id in access_grant_set:
+                    has_access = True
+                    access_status = 'granted'
+                elif project_id in pending_request_set:
+                    has_access = False
+                    access_status = 'pending'
+                else:
+                    has_access = False
+                    access_status = 'no_access'
+            
             formatted_result = {
                 'id': project['id'],  # Use project ID as unique ID
                 'founder_id': founder_info.get('id'),  # Keep original founder ID for swiping
@@ -363,12 +408,15 @@ def get_available_founders(clerk_user_id, filters=None, mode='founders'):
                 'projects': [{
                     'id': project.get('id'),
                     'title': project.get('title', 'Untitled Project'),
-                    'description': project.get('description', 'No description available'),
+                    'description': project.get('description', 'No description available') if has_access else None,
                     'stage': project.get('stage', 'Unknown'),
                     'genre': project.get('genre'),
-                    'needed_skills': project.get('needed_skills', []),
-                    'compatibility_answers': project.get('compatibility_answers', {}),
-                    'is_primary': True  # Mark this as the primary project being shown
+                    'needed_skills': project.get('needed_skills', []) if has_access else [],
+                    'compatibility_answers': project.get('compatibility_answers', {}) if has_access else {},
+                    'is_primary': True,
+                    'visibility': visibility,
+                    'has_access': has_access,
+                    'access_status': access_status
                 }],
                 'primary_project_id': project['id'],  # Track which project this card represents
                 'info_completeness': info_completeness,  # Simple score: more info = easier to evaluate

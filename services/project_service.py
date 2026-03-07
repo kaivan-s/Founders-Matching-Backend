@@ -55,6 +55,14 @@ def create_project(clerk_user_id, data):
     if 'compatibility_answers' in data and data['compatibility_answers']:
         project_data['compatibility_answers'] = data['compatibility_answers']
     
+    # Add visibility settings
+    if 'visibility' in data and data.get('visibility'):
+        project_data['visibility'] = data['visibility']
+    if 'auto_approve_verified' in data:
+        project_data['auto_approve_verified'] = data['auto_approve_verified']
+    if 'request_expires_days' in data:
+        project_data['request_expires_days'] = data['request_expires_days']
+    
     response = supabase.table('projects').insert(project_data).execute()
     return response.data[0]
 
@@ -89,6 +97,12 @@ def update_project(clerk_user_id, project_id, data):
         update_data['visibility_level'] = data['visibility_level']
     if 'is_paused' in data:
         update_data['is_paused'] = data['is_paused']
+    if 'visibility' in data:
+        update_data['visibility'] = data['visibility']
+    if 'auto_approve_verified' in data:
+        update_data['auto_approve_verified'] = data['auto_approve_verified']
+    if 'request_expires_days' in data:
+        update_data['request_expires_days'] = data['request_expires_days']
         if data['is_paused']:
             update_data['paused_at'] = datetime.now(timezone.utc).isoformat()
         else:

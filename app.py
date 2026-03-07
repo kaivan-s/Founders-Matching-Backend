@@ -10,7 +10,7 @@ from utils.logger import log_error, log_warning, log_info
 from utils.rate_limit import init_rate_limiter, RATE_LIMITS
 from config.database import get_supabase
 from services import founder_service, project_service, swipe_service, profile_service, match_service, waitlist_service, message_service, payment_service, workspace_service, task_service
-from services import plan_service, subscription_service, document_service, feedback_service, advanced_search_service, advisor_service, admin_service, feed_service
+from services import plan_service, subscription_service, document_service, feedback_service, advanced_search_service, advisor_service, admin_service, feed_service, project_access_service
 from services.notification_service import NotificationService, ApprovalService
 
 app = Flask(__name__)
@@ -481,6 +481,146 @@ def delete_project(project_id):
         return jsonify(result), 200
     except ValueError as e:
         return jsonify({"error": str(e)}), 404
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+# ==================== Project Access & Visibility Routes ====================
+
+@app.route('/api/projects/<project_id>/visibility', methods=['PUT'])
+def update_project_visibility(project_id):
+    """Update project visibility settings"""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        data = request.get_json()
+        visibility = data.get('visibility', 'open')
+        auto_approve_verified = data.get('auto_approve_verified', False)
+        request_expires_days = data.get('request_expires_days', 7)
+        
+        result = project_access_service.update_project_visibility(
+            clerk_user_id, project_id, visibility,
+            auto_approve_verified=auto_approve_verified,
+            request_expires_days=request_expires_days
+        )
+        return jsonify(result), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/projects/<project_id>/access/check', methods=['GET'])
+def check_project_access(project_id):
+    """Check if current user has access to view project details"""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        result = project_access_service.check_user_access(clerk_user_id, project_id)
+        return jsonify(result), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 404
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/projects/<project_id>/access/request', methods=['POST'])
+@limiter.limit(RATE_LIMITS['moderate'])
+def request_project_access(project_id):
+    """Request access to view a locked project"""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        data = request.get_json() or {}
+        message = data.get('message', '')
+        
+        result = project_access_service.request_project_access(
+            clerk_user_id, project_id, message
+        )
+        return jsonify(result), 201
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/projects/<project_id>/access/viewers', methods=['GET'])
+def get_project_viewers(project_id):
+    """Get list of users who have access to this project"""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        result = project_access_service.get_project_viewers(clerk_user_id, project_id)
+        return jsonify(result), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 403
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/access-requests', methods=['GET'])
+def get_access_requests():
+    """Get pending access requests for projects owned by current user"""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        result = project_access_service.get_pending_requests_for_owner(clerk_user_id)
+        return jsonify(result), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/access-requests/count', methods=['GET'])
+def get_access_request_count():
+    """Get count of pending access requests"""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        count = project_access_service.get_pending_request_count(clerk_user_id)
+        return jsonify({"count": count}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/access-requests/my', methods=['GET'])
+def get_my_access_requests():
+    """Get access requests made by current user"""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        result = project_access_service.get_my_access_requests(clerk_user_id)
+        return jsonify(result), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/access-requests/<request_id>/respond', methods=['POST'])
+@limiter.limit(RATE_LIMITS['moderate'])
+def respond_to_access_request(request_id):
+    """Approve or decline an access request"""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        data = request.get_json()
+        action = data.get('action')  # 'approve' or 'decline'
+        
+        if action not in ['approve', 'decline']:
+            return jsonify({"error": "Action must be 'approve' or 'decline'"}), 400
+        
+        result = project_access_service.respond_to_access_request(
+            clerk_user_id, request_id, action
+        )
+        return jsonify(result), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
