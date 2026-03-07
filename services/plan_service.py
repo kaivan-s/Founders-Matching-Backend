@@ -12,6 +12,7 @@ FOUNDER_PLANS: Dict[FounderPlan, Dict[str, Any]] = {
         "id": "FREE",
         "monthlyPriceUSD": 0,
         "maxWorkspaces": 1,
+        "maxProjects": 1,
         "discovery": {
             "maxSwipesPerMonth": 3,
             "maxAccessRequestsPerMonth": 3,
@@ -38,6 +39,7 @@ FOUNDER_PLANS: Dict[FounderPlan, Dict[str, Any]] = {
         "id": "PRO",
         "monthlyPriceUSD": 15,
         "maxWorkspaces": 2,
+        "maxProjects": 3,
         "discovery": {
             "maxSwipesPerMonth": "UNLIMITED",
             "maxAccessRequestsPerMonth": "UNLIMITED",
@@ -64,6 +66,7 @@ FOUNDER_PLANS: Dict[FounderPlan, Dict[str, Any]] = {
         "id": "PRO_PLUS",
         "monthlyPriceUSD": 35,
         "maxWorkspaces": 5,
+        "maxProjects": "UNLIMITED",
         "discovery": {
             "maxSwipesPerMonth": "UNLIMITED",
             "maxAccessRequestsPerMonth": "UNLIMITED",
@@ -89,8 +92,7 @@ FOUNDER_PLANS: Dict[FounderPlan, Dict[str, Any]] = {
 }
 
 ADVISOR_PRICING = {
-    "onboardingFeeUSD": 69,
-    "annualRenewalUSD": 39,
+    "projectAcceptanceFeeUSD": 69,  # One-time fee to accept a project
     "minMonthlyRateUSD": 50,
     "maxMonthlyRateUSD": 150,
     "platformFeePercent": 25,
@@ -311,6 +313,30 @@ def check_workspace_limit(clerk_user_id: str) -> tuple[bool, int, int]:
     can_create = current_count < max_workspaces
     
     return (can_create, current_count, max_workspaces)
+
+
+def check_project_limit(clerk_user_id: str) -> tuple[bool, int, int]:
+    """
+    Check if user can create more projects.
+    Returns: (can_create, current_count, max_allowed)
+    """
+    founder_id = _get_founder_id(clerk_user_id)
+    supabase = get_supabase()
+    
+    plan_config = get_founder_plan(clerk_user_id)
+    max_projects = plan_config.get('maxProjects', 1)
+    
+    if max_projects == "UNLIMITED":
+        return (True, 0, -1)  # -1 means unlimited
+    
+    # Count existing projects
+    projects = supabase.table('projects').select('id', count='exact').eq('founder_id', founder_id).execute()
+    current_count = projects.count if projects.count is not None else 0
+    
+    can_create = current_count < max_projects
+    
+    return (can_create, current_count, max_projects)
+
 
 def check_discovery_limit(clerk_user_id: str) -> tuple[bool, int, int]:
     """

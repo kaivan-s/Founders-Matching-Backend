@@ -19,7 +19,14 @@ def get_user_projects(clerk_user_id):
     return projects.data if projects.data else []
 
 def create_project(clerk_user_id, data):
-    """Create a new project for a founder - free for all plans (no credits required)"""
+    """Create a new project for a founder - limited by plan"""
+    from services import plan_service
+    
+    # Check project limit
+    can_create, current_count, max_allowed = plan_service.check_project_limit(clerk_user_id)
+    if not can_create:
+        raise ValueError(f"Project limit reached ({current_count}/{max_allowed}). Upgrade your plan to create more projects.")
+    
     supabase = get_supabase()
     
     # Get founder ID
