@@ -343,6 +343,31 @@ def get_available_founders(clerk_user_id, filters=None, mode='founders'):
             # Tables may not exist yet (migration not run), default to empty
             pass
         
+        # Get current user's plan and compatibility answers for compatibility scoring
+        from services.plan_service import get_founder_plan
+        from utils.logger import log_info
+        user_plan = get_founder_plan(clerk_user_id)
+        is_paid_user = user_plan.get('id') in ['PRO', 'PRO_PLUS']
+        log_info(f"[Compatibility] User plan: {user_plan.get('id')}, is_paid: {is_paid_user}")
+        
+        # Get current user's compatibility answers for direct comparison
+        # Priority: 1) User's project answers, 2) User's founder-level discovery preferences
+        current_user_answers = {}
+        if is_paid_user:
+            # First try to get from user's active project
+            user_projects = supabase.table('projects').select('compatibility_answers').eq('founder_id', current_user_id).eq('is_active', True).limit(1).execute()
+            if user_projects.data and user_projects.data[0].get('compatibility_answers'):
+                current_user_answers = user_projects.data[0]['compatibility_answers']
+                log_info(f"[Compatibility] Using project answers: {len(current_user_answers)} answers")
+            else:
+                # Fallback to founder-level discovery preferences
+                founder_prefs = supabase.table('founders').select('compatibility_answers').eq('id', current_user_id).execute()
+                if founder_prefs.data and founder_prefs.data[0].get('compatibility_answers'):
+                    current_user_answers = founder_prefs.data[0]['compatibility_answers']
+                    log_info(f"[Compatibility] Using founder preferences: {len(current_user_answers)} answers")
+                else:
+                    log_info("[Compatibility] No compatibility answers found for user")
+        
         for project in available_projects:
             founder_info = project.get('founder', {})
             
@@ -351,6 +376,21 @@ def get_available_founders(clerk_user_id, filters=None, mode='founders'):
             if user_preferences and any(user_preferences.values()):
                 project_answers = project.get('compatibility_answers', {})
                 preference_score = calculate_preference_score(user_preferences, project_answers)
+            
+            # Calculate compatibility score for paid users
+            compatibility_score = None
+            if is_paid_user and current_user_answers:
+                project_answers = project.get('compatibility_answers', {})
+                if project_answers:
+                    matches = 0
+                    total = 0
+                    for key in current_user_answers:
+                        if key in project_answers:
+                            total += 1
+                            if current_user_answers[key] == project_answers[key]:
+                                matches += 1
+                    if total > 0:
+                        compatibility_score = int((matches / total) * 100)
             
             # Calculate information completeness (not "quality" - just how much info is available)
             # This helps prioritize projects that are easier to evaluate
@@ -426,6 +466,10 @@ def get_available_founders(clerk_user_id, filters=None, mode='founders'):
             # Add preference score if calculated
             if preference_score is not None:
                 formatted_result['preference_score'] = int(preference_score)
+            
+            # Add compatibility score for paid users
+            if compatibility_score is not None:
+                formatted_result['compatibility_score'] = compatibility_score
             
             formatted_results.append(formatted_result)
         

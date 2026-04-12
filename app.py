@@ -313,6 +313,55 @@ def get_swipe_limit():
         log_error("Error getting swipe limit", error=e)
         return jsonify({"error": str(e)}), 500
 
+@app.route('/api/founders/discovery-preferences', methods=['GET', 'PUT'])
+def discovery_preferences():
+    """Get or save founder's discovery preferences (for compatibility scoring)"""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        supabase = get_supabase()
+        
+        # Get founder ID
+        founder = supabase.table('founders').select('id, compatibility_answers').eq('clerk_user_id', clerk_user_id).execute()
+        if not founder.data:
+            return jsonify({"error": "Profile not found"}), 404
+        
+        founder_id = founder.data[0]['id']
+        
+        if request.method == 'GET':
+            # Return current discovery preferences
+            preferences = founder.data[0].get('compatibility_answers') or {}
+            return jsonify({
+                "preferences": preferences,
+                "has_preferences": bool(preferences and len(preferences) > 0)
+            }), 200
+        
+        else:  # PUT
+            data = request.get_json()
+            if not data:
+                return jsonify({"error": "No data provided"}), 400
+            
+            preferences = data.get('preferences', {})
+            
+            # Save to founders table
+            result = supabase.table('founders').update({
+                'compatibility_answers': preferences
+            }).eq('id', founder_id).execute()
+            
+            if not result.data:
+                return jsonify({"error": "Failed to save preferences"}), 500
+            
+            return jsonify({
+                "success": True,
+                "preferences": preferences
+            }), 200
+            
+    except Exception as e:
+        log_error("Error with discovery preferences", error=e)
+        return jsonify({"error": str(e)}), 500
+
 @app.route('/api/founders', methods=['POST'])
 @limiter.limit(RATE_LIMITS['moderate'])
 def create_founder():
@@ -2488,6 +2537,99 @@ def save_quarterly_review(workspace_id):
         log_error("Error saving quarterly review", error=e)
         return jsonify({"error": str(e)}), 500
 
+# ==================== WEEKLY PARTNER CHECK-INS ====================
+
+@app.route('/api/workspaces/<workspace_id>/partner-checkins', methods=['GET'])
+def get_partner_checkins(workspace_id):
+    """Get recent weekly partner check-ins for a workspace"""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        limit = request.args.get('limit', 10, type=int)
+        checkins = workspace_service.get_weekly_partner_checkins(clerk_user_id, workspace_id, limit)
+        return jsonify(checkins), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        log_error("Error getting partner check-ins", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/workspaces/<workspace_id>/partner-checkins/current-week', methods=['GET'])
+def get_current_week_partner_checkins(workspace_id):
+    """Get check-ins for the current week"""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        result = workspace_service.get_current_week_checkins(clerk_user_id, workspace_id)
+        return jsonify(result), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        log_error("Error getting current week check-ins", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/workspaces/<workspace_id>/partner-checkins', methods=['POST'])
+def create_partner_checkin(workspace_id):
+    """Create or update a weekly partner check-in"""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No data provided"}), 400
+        
+        checkin = workspace_service.create_weekly_partner_checkin(clerk_user_id, workspace_id, data)
+        return jsonify(checkin), 201
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        log_error("Error creating partner check-in", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/workspaces/<workspace_id>/partner-checkins/health-trend', methods=['GET'])
+def get_partner_health_trend(workspace_id):
+    """Get partnership health trend over recent weeks"""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        weeks = request.args.get('weeks', 8, type=int)
+        trend = workspace_service.get_partnership_health_trend(clerk_user_id, workspace_id, weeks)
+        return jsonify(trend), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        log_error("Error getting health trend", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/workspaces/<workspace_id>/partner-checkins/status', methods=['GET'])
+def get_partner_checkin_status(workspace_id):
+    """Check if user needs to complete a check-in this week"""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        status = workspace_service.get_checkin_status(clerk_user_id, workspace_id)
+        return jsonify(status), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        log_error("Error getting check-in status", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
 # ==================== WORKSPACE DOCUMENTS ENDPOINTS ====================
 
 @app.route('/api/workspaces/<workspace_id>/documents', methods=['POST'])
@@ -2882,6 +3024,27 @@ def check_workspace_limit():
         return jsonify({"error": str(e)}), 400
     except Exception as e:
         log_error("Error checking workspace limit", error=e)
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/billing/project-limit', methods=['GET'])
+def check_project_limit():
+    """Check project creation limit"""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        can_create, current_count, max_allowed = plan_service.check_project_limit(clerk_user_id)
+        return jsonify({
+            "can_create": can_create,
+            "current_count": current_count,
+            "max_allowed": max_allowed,
+            "remaining": max_allowed - current_count if max_allowed != -1 else -1
+        }), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        log_error("Error checking project limit", error=e)
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/billing/discovery-limit', methods=['GET'])
@@ -3524,6 +3687,220 @@ def download_equity_document(workspace_id, document_id, file_type):
         return jsonify({"error": str(e)}), 404
     except Exception as e:
         log_error("Error downloading equity document", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
+# ==================== CRON ENDPOINTS ====================
+
+@app.route('/api/cron/weekly-checkin-reminders', methods=['POST'])
+def send_weekly_checkin_reminders():
+    """
+    Send weekly check-in reminder emails to users who haven't submitted this week.
+    This should be triggered by a cron job (e.g., Sunday 6PM).
+    
+    Security: Requires a secret token to prevent abuse.
+    """
+    from services import email_service
+    from datetime import datetime, timedelta
+    
+    # Verify cron secret
+    cron_secret = request.headers.get('X-Cron-Secret')
+    expected_secret = os.getenv('CRON_SECRET')
+    
+    if not expected_secret or cron_secret != expected_secret:
+        return jsonify({"error": "Unauthorized"}), 401
+    
+    try:
+        supabase = get_supabase()
+        
+        # Get current week start (Monday)
+        today = datetime.now()
+        days_since_monday = today.weekday()
+        current_week = (today - timedelta(days=days_since_monday)).strftime('%Y-%m-%d')
+        
+        # Get all active workspace participants
+        participants = supabase.table('workspace_participants').select(
+            'workspace_id, user_id, user:founders!user_id(name, email, clerk_user_id), workspace:workspaces!workspace_id(id, title)'
+        ).execute()
+        
+        if not participants.data:
+            return jsonify({"message": "No participants found", "sent": 0}), 200
+        
+        # Group by workspace to find who hasn't submitted
+        workspace_users = {}
+        for p in participants.data:
+            ws_id = p['workspace_id']
+            if ws_id not in workspace_users:
+                workspace_users[ws_id] = {
+                    'title': p.get('workspace', {}).get('title', 'your partnership'),
+                    'participants': []
+                }
+            workspace_users[ws_id]['participants'].append({
+                'user_id': p['user_id'],
+                'name': p.get('user', {}).get('name', 'there'),
+                'email': p.get('user', {}).get('email'),
+                'clerk_user_id': p.get('user', {}).get('clerk_user_id')
+            })
+        
+        # Get all check-ins for this week
+        checkins = supabase.table('weekly_partner_checkins').select(
+            'workspace_id, user_id'
+        ).eq('week_of', current_week).execute()
+        
+        # Create set of (workspace_id, user_id) who have already submitted
+        submitted = set()
+        for c in (checkins.data or []):
+            submitted.add((c['workspace_id'], c['user_id']))
+        
+        # Get last check-in dates for users
+        last_checkins = supabase.table('weekly_partner_checkins').select(
+            'user_id, week_of'
+        ).order('week_of', desc=True).execute()
+        
+        last_checkin_by_user = {}
+        for lc in (last_checkins.data or []):
+            if lc['user_id'] not in last_checkin_by_user:
+                last_checkin_by_user[lc['user_id']] = lc['week_of']
+        
+        # Send reminders
+        sent_count = 0
+        errors = []
+        
+        for ws_id, ws_data in workspace_users.items():
+            # Find partner names for this workspace
+            partner_names = [p['name'] for p in ws_data['participants']]
+            
+            for participant in ws_data['participants']:
+                if (ws_id, participant['user_id']) not in submitted and participant['email']:
+                    # Calculate days since last check-in
+                    days_since = None
+                    if participant['user_id'] in last_checkin_by_user:
+                        try:
+                            last_date = datetime.strptime(last_checkin_by_user[participant['user_id']], '%Y-%m-%d')
+                            days_since = (today - last_date).days
+                        except:
+                            pass
+                    
+                    # Get partner name (someone else in the workspace)
+                    partner_name = next(
+                        (p['name'] for p in ws_data['participants'] if p['user_id'] != participant['user_id']),
+                        'your co-founder'
+                    )
+                    
+                    try:
+                        success = email_service.send_weekly_checkin_reminder_email(
+                            to_email=participant['email'],
+                            user_name=participant['name'],
+                            workspace_title=ws_data['title'],
+                            workspace_id=ws_id,
+                            partner_name=partner_name,
+                            days_since_last=days_since
+                        )
+                        if success:
+                            sent_count += 1
+                    except Exception as e:
+                        errors.append(f"{participant['email']}: {str(e)}")
+        
+        return jsonify({
+            "message": f"Sent {sent_count} reminder emails",
+            "sent": sent_count,
+            "errors": errors[:10] if errors else []  # Limit error list
+        }), 200
+        
+    except Exception as e:
+        log_error("Error sending weekly check-in reminders", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/cron/weekly-projects-digest', methods=['POST'])
+def send_weekly_projects_digest():
+    """
+    Send weekly digest of new projects to all active users.
+    This should be triggered by a cron job (e.g., Monday 10AM).
+    
+    Security: Requires a secret token to prevent abuse.
+    """
+    from services import email_service
+    from datetime import datetime, timedelta
+    
+    # Verify cron secret
+    cron_secret = request.headers.get('X-Cron-Secret')
+    expected_secret = os.getenv('CRON_SECRET')
+    
+    if not expected_secret or cron_secret != expected_secret:
+        return jsonify({"error": "Unauthorized"}), 401
+    
+    try:
+        supabase = get_supabase()
+        
+        # Get projects created in the last 7 days
+        seven_days_ago = (datetime.now() - timedelta(days=7)).isoformat()
+        
+        new_projects = supabase.table('projects').select(
+            'id, title, description, stage, founder_id, founder:founders!founder_id(name)'
+        ).eq('is_active', True).eq('is_deleted', False).eq('seeking_cofounder', True).gte(
+            'created_at', seven_days_ago
+        ).order('created_at', desc=True).execute()
+        
+        if not new_projects.data or len(new_projects.data) == 0:
+            return jsonify({"message": "No new projects this week", "sent": 0}), 200
+        
+        # Format projects for email
+        projects_list = []
+        for p in new_projects.data:
+            projects_list.append({
+                'title': p.get('title', 'Untitled'),
+                'description': p.get('description', ''),
+                'stage': p.get('stage', 'idea'),
+                'founder_name': p.get('founder', {}).get('name', 'A founder')
+            })
+        
+        total_new = len(projects_list)
+        
+        # Get all active founders with email
+        founders = supabase.table('founders').select(
+            'id, name, email, is_active'
+        ).eq('is_active', True).execute()
+        
+        if not founders.data:
+            return jsonify({"message": "No active founders", "sent": 0}), 200
+        
+        # Send digest to each founder
+        sent_count = 0
+        errors = []
+        
+        # Get project founder IDs to exclude them from receiving digest about their own projects
+        new_project_founder_ids = set(p.get('founder_id') for p in new_projects.data)
+        
+        for founder in founders.data:
+            if not founder.get('email'):
+                continue
+            
+            # Skip founders who created projects this week (they know about their own)
+            # But still send if there are OTHER new projects
+            founder_projects = [p for p in projects_list if p not in new_project_founder_ids]
+            
+            try:
+                success = email_service.send_new_projects_digest_email(
+                    to_email=founder['email'],
+                    user_name=founder.get('name', 'there'),
+                    projects=projects_list,
+                    total_new_projects=total_new
+                )
+                if success:
+                    sent_count += 1
+            except Exception as e:
+                errors.append(f"{founder['email']}: {str(e)}")
+        
+        return jsonify({
+            "message": f"Sent {sent_count} digest emails for {total_new} new projects",
+            "sent": sent_count,
+            "new_projects": total_new,
+            "errors": errors[:10] if errors else []
+        }), 200
+        
+    except Exception as e:
+        log_error("Error sending weekly projects digest", error=e)
         return jsonify({"error": str(e)}), 500
 
 

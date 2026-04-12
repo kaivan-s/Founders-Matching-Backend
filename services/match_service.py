@@ -1,6 +1,7 @@
 """Match-related business logic"""
 from datetime import datetime, timezone, timedelta
 from config.database import get_supabase
+from services import email_service
 
 def get_matches(clerk_user_id):
     """Get matches for the current user (excludes expired matches)"""
@@ -447,6 +448,40 @@ def respond_to_like(clerk_user_id, swipe_id, response_type):
         
         # Delete the original swipe record since it's been processed (accepted)
         supabase.table('swipes').delete().eq('id', swipe_id).execute()
+        
+        # Send email notifications to both founders about the match
+        if match_id and not match_exists:
+            try:
+                # Get founder details and workspace for email
+                founder1 = supabase.table('founders').select('name, email, clerk_user_id').eq('id', current_user_id).execute()
+                founder2 = supabase.table('founders').select('name, email, clerk_user_id').eq('id', swiper_id).execute()
+                project = supabase.table('projects').select('title').eq('id', project_id).execute()
+                workspace = supabase.table('workspaces').select('id').eq('match_id', match_id).execute()
+                
+                if founder1.data and founder2.data and project.data and workspace.data:
+                    workspace_id = workspace.data[0]['id']
+                    project_title = project.data[0].get('title', 'Untitled Project')
+                    
+                    # Email to current user (project owner who accepted)
+                    email_service.send_new_match_email(
+                        to_email=founder1.data[0].get('email'),
+                        user_name=founder1.data[0].get('name', 'there'),
+                        partner_name=founder2.data[0].get('name', 'your new co-founder'),
+                        partner_project=project_title,
+                        workspace_id=workspace_id
+                    )
+                    
+                    # Email to swiper (person who showed interest)
+                    email_service.send_new_match_email(
+                        to_email=founder2.data[0].get('email'),
+                        user_name=founder2.data[0].get('name', 'there'),
+                        partner_name=founder1.data[0].get('name', 'your new co-founder'),
+                        partner_project=project_title,
+                        workspace_id=workspace_id
+                    )
+            except Exception as e:
+                from utils.logger import log_error
+                log_error(f"Failed to send match notification emails for match {match_id}", error=e)
         
         return {"message": "Match created successfully"}
     else:

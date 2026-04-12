@@ -3,6 +3,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Optional, Any
 from config.database import get_supabase
 from utils.logger import log_info, log_error
+from services import email_service
 
 # Visibility options
 VISIBILITY_OPEN = 'open'
@@ -216,7 +217,21 @@ def request_project_access(clerk_user_id: str, project_id: str, message: str = N
     
     log_info(f"Access request created from {requester_id} for project {project_id}")
     
-    # TODO: Send notification to project owner
+    # Send email notification to project owner
+    try:
+        requester = supabase.table('founders').select('name').eq('id', requester_id).execute()
+        owner = supabase.table('founders').select('name, email').eq('id', owner_id).execute()
+        
+        if requester.data and owner.data:
+            email_service.send_access_request_email(
+                to_email=owner.data[0].get('email'),
+                user_name=owner.data[0].get('name', 'there'),
+                requester_name=requester.data[0].get('name', 'Someone'),
+                project_name=project_data.get('title', 'your project'),
+                request_message=message
+            )
+    except Exception as e:
+        log_error(f"Failed to send access request notification email", error=e)
     
     return {
         'status': 'pending',
@@ -316,7 +331,22 @@ def respond_to_access_request(clerk_user_id: str, request_id: str,
     
     log_info(f"Access request {request_id} {new_status} by {clerk_user_id}")
     
-    # TODO: Send notification to requester
+    # Send email notification to requester if approved
+    if action == 'approve':
+        try:
+            requester = supabase.table('founders').select('name, email').eq('id', request_data['requester_id']).execute()
+            owner = supabase.table('founders').select('name').eq('id', owner_founder_id).execute()
+            project = supabase.table('projects').select('title').eq('id', request_data['project_id']).execute()
+            
+            if requester.data and owner.data and project.data:
+                email_service.send_access_granted_email(
+                    to_email=requester.data[0].get('email'),
+                    user_name=requester.data[0].get('name', 'there'),
+                    project_name=project.data[0].get('title', 'the project'),
+                    owner_name=owner.data[0].get('name', 'The project owner')
+                )
+        except Exception as e:
+            log_error(f"Failed to send access granted notification email", error=e)
     
     return {
         'request_id': request_id,

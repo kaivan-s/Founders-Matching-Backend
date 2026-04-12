@@ -1,6 +1,7 @@
 """Workspace-related business logic"""
 from config.database import get_supabase
 from .notification_service import NotificationService, ApprovalService
+from services import email_service
 
 def _get_founder_id(clerk_user_id, email=None):
     """Helper to get founder ID from clerk_user_id.
@@ -876,7 +877,7 @@ def generate_agreement_draft(clerk_user_id, workspace_id):
         })
     
     # Generate the draft
-    from datetime import datetime
+    from datetime import datetime, timezone
     draft = {
         'workspaceName': workspace_data.get('title', 'Untitled Workspace'),
         'workspaceId': workspace_id,
@@ -1658,5 +1659,214 @@ def get_workspace_context(clerk_user_id, workspace_id):
             'current': current_equity
         },
         'current_founder_id': founder_id
+    }
+
+
+# ============================================================
+# Weekly Partner Check-ins
+# Simple accountability check-ins between co-founders
+# ============================================================
+
+def _get_week_start(date=None):
+    """Get Monday of the week for a given date (or today)"""
+    from datetime import datetime, timedelta
+    if date is None:
+        date = datetime.now()
+    elif isinstance(date, str):
+        date = datetime.fromisoformat(date.replace('Z', '+00:00'))
+    
+    # Get Monday of this week
+    days_since_monday = date.weekday()
+    monday = date - timedelta(days=days_since_monday)
+    return monday.strftime('%Y-%m-%d')
+
+
+def get_weekly_partner_checkins(clerk_user_id, workspace_id, limit=10):
+    """Get recent weekly partner check-ins for a workspace"""
+    _verify_workspace_access(clerk_user_id, workspace_id)
+    supabase = get_supabase()
+    
+    checkins = supabase.table('weekly_partner_checkins').select(
+        '*, user:founders!user_id(id, name, profile_photo_url)'
+    ).eq('workspace_id', workspace_id).order('week_of', desc=True).order('created_at', desc=True).limit(limit).execute()
+    
+    return checkins.data or []
+
+
+def get_current_week_checkins(clerk_user_id, workspace_id):
+    """Get check-ins for the current week"""
+    _verify_workspace_access(clerk_user_id, workspace_id)
+    supabase = get_supabase()
+    
+    current_week = _get_week_start()
+    founder_id = _get_founder_id(clerk_user_id)
+    
+    checkins = supabase.table('weekly_partner_checkins').select(
+        '*, user:founders!user_id(id, name, profile_photo_url)'
+    ).eq('workspace_id', workspace_id).eq('week_of', current_week).execute()
+    
+    # Separate user's checkin and partner's checkin
+    user_checkin = None
+    partner_checkins = []
+    
+    for checkin in (checkins.data or []):
+        if checkin['user_id'] == founder_id:
+            user_checkin = checkin
+        else:
+            partner_checkins.append(checkin)
+    
+    return {
+        'week_of': current_week,
+        'user_checkin': user_checkin,
+        'partner_checkins': partner_checkins,
+        'user_has_submitted': user_checkin is not None
+    }
+
+
+def create_weekly_partner_checkin(clerk_user_id, workspace_id, data):
+    """Create or update a weekly partner check-in"""
+    founder_id = _verify_workspace_access(clerk_user_id, workspace_id)
+    supabase = get_supabase()
+    
+    # Validate required fields
+    if not data.get('accomplishments'):
+        raise ValueError("accomplishments is required")
+    if not data.get('next_week_focus'):
+        raise ValueError("next_week_focus is required")
+    
+    partnership_health = data.get('partnership_health')
+    if partnership_health is None:
+        raise ValueError("partnership_health is required")
+    if not isinstance(partnership_health, int) or partnership_health < 1 or partnership_health > 5:
+        raise ValueError("partnership_health must be an integer between 1 and 5")
+    
+    # Get current week
+    current_week = _get_week_start()
+    
+    # Check if user already submitted for this week
+    existing = supabase.table('weekly_partner_checkins').select('id').eq(
+        'workspace_id', workspace_id
+    ).eq('user_id', founder_id).eq('week_of', current_week).execute()
+    
+    checkin_data = {
+        'workspace_id': workspace_id,
+        'user_id': founder_id,
+        'week_of': current_week,
+        'accomplishments': data['accomplishments'].strip(),
+        'blockers': data.get('blockers', '').strip() or None,
+        'next_week_focus': data['next_week_focus'].strip(),
+        'partnership_health': partnership_health,
+        'cofounder_shoutout': data.get('cofounder_shoutout', '').strip() or None,
+    }
+    
+    is_new_checkin = not existing.data
+    
+    if existing.data:
+        # Update existing
+        checkin_data['updated_at'] = 'now()'
+        result = supabase.table('weekly_partner_checkins').update(checkin_data).eq(
+            'id', existing.data[0]['id']
+        ).execute()
+    else:
+        # Create new
+        result = supabase.table('weekly_partner_checkins').insert(checkin_data).execute()
+    
+    if not result.data:
+        raise ValueError("Failed to save check-in")
+    
+    # Send email notification to partner(s) for new check-ins
+    if is_new_checkin:
+        try:
+            # Get workspace participants
+            participants = supabase.table('workspace_participants').select(
+                'user_id, user:founders!user_id(name, email)'
+            ).eq('workspace_id', workspace_id).neq('user_id', founder_id).execute()
+            
+            # Get current user's name and workspace title
+            current_user = supabase.table('founders').select('name').eq('id', founder_id).execute()
+            workspace = supabase.table('workspaces').select('title').eq('id', workspace_id).execute()
+            
+            if current_user.data and workspace.data:
+                user_name = current_user.data[0].get('name', 'Your co-founder')
+                workspace_title = workspace.data[0].get('title', 'your partnership')
+                health_emojis = ['', '😟', '😐', '🙂', '😊', '🤩']
+                health_emoji = health_emojis[partnership_health] if 1 <= partnership_health <= 5 else '🙂'
+                
+                for participant in (participants.data or []):
+                    partner_email = participant.get('user', {}).get('email')
+                    partner_name = participant.get('user', {}).get('name', 'there')
+                    
+                    if partner_email:
+                        email_service.send_partner_checkin_submitted_email(
+                            to_email=partner_email,
+                            user_name=partner_name,
+                            partner_name=user_name,
+                            workspace_title=workspace_title,
+                            workspace_id=workspace_id,
+                            partner_health_emoji=health_emoji
+                        )
+        except Exception as e:
+            from utils.logger import log_error
+            log_error(f"Failed to send check-in notification email", error=e)
+    
+    return result.data[0]
+
+
+def get_partnership_health_trend(clerk_user_id, workspace_id, weeks=8):
+    """Get partnership health trend over recent weeks"""
+    _verify_workspace_access(clerk_user_id, workspace_id)
+    supabase = get_supabase()
+    
+    # Get check-ins from the last N weeks
+    from datetime import datetime, timedelta
+    cutoff_date = (datetime.now() - timedelta(weeks=weeks)).strftime('%Y-%m-%d')
+    
+    checkins = supabase.table('weekly_partner_checkins').select(
+        'week_of, partnership_health, user_id'
+    ).eq('workspace_id', workspace_id).gte('week_of', cutoff_date).order('week_of', desc=False).execute()
+    
+    # Group by week and calculate average health
+    weeks_data = {}
+    for checkin in (checkins.data or []):
+        week = checkin['week_of']
+        if week not in weeks_data:
+            weeks_data[week] = []
+        weeks_data[week].append(checkin['partnership_health'])
+    
+    # Calculate average per week
+    trend = []
+    for week, healths in sorted(weeks_data.items()):
+        avg_health = sum(healths) / len(healths)
+        trend.append({
+            'week_of': week,
+            'average_health': round(avg_health, 1),
+            'submissions': len(healths)
+        })
+    
+    return trend
+
+
+def get_checkin_status(clerk_user_id, workspace_id):
+    """Check if user needs to complete a check-in this week"""
+    founder_id = _verify_workspace_access(clerk_user_id, workspace_id)
+    supabase = get_supabase()
+    
+    current_week = _get_week_start()
+    
+    # Check if user has submitted for this week
+    existing = supabase.table('weekly_partner_checkins').select('id, created_at').eq(
+        'workspace_id', workspace_id
+    ).eq('user_id', founder_id).eq('week_of', current_week).execute()
+    
+    # Get last check-in date
+    last_checkin = supabase.table('weekly_partner_checkins').select('week_of, created_at').eq(
+        'workspace_id', workspace_id
+    ).eq('user_id', founder_id).order('week_of', desc=True).limit(1).execute()
+    
+    return {
+        'current_week': current_week,
+        'has_submitted_this_week': len(existing.data) > 0,
+        'last_checkin_week': last_checkin.data[0]['week_of'] if last_checkin.data else None,
+        'last_checkin_date': last_checkin.data[0]['created_at'] if last_checkin.data else None,
     }
 

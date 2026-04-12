@@ -1,7 +1,7 @@
 """Swipe-related business logic"""
 import traceback
 from config.database import get_supabase
-from services import plan_service
+from services import plan_service, email_service
 
 def create_swipe(clerk_user_id, data):
     """Record a swipe action - uses plan-based limits instead of credits
@@ -98,5 +98,27 @@ def create_swipe(clerk_user_id, data):
     # No auto-match logic - all matches require explicit approval via respond_to_like()
     # Right swipes create requests that the project owner must approve/decline
     result['match_created'] = False
+    
+    # Send email notification to project owner when someone shows interest
+    if swipe_type == 'right':
+        try:
+            # Get swiper info
+            swiper_info = supabase.table('founders').select('name').eq('id', swiper_id).execute()
+            # Get project owner info
+            project_owner = supabase.table('founders').select('name, email').eq('id', swiped_id).execute()
+            # Get project info
+            project_info = supabase.table('projects').select('title').eq('id', project_id).execute()
+            
+            if swiper_info.data and project_owner.data and project_info.data:
+                email_service.send_interest_received_email(
+                    to_email=project_owner.data[0].get('email'),
+                    user_name=project_owner.data[0].get('name', 'there'),
+                    interested_user_name=swiper_info.data[0].get('name', 'Someone'),
+                    project_name=project_info.data[0].get('title', 'your project')
+                )
+        except Exception as e:
+            from utils.logger import log_error
+            log_error(f"Failed to send interest notification email for swipe {result.get('id')}", error=e)
+    
     return result
 
