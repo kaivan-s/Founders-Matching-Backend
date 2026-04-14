@@ -529,6 +529,30 @@ def approve_scenario(
         {'both_approved': both_approved}
     )
     
+    # Send Slack notification for equity approval
+    try:
+        from services import slack_integration_service
+        
+        # Get founder name
+        founder = supabase.table('founders').select('name').eq('id', founder_id).execute()
+        founder_name = founder.data[0]['name'] if founder.data else 'A founder'
+        
+        if both_approved:
+            slack_integration_service.send_equity_notification(
+                workspace_id=workspace_id,
+                event_type='both_approved',
+                details={'founder_a_percent': updated.get('founder_a_percent'), 'founder_b_percent': updated.get('founder_b_percent')}
+            )
+        else:
+            slack_integration_service.send_equity_notification(
+                workspace_id=workspace_id,
+                event_type='scenario_approved',
+                details={'founder_name': founder_name}
+            )
+    except Exception as slack_err:
+        from utils.logger import log_error
+        log_error(f"Failed to send Slack equity notification", error=slack_err)
+    
     return updated
 
 

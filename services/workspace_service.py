@@ -1805,6 +1805,20 @@ def create_weekly_partner_checkin(clerk_user_id, workspace_id, data):
                             workspace_id=workspace_id,
                             partner_health_emoji=health_emoji
                         )
+                
+                # Send Slack notification
+                try:
+                    from services import slack_integration_service
+                    health_status_map = {1: 'off_track', 2: 'off_track', 3: 'needs_attention', 4: 'on_track', 5: 'on_track'}
+                    slack_integration_service.send_checkin_submitted_notification(
+                        workspace_id=workspace_id,
+                        founder_name=user_name,
+                        health_status=health_status_map.get(partnership_health, 'on_track')
+                    )
+                except Exception as slack_err:
+                    from utils.logger import log_error
+                    log_error(f"Failed to send Slack check-in notification", error=slack_err)
+                    
         except Exception as e:
             from utils.logger import log_error
             log_error(f"Failed to send check-in notification email", error=e)
