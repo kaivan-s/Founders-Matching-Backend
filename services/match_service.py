@@ -159,9 +159,10 @@ def get_likes(clerk_user_id):
     # Get swipes where someone swiped right on current user
     # Only include swipes for projects that are still seeking co-founders
     # Join with projects table to filter by seeking_cofounder status
+    # Order by created_at descending to show most recent first
     likes_swipes = supabase.table('swipes').select(
         '*, swiper:founders!swiper_id(*), project:projects!project_id(id, seeking_cofounder, is_active)'
-    ).eq('swiped_id', current_user_id).eq('swipe_type', 'right').execute()
+    ).eq('swiped_id', current_user_id).eq('swipe_type', 'right').order('created_at', desc=True).execute()
     
     if not likes_swipes.data:
         return []
@@ -286,6 +287,9 @@ def get_likes(clerk_user_id):
             'project_id': project_id,  # Project ID they swiped on
             'is_project_based': bool(project_id)
         })
+    
+    # Sort by liked_at descending (most recent first)
+    formatted_likes.sort(key=lambda x: x.get('liked_at') or '', reverse=True)
     
     return formatted_likes
 

@@ -3781,12 +3781,15 @@ def slack_oauth_callback():
             workspace_id, slack_data, user_id
         )
         
-        # Redirect back to workspace with success
-        return redirect(f"{frontend_url}/workspaces/{workspace_id}?slack=connected")
+        # Redirect back to workspace integrations tab with success
+        # Remove trailing slash from frontend_url if present
+        base_url = frontend_url.rstrip('/')
+        return redirect(f"{base_url}/workspaces/{workspace_id}/integrations?slack=connected")
         
     except Exception as e:
         log_error("Error in Slack OAuth callback", error=e)
-        return redirect(f"{frontend_url}/workspaces?error=slack_error")
+        base_url = frontend_url.rstrip('/')
+        return redirect(f"{base_url}/workspaces?error=slack_error")
 
 
 @app.route('/api/workspaces/<workspace_id>/integrations', methods=['GET'])
