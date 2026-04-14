@@ -3845,7 +3845,7 @@ def create_slack_channel(workspace_id):
         if not workspace.data:
             return jsonify({"error": "Workspace not found"}), 404
         
-        channel_name = workspace.data[0].get('title', 'partnership')
+        channel_name = workspace.data[0].get('title') or 'partnership'
         
         result = slack_integration_service.create_partnership_channel(
             workspace_id, channel_name

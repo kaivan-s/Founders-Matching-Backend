@@ -151,6 +151,10 @@ def create_partnership_channel(
         log_error(f"No Slack token for workspace {workspace_id}")
         return None
     
+    # Default channel name if None
+    if not channel_name:
+        channel_name = 'partnership'
+    
     # Sanitize channel name (lowercase, no spaces, max 80 chars)
     safe_name = channel_name.lower().replace(' ', '-').replace('_', '-')
     safe_name = ''.join(c for c in safe_name if c.isalnum() or c == '-')
