@@ -3717,7 +3717,7 @@ def get_slack_auth_url():
         supabase = get_supabase()
         supabase.table('oauth_states').insert({
             'state': state,
-            'user_id': clerk_user_id,
+            'clerk_user_id': clerk_user_id,
             'workspace_id': workspace_id,
             'provider': 'slack',
             'expires_at': (datetime.now() + timedelta(minutes=10)).isoformat()
@@ -3760,7 +3760,7 @@ def slack_oauth_callback():
         
         state_data = state_record.data[0]
         workspace_id = state_data['workspace_id']
-        user_id = state_data['user_id']
+        user_id = state_data['clerk_user_id']
         
         # Delete used state
         supabase.table('oauth_states').delete().eq('state', state).execute()

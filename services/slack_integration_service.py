@@ -6,7 +6,7 @@ import os
 import requests
 from typing import Optional, Dict, Any, List
 from utils.logger import log_info, log_error
-from config.supabase_client import get_supabase
+from config.database import get_supabase
 
 SLACK_CLIENT_ID = os.getenv('SLACK_CLIENT_ID')
 SLACK_CLIENT_SECRET = os.getenv('SLACK_CLIENT_SECRET')
