@@ -1,5 +1,5 @@
 """Flask application with route handlers"""
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, redirect
 from flask_cors import CORS
 import os
 import traceback
@@ -3692,6 +3692,249 @@ def download_equity_document(workspace_id, document_id, file_type):
 
 # ==================== CRON ENDPOINTS ====================
 
+# ==================== SLACK INTEGRATION ====================
+
+@app.route('/api/integrations/slack/auth-url', methods=['GET'])
+def get_slack_auth_url():
+    """Get Slack OAuth URL for connecting a workspace"""
+    from services import slack_integration_service
+    from datetime import datetime, timedelta
+    import secrets
+    
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        workspace_id = request.args.get('workspace_id')
+        if not workspace_id:
+            return jsonify({"error": "workspace_id required"}), 400
+        
+        # Generate state token (workspace_id + random string for security)
+        state = f"{workspace_id}:{secrets.token_urlsafe(16)}"
+        
+        # Store state temporarily (expires in 10 minutes)
+        supabase = get_supabase()
+        supabase.table('oauth_states').insert({
+            'state': state,
+            'user_id': clerk_user_id,
+            'workspace_id': workspace_id,
+            'provider': 'slack',
+            'expires_at': (datetime.now() + timedelta(minutes=10)).isoformat()
+        }).execute()
+        
+        auth_url = slack_integration_service.get_oauth_url(workspace_id, state)
+        
+        return jsonify({"auth_url": auth_url}), 200
+        
+    except Exception as e:
+        log_error("Error generating Slack auth URL", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/integrations/slack/callback', methods=['GET'])
+def slack_oauth_callback():
+    """Handle Slack OAuth callback"""
+    from services import slack_integration_service
+    
+    code = request.args.get('code')
+    state = request.args.get('state')
+    error = request.args.get('error')
+    
+    frontend_url = os.getenv('FRONTEND_URL', 'https://guild-space.co')
+    
+    if error:
+        return redirect(f"{frontend_url}/workspaces?error=slack_denied")
+    
+    if not code or not state:
+        return redirect(f"{frontend_url}/workspaces?error=slack_invalid")
+    
+    try:
+        supabase = get_supabase()
+        
+        # Verify state token
+        state_record = supabase.table('oauth_states').select('*').eq('state', state).eq('provider', 'slack').execute()
+        
+        if not state_record.data:
+            return redirect(f"{frontend_url}/workspaces?error=slack_invalid_state")
+        
+        state_data = state_record.data[0]
+        workspace_id = state_data['workspace_id']
+        user_id = state_data['user_id']
+        
+        # Delete used state
+        supabase.table('oauth_states').delete().eq('state', state).execute()
+        
+        # Check if state expired
+        from datetime import datetime
+        if datetime.fromisoformat(state_data['expires_at'].replace('Z', '+00:00')) < datetime.now(tz=datetime.now().astimezone().tzinfo):
+            return redirect(f"{frontend_url}/workspaces/{workspace_id}?error=slack_expired")
+        
+        # Exchange code for token
+        slack_data = slack_integration_service.exchange_code_for_token(code)
+        
+        if not slack_data:
+            return redirect(f"{frontend_url}/workspaces/{workspace_id}?error=slack_failed")
+        
+        # Save integration
+        slack_integration_service.save_workspace_slack_integration(
+            workspace_id, slack_data, user_id
+        )
+        
+        # Redirect back to workspace with success
+        return redirect(f"{frontend_url}/workspaces/{workspace_id}?slack=connected")
+        
+    except Exception as e:
+        log_error("Error in Slack OAuth callback", error=e)
+        return redirect(f"{frontend_url}/workspaces?error=slack_error")
+
+
+@app.route('/api/workspaces/<workspace_id>/integrations', methods=['GET'])
+def get_workspace_integrations(workspace_id):
+    """Get all integrations for a workspace"""
+    from services import slack_integration_service
+    
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        integrations = {}
+        
+        # Get Slack integration
+        slack = slack_integration_service.get_workspace_slack_integration(workspace_id)
+        if slack:
+            integrations['slack'] = {
+                'connected': True,
+                'team_name': slack.get('team_name'),
+                'channel_name': slack.get('channel_name'),
+                'channel_id': slack.get('channel_id'),
+                'settings': slack.get('settings', {}),
+            }
+        else:
+            integrations['slack'] = {'connected': False}
+        
+        # Placeholder for future integrations
+        integrations['notion'] = {'connected': False}
+        integrations['google_calendar'] = {'connected': False}
+        
+        return jsonify(integrations), 200
+        
+    except Exception as e:
+        log_error("Error getting workspace integrations", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/workspaces/<workspace_id>/integrations/slack/channel', methods=['POST'])
+def create_slack_channel(workspace_id):
+    """Create a Slack channel for the workspace"""
+    from services import slack_integration_service
+    
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        # Get workspace title for channel name
+        supabase = get_supabase()
+        workspace = supabase.table('workspaces').select('title').eq('id', workspace_id).execute()
+        
+        if not workspace.data:
+            return jsonify({"error": "Workspace not found"}), 404
+        
+        channel_name = workspace.data[0].get('title', 'partnership')
+        
+        result = slack_integration_service.create_partnership_channel(
+            workspace_id, channel_name
+        )
+        
+        if not result:
+            return jsonify({"error": "Failed to create channel"}), 500
+        
+        return jsonify(result), 201
+        
+    except Exception as e:
+        log_error("Error creating Slack channel", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/workspaces/<workspace_id>/integrations/slack/settings', methods=['PUT'])
+def update_slack_settings(workspace_id):
+    """Update Slack notification settings"""
+    from services import slack_integration_service
+    
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        data = request.get_json()
+        notifications = data.get('notifications', {})
+        
+        success = slack_integration_service.update_notification_settings(
+            workspace_id, notifications
+        )
+        
+        if not success:
+            return jsonify({"error": "Failed to update settings"}), 500
+        
+        return jsonify({"success": True}), 200
+        
+    except Exception as e:
+        log_error("Error updating Slack settings", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/workspaces/<workspace_id>/integrations/slack', methods=['DELETE'])
+def disconnect_slack(workspace_id):
+    """Disconnect Slack integration"""
+    from services import slack_integration_service
+    
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        success = slack_integration_service.disconnect_slack(workspace_id)
+        
+        if not success:
+            return jsonify({"error": "Failed to disconnect"}), 500
+        
+        return jsonify({"success": True}), 200
+        
+    except Exception as e:
+        log_error("Error disconnecting Slack", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/workspaces/<workspace_id>/integrations/slack/test', methods=['POST'])
+def test_slack_notification(workspace_id):
+    """Send a test notification to Slack"""
+    from services import slack_integration_service
+    
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        success = slack_integration_service.send_slack_notification(
+            workspace_id,
+            "🔔 Test notification from Guild Space! Your Slack integration is working.",
+            notification_type='general'
+        )
+        
+        if not success:
+            return jsonify({"error": "Failed to send notification"}), 500
+        
+        return jsonify({"success": True}), 200
+        
+    except Exception as e:
+        log_error("Error sending test notification", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
+# ==================== CRON JOBS ====================
+
 @app.route('/api/cron/weekly-checkin-reminders', methods=['POST'])
 def send_weekly_checkin_reminders():
     """
@@ -3801,9 +4044,28 @@ def send_weekly_checkin_reminders():
                     except Exception as e:
                         errors.append(f"{participant['email']}: {str(e)}")
         
+        # Send Slack reminders to workspaces with connected Slack
+        slack_sent = 0
+        try:
+            from services import slack_integration_service
+            workspaces_notified = set()
+            for ws_id, ws_data in workspace_users.items():
+                # Check if any participant hasn't submitted
+                has_pending = any(
+                    (ws_id, p['user_id']) not in submitted 
+                    for p in ws_data['participants']
+                )
+                if has_pending and ws_id not in workspaces_notified:
+                    if slack_integration_service.send_checkin_reminder(ws_id, ws_data['title']):
+                        slack_sent += 1
+                        workspaces_notified.add(ws_id)
+        except Exception as slack_err:
+            log_error("Error sending Slack check-in reminders", error=slack_err)
+        
         return jsonify({
-            "message": f"Sent {sent_count} reminder emails",
+            "message": f"Sent {sent_count} reminder emails, {slack_sent} Slack notifications",
             "sent": sent_count,
+            "slack_sent": slack_sent,
             "errors": errors[:10] if errors else []  # Limit error list
         }), 200
         
