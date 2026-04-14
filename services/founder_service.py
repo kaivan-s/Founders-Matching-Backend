@@ -343,39 +343,27 @@ def get_available_founders(clerk_user_id, filters=None, mode='founders'):
             # Tables may not exist yet (migration not run), default to empty
             pass
         
-        # Get current user's plan and compatibility answers for compatibility scoring
+        # Get current user's plan and discovery preferences for compatibility scoring
         from services.plan_service import get_founder_plan
         from utils.logger import log_info
         user_plan = get_founder_plan(clerk_user_id)
         is_paid_user = user_plan.get('id') in ['PRO', 'PRO_PLUS']
         log_info(f"[Compatibility] User plan: {user_plan.get('id')}, is_paid: {is_paid_user}")
         
-        # Get current user's compatibility answers for direct comparison
-        # Priority: 1) User's project answers, 2) User's founder-level discovery preferences
+        # Get current user's discovery preferences (ONLY from founders.compatibility_answers)
+        # This is set explicitly via the Preferences button in Discovery page
+        # We do NOT use project compatibility_answers here - those are separate
         current_user_answers = {}
         if is_paid_user:
-            # First try to get from user's active project
-            user_projects = supabase.table('projects').select('compatibility_answers').eq('founder_id', current_user_id).eq('is_active', True).limit(1).execute()
-            if user_projects.data and user_projects.data[0].get('compatibility_answers'):
-                current_user_answers = user_projects.data[0]['compatibility_answers']
-                log_info(f"[Compatibility] Using project answers: {len(current_user_answers)} answers")
+            founder_prefs = supabase.table('founders').select('compatibility_answers').eq('id', current_user_id).execute()
+            if founder_prefs.data and founder_prefs.data[0].get('compatibility_answers'):
+                current_user_answers = founder_prefs.data[0]['compatibility_answers']
+                log_info(f"[Compatibility] Using discovery preferences: {len(current_user_answers)} answers")
             else:
-                # Fallback to founder-level discovery preferences
-                founder_prefs = supabase.table('founders').select('compatibility_answers').eq('id', current_user_id).execute()
-                if founder_prefs.data and founder_prefs.data[0].get('compatibility_answers'):
-                    current_user_answers = founder_prefs.data[0]['compatibility_answers']
-                    log_info(f"[Compatibility] Using founder preferences: {len(current_user_answers)} answers")
-                else:
-                    log_info("[Compatibility] No compatibility answers found for user")
+                log_info("[Compatibility] No discovery preferences set by user")
         
         for project in available_projects:
             founder_info = project.get('founder', {})
-            
-            # Calculate preference score if user has set preferences
-            preference_score = None
-            if user_preferences and any(user_preferences.values()):
-                project_answers = project.get('compatibility_answers', {})
-                preference_score = calculate_preference_score(user_preferences, project_answers)
             
             # Calculate compatibility score for paid users
             compatibility_score = None
@@ -463,10 +451,6 @@ def get_available_founders(clerk_user_id, filters=None, mode='founders'):
                 'created_at': project.get('created_at')  # Keep for sorting
             }
             
-            # Add preference score if calculated
-            if preference_score is not None:
-                formatted_result['preference_score'] = int(preference_score)
-            
             # Add compatibility score for paid users
             if compatibility_score is not None:
                 formatted_result['compatibility_score'] = compatibility_score
@@ -474,42 +458,16 @@ def get_available_founders(clerk_user_id, filters=None, mode='founders'):
             formatted_results.append(formatted_result)
         
         # Sorting strategy
-        if user_preferences and any(user_preferences.values()):
-            # When preferences are set: Sort by preference score (primary), completeness as tie-breaker
-            # We've already fetched more projects (100-200), so we can find the best matches
-            formatted_results.sort(
-                key=lambda x: (
-                    x.get('preference_score', 0),  # Primary: preference match
-                    x.get('info_completeness', 0)  # Secondary: more info = easier to evaluate
-                ),
-                reverse=True
-            )
-            
-            # Soft filtering: Filter out very low matches, but keep enough for good results
-            # Since we fetched more projects, we can be more selective
-            filtered_results = [
-                r for r in formatted_results 
-                if r.get('preference_score', 0) >= 20 or r.get('info_completeness', 0) >= 1.5
-            ]
-            
-            # Use filtered results if we have enough, otherwise use all (to avoid empty results)
-            if len(filtered_results) >= final_limit:
-                formatted_results = filtered_results
-            # If filtering leaves too few, keep at least top results regardless of score
-            elif len(formatted_results) > final_limit:
-                # Keep top results even if some are below threshold
-                formatted_results = formatted_results[:max(final_limit, len(filtered_results))]
-        else:
-            # When no preferences: Sort by info completeness first, then recency
-            # This shows projects with more information first (easier to evaluate)
-            # rather than just showing newest projects
-            formatted_results.sort(
-                key=lambda x: (
-                    x.get('info_completeness', 0),  # More info = easier to evaluate
-                    x.get('created_at', '')  # Then recency
-                ),
-                reverse=True
-            )
+        # For paid users with compatibility scores, sort by compatibility first
+        # Otherwise sort by info completeness and recency
+        formatted_results.sort(
+            key=lambda x: (
+                x.get('compatibility_score', 0),  # Primary: compatibility (for paid users)
+                x.get('info_completeness', 0),    # Secondary: more info = easier to evaluate
+                x.get('created_at', '')           # Tertiary: recency
+            ),
+            reverse=True
+        )
         
         # Return top N results (based on final_limit, default 20)
         # Apply pagination offset here if needed
