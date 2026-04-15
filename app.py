@@ -3947,6 +3947,28 @@ def test_slack_notification(workspace_id):
         return jsonify({"error": str(e)}), 500
 
 
+@app.route('/api/workspaces/<workspace_id>/integrations/slack/join-channel', methods=['POST'])
+def join_slack_channel(workspace_id):
+    """Join the existing Slack channel (for fixing membership issues)"""
+    from services import slack_integration_service
+    
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        success = slack_integration_service.invite_user_to_existing_channel(workspace_id)
+        
+        if not success:
+            return jsonify({"error": "Failed to join channel. You may need to disconnect and reconnect Slack."}), 500
+        
+        return jsonify({"success": True, "message": "You have been added to the Slack channel"}), 200
+        
+    except Exception as e:
+        log_error("Error joining Slack channel", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
 # ==================== CRON JOBS ====================
 
 @app.route('/api/cron/weekly-checkin-reminders', methods=['POST'])

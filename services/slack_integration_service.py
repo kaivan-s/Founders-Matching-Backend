@@ -80,6 +80,7 @@ def save_workspace_slack_integration(
         'team_id': slack_data['team_id'],
         'team_name': slack_data['team_name'],
         'bot_user_id': slack_data.get('bot_user_id'),
+        'slack_user_id': slack_data.get('authed_user_id'),  # Slack user ID of who connected
         'connected_by_user_id': connected_by_user_id,
         'settings': {
             'notifications': {
@@ -140,6 +141,47 @@ def get_workspace_slack_token(workspace_id: str) -> Optional[str]:
     return result.data[0].get('access_token')
 
 
+def get_workspace_slack_user_id(workspace_id: str) -> Optional[str]:
+    """Get the Slack user ID of the person who connected the integration"""
+    supabase = get_supabase()
+    
+    result = supabase.table('workspace_integrations').select(
+        'slack_user_id'
+    ).eq('workspace_id', workspace_id).eq('provider', 'slack').eq('is_active', True).execute()
+    
+    if not result.data:
+        return None
+    
+    return result.data[0].get('slack_user_id')
+
+
+def _invite_user_to_channel(access_token: str, channel_id: str, user_id: str) -> bool:
+    """Invite a user to a Slack channel"""
+    try:
+        response = requests.post(
+            f"{SLACK_API_BASE}/conversations.invite",
+            headers={'Authorization': f'Bearer {access_token}'},
+            json={
+                'channel': channel_id,
+                'users': user_id,
+            }
+        )
+        
+        data = response.json()
+        
+        if not data.get('ok'):
+            # User might already be in channel
+            if data.get('error') == 'already_in_channel':
+                return True
+            log_error(f"Error inviting user to channel: {data.get('error')}")
+            return False
+        
+        return True
+    except Exception as e:
+        log_error(f"Error inviting user to channel: {e}")
+        return False
+
+
 def create_partnership_channel(
     workspace_id: str,
     channel_name: str,
@@ -150,6 +192,9 @@ def create_partnership_channel(
     if not access_token:
         log_error(f"No Slack token for workspace {workspace_id}")
         return None
+    
+    # Get the Slack user ID to invite them to the channel
+    slack_user_id = get_workspace_slack_user_id(workspace_id)
     
     # Default channel name if None
     if not channel_name:
@@ -176,13 +221,20 @@ def create_partnership_channel(
         if not data.get('ok'):
             # Channel might already exist
             if data.get('error') == 'name_taken':
-                # Try to find existing channel
-                return _find_existing_channel(access_token, safe_name)
+                # Try to find existing channel and invite user
+                existing = _find_existing_channel(access_token, safe_name)
+                if existing and slack_user_id:
+                    _invite_user_to_channel(access_token, existing['channel_id'], slack_user_id)
+                return existing
             log_error(f"Error creating Slack channel: {data.get('error')}")
             return None
         
         channel = data.get('channel', {})
         channel_id = channel.get('id')
+        
+        # Invite the user who connected the integration to the channel
+        if slack_user_id:
+            _invite_user_to_channel(access_token, channel_id, slack_user_id)
         
         # Save channel info to integration
         supabase = get_supabase()
@@ -493,3 +545,32 @@ def disconnect_slack(workspace_id: str) -> bool:
     except Exception as e:
         log_error(f"Error disconnecting Slack: {e}")
         return False
+
+
+def invite_user_to_existing_channel(workspace_id: str) -> bool:
+    """
+    Invite the connected user to the existing Slack channel.
+    Use this to fix channels where the user wasn't initially invited.
+    """
+    integration = get_workspace_slack_integration(workspace_id)
+    if not integration or not integration.get('channel_id'):
+        log_error(f"No channel exists for workspace {workspace_id}")
+        return False
+    
+    access_token = get_workspace_slack_token(workspace_id)
+    if not access_token:
+        log_error(f"No Slack token for workspace {workspace_id}")
+        return False
+    
+    slack_user_id = get_workspace_slack_user_id(workspace_id)
+    if not slack_user_id:
+        log_error(f"No Slack user ID stored for workspace {workspace_id}")
+        return False
+    
+    channel_id = integration['channel_id']
+    success = _invite_user_to_channel(access_token, channel_id, slack_user_id)
+    
+    if success:
+        log_info(f"Successfully invited user to channel for workspace {workspace_id}")
+    
+    return success
