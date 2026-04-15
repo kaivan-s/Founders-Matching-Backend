@@ -3781,6 +3781,17 @@ def slack_oauth_callback():
             workspace_id, slack_data, user_id
         )
         
+        # Auto-create the partnership channel
+        try:
+            supabase = get_supabase()
+            workspace = supabase.table('workspaces').select('title').eq('id', workspace_id).execute()
+            channel_name = workspace.data[0].get('title') if workspace.data else None
+            channel_name = channel_name or 'partnership'
+            slack_integration_service.create_partnership_channel(workspace_id, channel_name)
+        except Exception as channel_err:
+            log_error("Error auto-creating Slack channel", error=channel_err)
+            # Don't fail the whole flow if channel creation fails
+        
         # Redirect back to workspace integrations tab with success
         # Remove trailing slash from frontend_url if present
         base_url = frontend_url.rstrip('/')
