@@ -53,7 +53,9 @@ def exchange_code_for_token(code: str) -> Optional[Dict[str, Any]]:
             f"{NOTION_CLIENT_ID}:{NOTION_CLIENT_SECRET}".encode()
         ).decode()
         
-        log_info(f"Exchanging Notion OAuth code, redirect_uri: {NOTION_REDIRECT_URI}")
+        log_info(f"Exchanging Notion OAuth code")
+        log_info(f"  - redirect_uri: {NOTION_REDIRECT_URI}")
+        log_info(f"  - client_id starts with: {NOTION_CLIENT_ID[:8] if NOTION_CLIENT_ID else 'None'}...")
         
         response = requests.post(
             NOTION_OAUTH_URL,
@@ -71,13 +73,20 @@ def exchange_code_for_token(code: str) -> Optional[Dict[str, Any]]:
         data = response.json()
         log_info(f"Notion OAuth response status: {response.status_code}")
         
+        # Handle error responses
+        if response.status_code != 200:
+            error_code = data.get('code', 'unknown')
+            error_message = data.get('message', 'No message')
+            log_error(f"Notion OAuth failed: {error_code} - {error_message}")
+            return None
+        
         if 'error' in data:
             log_error(f"Notion OAuth error: {data.get('error')} - {data.get('error_description', '')}")
             return None
         
         access_token = data.get('access_token')
         if not access_token:
-            log_error(f"Notion OAuth response missing access_token. Response keys: {list(data.keys())}")
+            log_error(f"Notion OAuth response missing access_token. Full response: {data}")
             return None
         
         log_info(f"Notion OAuth successful for workspace: {data.get('workspace_name')}")
