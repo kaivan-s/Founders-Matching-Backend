@@ -3821,6 +3821,7 @@ def slack_oauth_callback():
 def get_workspace_integrations(workspace_id):
     """Get all integrations for a workspace"""
     from services import slack_integration_service
+    from services import notion_integration_service
     
     try:
         clerk_user_id = get_clerk_user_id()
@@ -3858,8 +3859,37 @@ def get_workspace_integrations(workspace_id):
         else:
             integrations['slack'] = {'connected': False, 'current_user_connected': False}
         
+        # Get Notion integration
+        notion = notion_integration_service.get_workspace_notion_integration(workspace_id)
+        if notion:
+            notion_user_ids = notion.get('slack_user_ids') or []  # Reused field
+            connected_users = [
+                {'name': u.get('name'), 'clerk_user_id': u.get('clerk_user_id')}
+                for u in notion_user_ids
+            ]
+            
+            current_user_connected = any(
+                u.get('clerk_user_id') == clerk_user_id 
+                for u in notion_user_ids
+            )
+            
+            page_ids = notion.get('notion_page_ids') or {}
+            partnership_page_id = page_ids.get('partnership_page_id')
+            
+            integrations['notion'] = {
+                'connected': True,
+                'workspace_name': notion.get('notion_workspace_name') or notion.get('team_name'),
+                'connected_by_name': notion.get('connected_by_name'),
+                'connected_users': connected_users,
+                'current_user_connected': current_user_connected,
+                'has_workspace': bool(partnership_page_id),
+                'partnership_page_url': notion_integration_service.get_partnership_page_url(workspace_id) if partnership_page_id else None,
+                'page_ids': page_ids,
+            }
+        else:
+            integrations['notion'] = {'connected': False, 'current_user_connected': False}
+        
         # Placeholder for future integrations
-        integrations['notion'] = {'connected': False}
         integrations['google_calendar'] = {'connected': False}
         
         return jsonify(integrations), 200
@@ -3996,6 +4026,196 @@ def join_slack_channel(workspace_id):
         
     except Exception as e:
         log_error("Error joining Slack channel", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
+# ==================== NOTION INTEGRATION ====================
+
+@app.route('/api/integrations/notion/auth-url', methods=['GET'])
+def get_notion_auth_url():
+    """Generate Notion OAuth URL"""
+    from services import notion_integration_service
+    from datetime import datetime, timedelta
+    import secrets
+    
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        workspace_id = request.args.get('workspace_id')
+        if not workspace_id:
+            return jsonify({"error": "workspace_id required"}), 400
+        
+        # Generate state token (workspace_id + random string for security)
+        state = f"{workspace_id}:{secrets.token_urlsafe(16)}"
+        
+        # Store state temporarily (expires in 10 minutes)
+        supabase = get_supabase()
+        supabase.table('oauth_states').insert({
+            'state': state,
+            'clerk_user_id': clerk_user_id,
+            'workspace_id': workspace_id,
+            'provider': 'notion',
+            'expires_at': (datetime.now() + timedelta(minutes=10)).isoformat()
+        }).execute()
+        
+        auth_url = notion_integration_service.get_oauth_url(workspace_id, state)
+        
+        return jsonify({"auth_url": auth_url}), 200
+        
+    except Exception as e:
+        log_error("Error generating Notion auth URL", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/integrations/notion/callback', methods=['GET'])
+def notion_oauth_callback():
+    """Handle Notion OAuth callback"""
+    from services import notion_integration_service
+    from urllib.parse import quote
+    
+    code = request.args.get('code')
+    state = request.args.get('state')
+    error = request.args.get('error')
+    
+    frontend_url = os.getenv('FRONTEND_URL', 'https://guild-space.co')
+    
+    if error:
+        return redirect(f"{frontend_url}/workspaces?error=notion_denied")
+    
+    if not code or not state:
+        return redirect(f"{frontend_url}/workspaces?error=notion_invalid")
+    
+    try:
+        supabase = get_supabase()
+        
+        # Verify state token
+        state_record = supabase.table('oauth_states').select('*').eq('state', state).eq('provider', 'notion').execute()
+        
+        if not state_record.data:
+            return redirect(f"{frontend_url}/workspaces?error=notion_invalid_state")
+        
+        state_data = state_record.data[0]
+        workspace_id = state_data['workspace_id']
+        user_id = state_data['clerk_user_id']
+        
+        # Delete used state
+        supabase.table('oauth_states').delete().eq('state', state).execute()
+        
+        # Check if state expired
+        from datetime import datetime
+        if datetime.fromisoformat(state_data['expires_at'].replace('Z', '+00:00')) < datetime.now(tz=datetime.now().astimezone().tzinfo):
+            return redirect(f"{frontend_url}/workspaces/{workspace_id}?error=notion_expired")
+        
+        # Exchange code for token
+        notion_data = notion_integration_service.exchange_code_for_token(code)
+        
+        if not notion_data:
+            return redirect(f"{frontend_url}/workspaces/{workspace_id}?error=notion_failed")
+        
+        # Get user's name for display
+        user_name = None
+        try:
+            founder = supabase.table('founders').select('name').eq('clerk_user_id', user_id).execute()
+            if founder.data:
+                user_name = founder.data[0].get('name')
+        except:
+            pass
+        
+        # Save integration (handles both first and second co-founder)
+        try:
+            notion_integration_service.save_workspace_notion_integration(
+                workspace_id, notion_data, user_id, connected_by_name=user_name
+            )
+        except notion_integration_service.NotionWorkspaceMismatchError as e:
+            # Co-founder tried to connect a different Notion workspace
+            base_url = frontend_url.rstrip('/')
+            error_msg = quote(f"Your co-founder already connected to '{e.existing_workspace_name}'. Please connect to the same Notion workspace.")
+            return redirect(f"{base_url}/workspaces/{workspace_id}/integrations?error=notion_mismatch&message={error_msg}")
+        
+        # Auto-create the partnership workspace structure
+        try:
+            workspace = supabase.table('workspaces').select('title').eq('id', workspace_id).execute()
+            partnership_name = workspace.data[0].get('title') if workspace.data else 'Partnership'
+            
+            # Get founder names
+            participants = supabase.table('workspace_participants').select(
+                'user:founders!user_id(name)'
+            ).eq('workspace_id', workspace_id).execute()
+            founder_names = [p.get('user', {}).get('name') for p in (participants.data or []) if p.get('user', {}).get('name')]
+            
+            # Check if partnership page already exists
+            existing_integration = notion_integration_service.get_workspace_notion_integration(workspace_id)
+            if not existing_integration.get('notion_page_ids', {}).get('partnership_page_id'):
+                notion_integration_service.create_partnership_workspace(workspace_id, partnership_name, founder_names)
+        except Exception as page_err:
+            log_error("Error auto-creating Notion workspace", error=page_err)
+            # Don't fail the whole flow if page creation fails
+        
+        # Redirect back to workspace integrations tab with success
+        base_url = frontend_url.rstrip('/')
+        return redirect(f"{base_url}/workspaces/{workspace_id}/integrations?notion=connected")
+        
+    except Exception as e:
+        log_error("Error in Notion OAuth callback", error=e)
+        base_url = frontend_url.rstrip('/')
+        return redirect(f"{base_url}/workspaces?error=notion_error")
+
+
+@app.route('/api/workspaces/<workspace_id>/integrations/notion', methods=['DELETE'])
+def disconnect_notion(workspace_id):
+    """Disconnect Notion integration"""
+    from services import notion_integration_service
+    
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        success = notion_integration_service.disconnect_notion(workspace_id)
+        
+        if not success:
+            return jsonify({"error": "Failed to disconnect"}), 500
+        
+        return jsonify({"success": True}), 200
+        
+    except Exception as e:
+        log_error("Error disconnecting Notion", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/workspaces/<workspace_id>/integrations/notion/create-workspace', methods=['POST'])
+def create_notion_workspace(workspace_id):
+    """Manually create the Notion partnership workspace structure"""
+    from services import notion_integration_service
+    
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        supabase = get_supabase()
+        
+        # Get workspace info
+        workspace = supabase.table('workspaces').select('title').eq('id', workspace_id).execute()
+        partnership_name = workspace.data[0].get('title') if workspace.data else 'Partnership'
+        
+        # Get founder names
+        participants = supabase.table('workspace_participants').select(
+            'user:founders!user_id(name)'
+        ).eq('workspace_id', workspace_id).execute()
+        founder_names = [p.get('user', {}).get('name') for p in (participants.data or []) if p.get('user', {}).get('name')]
+        
+        result = notion_integration_service.create_partnership_workspace(workspace_id, partnership_name, founder_names)
+        
+        if not result:
+            return jsonify({"error": "Failed to create Notion workspace. Make sure you selected a page during OAuth."}), 500
+        
+        return jsonify(result), 201
+        
+    except Exception as e:
+        log_error("Error creating Notion workspace", error=e)
         return jsonify({"error": str(e)}), 500
 
 
