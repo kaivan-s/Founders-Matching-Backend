@@ -9,12 +9,12 @@ from datetime import datetime
 from utils.logger import log_info, log_error
 from config.database import get_supabase
 
-NOTION_CLIENT_ID = os.getenv('NOTION_CLIENT_ID')
-NOTION_CLIENT_SECRET = os.getenv('NOTION_CLIENT_SECRET')
-NOTION_REDIRECT_URI = os.getenv('NOTION_REDIRECT_URI')
-FRONTEND_URL = os.getenv('FRONTEND_URL')
+NOTION_CLIENT_ID = (os.getenv('NOTION_CLIENT_ID') or '').strip()
+NOTION_CLIENT_SECRET = (os.getenv('NOTION_CLIENT_SECRET') or '').strip()
+NOTION_REDIRECT_URI = (os.getenv('NOTION_REDIRECT_URI') or '').strip()
+FRONTEND_URL = (os.getenv('FRONTEND_URL') or 'https://guild-space.co').strip()
 
-NOTION_OAUTH_URL = 'https://api.notion.com/v1/oauth/authorize'
+NOTION_TOKEN_URL = 'https://api.notion.com/v1/oauth/token'
 NOTION_API_BASE = 'https://api.notion.com/v1'
 NOTION_VERSION = '2022-06-28'
 
@@ -29,14 +29,17 @@ class NotionWorkspaceMismatchError(Exception):
 
 def get_oauth_url(workspace_id: str, state: str) -> str:
     """Generate Notion OAuth URL for connecting a workspace"""
-    return (
-        f"https://api.notion.com/v1/oauth/authorize?"
-        f"client_id={NOTION_CLIENT_ID}&"
-        f"response_type=code&"
-        f"owner=user&"
-        f"redirect_uri={NOTION_REDIRECT_URI}&"
-        f"state={state}"
-    )
+    from urllib.parse import urlencode
+    
+    params = {
+        'client_id': NOTION_CLIENT_ID,
+        'response_type': 'code',
+        'owner': 'user',
+        'redirect_uri': NOTION_REDIRECT_URI,
+        'state': state,
+    }
+    
+    return f"https://api.notion.com/v1/oauth/authorize?{urlencode(params)}"
 
 
 def exchange_code_for_token(code: str) -> Optional[Dict[str, Any]]:
@@ -58,7 +61,7 @@ def exchange_code_for_token(code: str) -> Optional[Dict[str, Any]]:
         log_info(f"  - client_id starts with: {NOTION_CLIENT_ID[:8] if NOTION_CLIENT_ID else 'None'}...")
         
         response = requests.post(
-            NOTION_OAUTH_URL,
+            NOTION_TOKEN_URL,
             headers={
                 'Authorization': f'Basic {credentials}',
                 'Content-Type': 'application/json',
