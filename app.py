@@ -4259,6 +4259,77 @@ def get_workspace_summary(workspace_id):
         return jsonify({"error": str(e)}), 500
 
 
+@app.route('/api/workspaces/<workspace_id>/notion-changes', methods=['GET'])
+def get_notion_changes(workspace_id):
+    """Get pending Notion changes for this workspace"""
+    from services import notion_integration_service
+    
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        # Get founder ID from clerk
+        founder_id, error = _get_founder_id_from_clerk(clerk_user_id)
+        if error:
+            return error
+        
+        # Verify user is a participant
+        supabase = get_supabase()
+        participant = supabase.table('workspace_participants').select('id').eq(
+            'workspace_id', workspace_id
+        ).eq('user_id', founder_id).execute()
+        
+        if not participant.data:
+            return jsonify({"error": "Not a participant of this workspace"}), 403
+        
+        # Sync and get changes
+        result = notion_integration_service.sync_and_get_changes(workspace_id)
+        
+        return jsonify(result), 200
+        
+    except Exception as e:
+        log_error("Error getting Notion changes", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/workspaces/<workspace_id>/notion-changes/acknowledge', methods=['POST'])
+def acknowledge_notion_changes(workspace_id):
+    """Acknowledge all pending Notion changes"""
+    from services import notion_integration_service
+    
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        # Get founder ID from clerk
+        founder_id, error = _get_founder_id_from_clerk(clerk_user_id)
+        if error:
+            return error
+        
+        # Verify user is a participant
+        supabase = get_supabase()
+        participant = supabase.table('workspace_participants').select('id').eq(
+            'workspace_id', workspace_id
+        ).eq('user_id', founder_id).execute()
+        
+        if not participant.data:
+            return jsonify({"error": "Not a participant of this workspace"}), 403
+        
+        # Acknowledge changes
+        success = notion_integration_service.acknowledge_changes(workspace_id)
+        
+        if success:
+            return jsonify({"success": True, "message": "Changes acknowledged"}), 200
+        else:
+            return jsonify({"error": "Failed to acknowledge changes"}), 500
+        
+    except Exception as e:
+        log_error("Error acknowledging Notion changes", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
 # ==================== CRON JOBS ====================
 
 @app.route('/api/cron/weekly-checkin-reminders', methods=['POST'])

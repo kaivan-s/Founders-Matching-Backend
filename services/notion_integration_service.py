@@ -801,3 +801,275 @@ def get_workspace_notion_summary(workspace_id: str) -> Optional[Dict[str, Any]]:
         'meeting_notes': notes[:5],  # Recent 5
         'meeting_count': len(notes),
     }
+
+
+# ==================== CHANGE DETECTION ====================
+
+def _detect_task_changes(old_tasks: List[Dict], new_tasks: List[Dict]) -> List[Dict]:
+    """Detect changes between old and new task lists"""
+    changes = []
+    old_map = {t.get('id'): t for t in old_tasks}
+    new_map = {t.get('id'): t for t in new_tasks}
+    
+    # New tasks
+    for task_id, task in new_map.items():
+        if task_id not in old_map:
+            changes.append({
+                'type': 'task_created',
+                'title': task.get('title'),
+                'details': f"Priority: {task.get('priority', 'Not set')}",
+                'url': task.get('url'),
+            })
+    
+    # Modified tasks
+    for task_id, new_task in new_map.items():
+        if task_id in old_map:
+            old_task = old_map[task_id]
+            
+            # Status changed
+            if old_task.get('status') != new_task.get('status'):
+                changes.append({
+                    'type': 'task_status_changed',
+                    'title': new_task.get('title'),
+                    'details': f"{old_task.get('status', 'Not set')} → {new_task.get('status', 'Not set')}",
+                    'url': new_task.get('url'),
+                })
+            
+            # Priority changed
+            if old_task.get('priority') != new_task.get('priority'):
+                changes.append({
+                    'type': 'task_priority_changed',
+                    'title': new_task.get('title'),
+                    'details': f"{old_task.get('priority', 'Not set')} → {new_task.get('priority', 'Not set')}",
+                    'url': new_task.get('url'),
+                })
+            
+            # Due date changed
+            if old_task.get('due_date') != new_task.get('due_date'):
+                old_date = old_task.get('due_date', 'Not set')
+                new_date = new_task.get('due_date', 'Not set')
+                changes.append({
+                    'type': 'task_deadline_changed',
+                    'title': new_task.get('title'),
+                    'details': f"{old_date} → {new_date}",
+                    'url': new_task.get('url'),
+                })
+            
+            # Assignee changed
+            if old_task.get('assignee') != new_task.get('assignee'):
+                changes.append({
+                    'type': 'task_assignee_changed',
+                    'title': new_task.get('title'),
+                    'details': f"{old_task.get('assignee', 'Unassigned')} → {new_task.get('assignee', 'Unassigned')}",
+                    'url': new_task.get('url'),
+                })
+    
+    # Deleted tasks
+    for task_id, task in old_map.items():
+        if task_id not in new_map:
+            changes.append({
+                'type': 'task_deleted',
+                'title': task.get('title'),
+                'details': 'Task removed',
+                'url': None,
+            })
+    
+    return changes
+
+
+def _detect_decision_changes(old_decisions: List[Dict], new_decisions: List[Dict]) -> List[Dict]:
+    """Detect changes between old and new decision lists"""
+    changes = []
+    old_map = {d.get('id'): d for d in old_decisions}
+    new_map = {d.get('id'): d for d in new_decisions}
+    
+    # New decisions
+    for dec_id, dec in new_map.items():
+        if dec_id not in old_map:
+            changes.append({
+                'type': 'decision_created',
+                'title': dec.get('title'),
+                'details': f"Impact: {dec.get('impact', 'Not set')}",
+                'url': dec.get('url'),
+            })
+    
+    # Modified decisions
+    for dec_id, new_dec in new_map.items():
+        if dec_id in old_map:
+            old_dec = old_map[dec_id]
+            
+            # Status changed
+            if old_dec.get('status') != new_dec.get('status'):
+                changes.append({
+                    'type': 'decision_status_changed',
+                    'title': new_dec.get('title'),
+                    'details': f"{old_dec.get('status', 'Not set')} → {new_dec.get('status', 'Not set')}",
+                    'url': new_dec.get('url'),
+                })
+    
+    return changes
+
+
+def _detect_meeting_changes(old_meetings: List[Dict], new_meetings: List[Dict]) -> List[Dict]:
+    """Detect changes between old and new meeting notes lists"""
+    changes = []
+    old_ids = {m.get('id') for m in old_meetings}
+    
+    for meeting in new_meetings:
+        if meeting.get('id') not in old_ids:
+            changes.append({
+                'type': 'meeting_created',
+                'title': meeting.get('title'),
+                'details': f"Type: {meeting.get('type', 'Not set')}",
+                'url': meeting.get('url'),
+            })
+    
+    return changes
+
+
+def detect_notion_changes(workspace_id: str) -> Dict[str, Any]:
+    """
+    Detect changes in Notion since last sync.
+    Returns dict with 'changes' list and 'has_changes' boolean.
+    """
+    from datetime import datetime
+    
+    supabase = get_supabase()
+    
+    # Get current integration state
+    integration = get_workspace_notion_integration(workspace_id)
+    if not integration:
+        return {'has_changes': False, 'changes': [], 'error': 'No Notion integration'}
+    
+    page_ids = integration.get('notion_page_ids', {})
+    if not page_ids.get('partnership_page_id'):
+        return {'has_changes': False, 'changes': [], 'error': 'No Notion workspace created'}
+    
+    # Get stored last state
+    last_state = integration.get('notion_last_state') or {}
+    old_tasks = last_state.get('tasks', [])
+    old_decisions = last_state.get('decisions', [])
+    old_meetings = last_state.get('meetings', [])
+    
+    # Fetch current state from Notion
+    current_tasks = fetch_tasks_from_notion(workspace_id) or []
+    current_decisions = fetch_decisions_from_notion(workspace_id) or []
+    current_meetings = fetch_meeting_notes_from_notion(workspace_id) or []
+    
+    # Detect changes
+    task_changes = _detect_task_changes(old_tasks, current_tasks)
+    decision_changes = _detect_decision_changes(old_decisions, current_decisions)
+    meeting_changes = _detect_meeting_changes(old_meetings, current_meetings)
+    
+    all_changes = task_changes + decision_changes + meeting_changes
+    
+    # Add timestamp to each change
+    now = datetime.utcnow().isoformat()
+    for change in all_changes:
+        change['detected_at'] = now
+    
+    return {
+        'has_changes': len(all_changes) > 0,
+        'changes': all_changes,
+        'change_count': len(all_changes),
+        'current_state': {
+            'tasks': current_tasks,
+            'decisions': current_decisions,
+            'meetings': current_meetings,
+        }
+    }
+
+
+def get_pending_changes(workspace_id: str) -> List[Dict]:
+    """Get pending (unacknowledged) changes for a workspace"""
+    integration = get_workspace_notion_integration(workspace_id)
+    if not integration:
+        return []
+    
+    return integration.get('notion_pending_changes') or []
+
+
+def acknowledge_changes(workspace_id: str) -> bool:
+    """
+    Acknowledge all pending changes and update the last known state.
+    Call this after user clicks 'Acknowledged'.
+    """
+    from datetime import datetime
+    
+    supabase = get_supabase()
+    
+    try:
+        # Get current Notion state
+        result = detect_notion_changes(workspace_id)
+        current_state = result.get('current_state', {})
+        
+        # Update the last state and clear pending changes
+        supabase.table('workspace_integrations').update({
+            'notion_last_state': current_state,
+            'notion_last_sync': datetime.utcnow().isoformat(),
+            'notion_pending_changes': [],
+        }).eq('workspace_id', workspace_id).eq('provider', 'notion').execute()
+        
+        log_info(f"Acknowledged Notion changes for workspace {workspace_id}")
+        return True
+        
+    except Exception as e:
+        log_error(f"Error acknowledging Notion changes: {e}")
+        return False
+
+
+def sync_and_get_changes(workspace_id: str) -> Dict[str, Any]:
+    """
+    Sync with Notion and return any changes detected.
+    This is called when the Summary tab is opened.
+    """
+    from datetime import datetime
+    
+    supabase = get_supabase()
+    
+    try:
+        # Detect changes
+        result = detect_notion_changes(workspace_id)
+        
+        if not result.get('has_changes'):
+            return {
+                'has_changes': False,
+                'changes': [],
+                'last_sync': datetime.utcnow().isoformat(),
+            }
+        
+        # Store pending changes (append to existing)
+        integration = get_workspace_notion_integration(workspace_id)
+        existing_pending = integration.get('notion_pending_changes') or []
+        
+        # Add new changes (avoid duplicates by checking if we have any existing)
+        new_changes = result.get('changes', [])
+        
+        # If there were no pending changes before, these are fresh
+        if not existing_pending:
+            all_pending = new_changes
+        else:
+            # Merge - but for simplicity, just use the new changes
+            # In production, you might want smarter deduplication
+            all_pending = new_changes
+        
+        # Update pending changes in DB
+        supabase.table('workspace_integrations').update({
+            'notion_pending_changes': all_pending,
+            'notion_last_sync': datetime.utcnow().isoformat(),
+        }).eq('workspace_id', workspace_id).eq('provider', 'notion').execute()
+        
+        return {
+            'has_changes': True,
+            'changes': all_pending,
+            'change_count': len(all_pending),
+            'last_sync': datetime.utcnow().isoformat(),
+        }
+        
+    except Exception as e:
+        log_error(f"Error syncing Notion changes: {e}")
+        return {
+            'has_changes': False,
+            'changes': [],
+            'error': str(e),
+        }
