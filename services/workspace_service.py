@@ -5,9 +5,19 @@ from services import email_service
 
 def _get_founder_id(clerk_user_id, email=None):
     """Helper to get founder ID from clerk_user_id.
+    Uses request-scoped caching to avoid redundant queries.
     If not found by clerk_user_id and email is provided, checks for existing founder by email
     and updates clerk_user_id to link accounts.
     """
+    # OPTIMIZATION: Check request cache first
+    try:
+        from utils.request_cache import get_cached_founder_id, set_cached_founder_id
+        cached_id = get_cached_founder_id(clerk_user_id)
+        if cached_id:
+            return cached_id
+    except ImportError:
+        pass
+    
     supabase = get_supabase()
     user_profile = supabase.table('founders').select('id, email').eq('clerk_user_id', clerk_user_id).execute()
     
@@ -22,10 +32,26 @@ def _get_founder_id(clerk_user_id, email=None):
                     if founder_email == email_lower:
                         # Found existing founder with same email - update clerk_user_id
                         supabase.table('founders').update({'clerk_user_id': clerk_user_id}).eq('id', founder['id']).execute()
+                        # Cache the result
+                        try:
+                            from utils.request_cache import set_cached_founder_id
+                            set_cached_founder_id(clerk_user_id, founder['id'])
+                        except ImportError:
+                            pass
                         return founder['id']
         
         raise ValueError("Profile not found")
-    return user_profile.data[0]['id']
+    
+    founder_id = user_profile.data[0]['id']
+    
+    # Cache the result
+    try:
+        from utils.request_cache import set_cached_founder_id
+        set_cached_founder_id(clerk_user_id, founder_id)
+    except ImportError:
+        pass
+    
+    return founder_id
 
 def _verify_workspace_access(clerk_user_id, workspace_id, allowed_roles=None):
     """Verify that the user is a participant in the workspace

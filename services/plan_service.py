@@ -100,9 +100,19 @@ ADVISOR_PRICING = {
 
 def _get_founder_id(clerk_user_id: str, email: str = None) -> str:
     """Helper to get founder ID from clerk_user_id - auto-creates minimal record if missing.
+    Uses request-scoped caching to avoid redundant queries.
     If email is provided and a founder exists with that email but different clerk_user_id,
     updates the clerk_user_id to link the accounts.
     """
+    # Check cache first
+    try:
+        from utils.request_cache import get_cached_founder_id, set_cached_founder_id
+        cached_id = get_cached_founder_id(clerk_user_id)
+        if cached_id:
+            return cached_id
+    except ImportError:
+        pass
+    
     supabase = get_supabase()
     user_profile = supabase.table('founders').select('id, email').eq('clerk_user_id', clerk_user_id).execute()
     
@@ -130,12 +140,31 @@ def _get_founder_id(clerk_user_id: str, email: str = None) -> str:
         if not result.data:
             raise ValueError("Failed to auto-create founder record")
         
-        return result.data[0]['id']
+        founder_id = result.data[0]['id']
+    else:
+        founder_id = user_profile.data[0]['id']
     
-    return user_profile.data[0]['id']
+    # Cache the result
+    try:
+        from utils.request_cache import set_cached_founder_id
+        set_cached_founder_id(clerk_user_id, founder_id)
+    except ImportError:
+        pass
+    
+    return founder_id
+
 
 def get_founder_plan(clerk_user_id: str) -> Dict[str, Any]:
-    """Get founder's current plan"""
+    """Get founder's current plan. Uses request-scoped caching."""
+    # Check cache first
+    try:
+        from utils.request_cache import get_cached_plan, set_cached_plan
+        cached_plan = get_cached_plan(clerk_user_id)
+        if cached_plan:
+            return cached_plan.copy()  # Return copy to prevent mutation
+    except ImportError:
+        pass
+    
     try:
         founder_id = _get_founder_id(clerk_user_id)
     except ValueError:
@@ -177,6 +206,13 @@ def get_founder_plan(clerk_user_id: str) -> Dict[str, Any]:
     # Add subscription info
     plan_config['subscription_status'] = subscription_status
     plan_config['subscription_current_period_end'] = subscription_current_period_end
+    
+    # Cache the result
+    try:
+        from utils.request_cache import set_cached_plan
+        set_cached_plan(clerk_user_id, plan_config)
+    except ImportError:
+        pass
     
     return plan_config
 

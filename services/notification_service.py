@@ -34,9 +34,19 @@ class NotificationService:
         
     def _get_founder_id(self, clerk_user_id: str, email: str = None) -> str:
         """Get founder ID from clerk_user_id.
+        Uses request-scoped caching to avoid redundant queries.
         If not found by clerk_user_id and email is provided, checks for existing founder by email
         and updates clerk_user_id to link accounts.
         """
+        # OPTIMIZATION: Check request cache first
+        try:
+            from utils.request_cache import get_cached_founder_id, set_cached_founder_id
+            cached_id = get_cached_founder_id(clerk_user_id)
+            if cached_id:
+                return cached_id
+        except ImportError:
+            pass
+        
         result = self.supabase.table('founders').select('id, email').eq('clerk_user_id', clerk_user_id).execute()
         
         if not result.data:
@@ -50,10 +60,26 @@ class NotificationService:
                         if founder_email == email_lower:
                             # Found existing founder with same email - update clerk_user_id
                             self.supabase.table('founders').update({'clerk_user_id': clerk_user_id}).eq('id', founder['id']).execute()
+                            # Cache the result
+                            try:
+                                from utils.request_cache import set_cached_founder_id
+                                set_cached_founder_id(clerk_user_id, founder['id'])
+                            except ImportError:
+                                pass
                             return founder['id']
             
             raise ValueError("Founder not found")
-        return result.data[0]['id']
+        
+        founder_id = result.data[0]['id']
+        
+        # Cache the result
+        try:
+            from utils.request_cache import set_cached_founder_id
+            set_cached_founder_id(clerk_user_id, founder_id)
+        except ImportError:
+            pass
+        
+        return founder_id
     
     def _get_workspace_participants(self, workspace_id: str) -> List[Dict]:
         """Get all participants in a workspace"""

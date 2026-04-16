@@ -33,6 +33,17 @@ CORS(app, resources={
 # Initialize rate limiter
 limiter = init_rate_limiter(app)
 
+# Clear request-scoped cache after each request
+@app.after_request
+def clear_request_cache(response):
+    """Clear the request-scoped cache after each request"""
+    try:
+        from utils.request_cache import clear_cache
+        clear_cache()
+    except ImportError:
+        pass
+    return response
+
 # Shared helper to get founder_id from clerk_user_id (reduces duplicate code)
 def _get_founder_id_from_clerk(clerk_user_id):
     """Get founder ID from clerk_user_id. Returns (founder_id, error_response) tuple.

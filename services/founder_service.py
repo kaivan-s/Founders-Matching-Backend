@@ -137,12 +137,39 @@ def get_available_founders(clerk_user_id, filters=None, mode='founders'):
     import json
     supabase = get_supabase()
     
-    # Get current user's founder profile
-    user_profile = supabase.table('founders').select('id').eq('clerk_user_id', clerk_user_id).execute()
-    if not user_profile.data:
-        raise ValueError("Profile not found. Please create your profile first.")
+    # OPTIMIZATION: Check request cache first for founder_id
+    try:
+        from utils.request_cache import get_cached_founder_id, set_cached_founder_id, get_cached_founder_data, set_cached_founder_data
+        cached_id = get_cached_founder_id(clerk_user_id)
+        if cached_id:
+            current_user_id = cached_id
+            # Also get cached data if available
+            cached_data = get_cached_founder_data(clerk_user_id)
+        else:
+            cached_data = None
+    except ImportError:
+        cached_id = None
+        cached_data = None
     
-    current_user_id = user_profile.data[0]['id']
+    if not cached_id:
+        # Get current user's founder profile with plan data in single query
+        user_profile = supabase.table('founders').select(
+            'id, plan, subscription_status, subscription_current_period_end, compatibility_answers'
+        ).eq('clerk_user_id', clerk_user_id).execute()
+        if not user_profile.data:
+            raise ValueError("Profile not found. Please create your profile first.")
+        
+        current_user_id = user_profile.data[0]['id']
+        
+        # Cache the founder_id and data for this request
+        try:
+            from utils.request_cache import set_cached_founder_id, set_cached_founder_data
+            set_cached_founder_id(clerk_user_id, current_user_id)
+            set_cached_founder_data(clerk_user_id, user_profile.data[0])
+        except ImportError:
+            pass
+        
+        cached_data = user_profile.data[0]
     
     # Parse preferences from filters if provided
     user_preferences = None
@@ -343,21 +370,27 @@ def get_available_founders(clerk_user_id, filters=None, mode='founders'):
             # Tables may not exist yet (migration not run), default to empty
             pass
         
-        # Get current user's plan and discovery preferences for compatibility scoring
-        from services.plan_service import get_founder_plan
+        # OPTIMIZATION: Use cached founder data instead of additional queries
         from utils.logger import log_info
-        user_plan = get_founder_plan(clerk_user_id)
-        is_paid_user = user_plan.get('id') in ['PRO', 'PRO_PLUS']
-        log_info(f"[Compatibility] User plan: {user_plan.get('id')}, is_paid: {is_paid_user}")
         
-        # Get current user's discovery preferences (ONLY from founders.compatibility_answers)
+        # Check if user has paid plan from cached data
+        plan_id = cached_data.get('plan', 'FREE') if cached_data else 'FREE'
+        subscription_status = cached_data.get('subscription_status') if cached_data else None
+        
+        # Consider canceled/expired subscriptions as FREE
+        if subscription_status in ['canceled', 'expired', 'past_due', 'unpaid']:
+            plan_id = 'FREE'
+        
+        is_paid_user = plan_id in ['PRO', 'PRO_PLUS']
+        log_info(f"[Compatibility] User plan: {plan_id}, is_paid: {is_paid_user}")
+        
+        # Get current user's discovery preferences from cached data (already fetched above)
         # This is set explicitly via the Preferences button in Discovery page
         # We do NOT use project compatibility_answers here - those are separate
         current_user_answers = {}
-        if is_paid_user:
-            founder_prefs = supabase.table('founders').select('compatibility_answers').eq('id', current_user_id).execute()
-            if founder_prefs.data and founder_prefs.data[0].get('compatibility_answers'):
-                current_user_answers = founder_prefs.data[0]['compatibility_answers']
+        if is_paid_user and cached_data:
+            current_user_answers = cached_data.get('compatibility_answers') or {}
+            if current_user_answers:
                 log_info(f"[Compatibility] Using discovery preferences: {len(current_user_answers)} answers")
             else:
                 log_info("[Compatibility] No discovery preferences set by user")

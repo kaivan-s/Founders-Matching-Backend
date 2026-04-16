@@ -1,124 +1,146 @@
 """Swipe-related business logic"""
 import traceback
+import threading
 from config.database import get_supabase
 from services import plan_service, email_service
+
+
+def _send_interest_email_async(swiper_name, owner_email, owner_name, project_title, swipe_id):
+    """Send interest email in background thread"""
+    try:
+        email_service.send_interest_received_email(
+            to_email=owner_email,
+            user_name=owner_name or 'there',
+            interested_user_name=swiper_name or 'Someone',
+            project_name=project_title or 'your project'
+        )
+    except Exception as e:
+        from utils.logger import log_error
+        log_error(f"Failed to send interest notification email for swipe {swipe_id}", error=e)
+
 
 def create_swipe(clerk_user_id, data):
     """Record a swipe action - uses plan-based limits instead of credits
     Now supports project-based swiping where users swipe on specific projects
     Limits are enforced via plan_service.check_discovery_limit()
+    
+    OPTIMIZED: Reduced from ~15 DB calls to ~6 by caching founder_id and plan
     """
     supabase = get_supabase()
     
-    # Get current user's founder profile
-    user_profile = supabase.table('founders').select('id').eq('clerk_user_id', clerk_user_id).execute()
-    if not user_profile.data:
-        raise ValueError("Profile not found")
-    
-    swiper_id = user_profile.data[0]['id']
     swiped_id = data.get('swiped_id')
     swipe_type = data.get('swipe_type')
-    project_id = data.get('project_id')  # The project being swiped on (one project, two founders)
+    project_id = data.get('project_id')
     
     if not swiped_id or not swipe_type:
         raise ValueError("swiped_id and swipe_type required")
     
-    # All swipes must be project-based (project_id is required)
     if not project_id:
         raise ValueError("project_id is required. All swipes must be project-based.")
     
-    # Validate project exists, belongs to swiped_id, and is still seeking
-    project_check = supabase.table('projects').select('founder_id, seeking_cofounder, is_active').eq('id', project_id).execute()
+    # OPTIMIZATION: Single query to get swiper profile WITH plan info
+    user_profile = supabase.table('founders').select(
+        'id, name, plan, subscription_status, subscription_current_period_end'
+    ).eq('clerk_user_id', clerk_user_id).execute()
+    
+    if not user_profile.data:
+        raise ValueError("Profile not found")
+    
+    swiper_data = user_profile.data[0]
+    swiper_id = swiper_data['id']
+    swiper_name = swiper_data.get('name')
+    user_plan = swiper_data.get('plan', 'FREE')
+    
+    # OPTIMIZATION: Check if user has unlimited plan (skip limit checks entirely)
+    is_unlimited = user_plan in ('PRO', 'PRO_PLUS')
+    
+    # Validate subscription is still active for paid plans
+    if is_unlimited:
+        subscription_status = swiper_data.get('subscription_status')
+        if subscription_status in ('canceled', 'expired', 'past_due', 'unpaid'):
+            is_unlimited = False
+    
+    # OPTIMIZATION: Combined query for project validation AND owner info (for email)
+    project_check = supabase.table('projects').select(
+        'founder_id, seeking_cofounder, is_active, title, founders!inner(name, email)'
+    ).eq('id', project_id).execute()
+    
     if not project_check.data:
         raise ValueError("Project not found")
-    elif project_check.data[0]['founder_id'] != swiped_id:
+    
+    project_data = project_check.data[0]
+    if project_data['founder_id'] != swiped_id:
         raise ValueError("Project does not belong to the specified founder")
-    elif not project_check.data[0]['is_active']:
+    if not project_data['is_active']:
         raise ValueError("Project is not active")
-    elif not project_check.data[0]['seeking_cofounder']:
+    if not project_data['seeking_cofounder']:
         raise ValueError("Project is no longer seeking a co-founder")
     
-    # Check if swipe already exists FIRST (before checking limit to avoid wasting swipes)
-    existing_swipe_query = supabase.table('swipes').select('id').eq('swiper_id', swiper_id).eq('swiped_id', swiped_id).eq('project_id', project_id)
+    # Cache owner info for email (avoid extra queries later)
+    owner_info = project_data.get('founders', {})
+    project_title = project_data.get('title')
     
-    existing_swipe = existing_swipe_query.execute()
+    # Check if swipe already exists FIRST
+    existing_swipe = supabase.table('swipes').select('id').eq(
+        'swiper_id', swiper_id
+    ).eq('swiped_id', swiped_id).eq('project_id', project_id).execute()
     
     if existing_swipe.data:
-        # Return the existing swipe instead of creating a duplicate
-        # Don't check limit or increment usage for existing swipes
         return existing_swipe.data[0]
     
-    # Check workspace limit for right swipes FIRST (before discovery limit)
-    # This prevents users from sending connection requests if they're at their workspace limit
-    # Only check if this is a NEW swipe
-    if swipe_type == 'right':
+    # For right swipes, check limits (skip for unlimited plans)
+    if swipe_type == 'right' and not is_unlimited:
+        # Check workspace limit
         can_create_workspace, current_workspace_count, max_workspaces = plan_service.check_workspace_limit(clerk_user_id)
         if not can_create_workspace:
             raise ValueError(f"Workspace limit reached. You currently have {current_workspace_count} of {max_workspaces} workspaces. Please upgrade your plan or remove existing workspaces before sending new connection requests.")
         
-        # Check discovery limit for right swipes (plan-based, not credits)
-        # FREE plan: 10 matches/month, PRO/PRO_PLUS: unlimited
+        # Check discovery limit
         can_swipe, current_count, max_allowed = plan_service.check_discovery_limit(clerk_user_id)
         if not can_swipe:
-            if max_allowed == -1:  # Unlimited
-                raise ValueError("Unexpected error: Unable to swipe despite unlimited plan")
             raise ValueError(f"Discovery limit reached. You've used {current_count} of {max_allowed} swipes this month. Upgrade to Pro for unlimited discovery.")
     
-    # Insert swipe (project_id is required - all swipes are project-based)
+    # Insert swipe
     swipe_data = {
         'swiper_id': swiper_id,
         'swiped_id': swiped_id,
         'swipe_type': swipe_type,
-        'project_id': project_id  # Required - all swipes are project-based
+        'project_id': project_id
     }
     
     try:
         response = supabase.table('swipes').insert(swipe_data).execute()
     except Exception as e:
         if 'duplicate key value' in str(e):
-            # Fetch and return the existing swipe
-            existing = supabase.table('swipes').select('*').eq('swiper_id', swiper_id).eq('swiped_id', swiped_id).eq('project_id', project_id).execute()
+            existing = supabase.table('swipes').select('*').eq(
+                'swiper_id', swiper_id
+            ).eq('swiped_id', swiped_id).eq('project_id', project_id).execute()
             if existing.data:
                 return existing.data[0]
         raise e
+    
     result = response.data[0]
-    
-    # Increment usage AFTER successful insert (only for new right swipes)
-    # This ensures we don't lose swipe credits if insert fails
-    if swipe_type == 'right':
-        try:
-            plan_service.increment_discovery_usage(clerk_user_id)
-            # Also record in swipe_history for 30-day rolling window tracking
-            plan_service.record_swipe_in_history(clerk_user_id, swipe_type, project_id)
-        except Exception as e:
-            # Log error but don't fail the swipe - usage tracking is secondary
-            from utils.logger import log_error
-            log_error(f"Failed to increment discovery usage for swipe {result.get('id')}", error=e)
-    
-    # No auto-match logic - all matches require explicit approval via respond_to_like()
-    # Right swipes create requests that the project owner must approve/decline
     result['match_created'] = False
     
-    # Send email notification to project owner when someone shows interest
+    # For right swipes: increment usage and send notification
     if swipe_type == 'right':
-        try:
-            # Get swiper info
-            swiper_info = supabase.table('founders').select('name').eq('id', swiper_id).execute()
-            # Get project owner info
-            project_owner = supabase.table('founders').select('name, email').eq('id', swiped_id).execute()
-            # Get project info
-            project_info = supabase.table('projects').select('title').eq('id', project_id).execute()
-            
-            if swiper_info.data and project_owner.data and project_info.data:
-                email_service.send_interest_received_email(
-                    to_email=project_owner.data[0].get('email'),
-                    user_name=project_owner.data[0].get('name', 'there'),
-                    interested_user_name=swiper_info.data[0].get('name', 'Someone'),
-                    project_name=project_info.data[0].get('title', 'your project')
-                )
-        except Exception as e:
-            from utils.logger import log_error
-            log_error(f"Failed to send interest notification email for swipe {result.get('id')}", error=e)
+        # Increment usage (only for FREE plan users - others are unlimited)
+        if not is_unlimited:
+            try:
+                plan_service.increment_discovery_usage(clerk_user_id)
+                plan_service.record_swipe_in_history(clerk_user_id, swipe_type, project_id)
+            except Exception as e:
+                from utils.logger import log_error
+                log_error(f"Failed to increment discovery usage for swipe {result.get('id')}", error=e)
+        
+        # OPTIMIZATION: Send email in background thread (non-blocking)
+        if owner_info.get('email'):
+            email_thread = threading.Thread(
+                target=_send_interest_email_async,
+                args=(swiper_name, owner_info.get('email'), owner_info.get('name'), project_title, result.get('id'))
+            )
+            email_thread.daemon = True
+            email_thread.start()
     
     return result
 

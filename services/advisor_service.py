@@ -7,12 +7,33 @@ from typing import Dict, List, Optional, Any
 import json
 
 def _get_founder_id(clerk_user_id):
-    """Helper to get founder ID from clerk_user_id"""
+    """Helper to get founder ID from clerk_user_id.
+    Uses request-scoped caching to avoid redundant queries.
+    """
+    # OPTIMIZATION: Check request cache first
+    try:
+        from utils.request_cache import get_cached_founder_id, set_cached_founder_id
+        cached_id = get_cached_founder_id(clerk_user_id)
+        if cached_id:
+            return cached_id
+    except ImportError:
+        pass
+    
     supabase = get_supabase()
     user_profile = supabase.table('founders').select('id').eq('clerk_user_id', clerk_user_id).execute()
     if not user_profile.data:
         raise ValueError("Profile not found")
-    return user_profile.data[0]['id']
+    
+    founder_id = user_profile.data[0]['id']
+    
+    # Cache the result
+    try:
+        from utils.request_cache import set_cached_founder_id
+        set_cached_founder_id(clerk_user_id, founder_id)
+    except ImportError:
+        pass
+    
+    return founder_id
 
 def _get_or_create_founder_id(clerk_user_id, user_name=None, user_email=None):
     """Helper to get founder ID from clerk_user_id, creating a minimal profile if needed for advisors.

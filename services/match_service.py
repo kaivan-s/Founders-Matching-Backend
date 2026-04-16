@@ -4,15 +4,29 @@ from config.database import get_supabase
 from services import email_service
 
 def get_matches(clerk_user_id):
-    """Get matches for the current user (excludes expired matches)"""
+    """Get matches for the current user (excludes expired matches)
+    
+    OPTIMIZED: Uses request cache for founder_id
+    """
     supabase = get_supabase()
     
-    # Get current user's founder ID
-    user_profile = supabase.table('founders').select('id').eq('clerk_user_id', clerk_user_id).execute()
-    if not user_profile.data:
-        raise ValueError("Profile not found")
+    # OPTIMIZATION: Use cached founder_id
+    try:
+        from utils.request_cache import get_cached_founder_id, set_cached_founder_id
+        current_user_id = get_cached_founder_id(clerk_user_id)
+    except ImportError:
+        current_user_id = None
     
-    current_user_id = user_profile.data[0]['id']
+    if not current_user_id:
+        user_profile = supabase.table('founders').select('id').eq('clerk_user_id', clerk_user_id).execute()
+        if not user_profile.data:
+            raise ValueError("Profile not found")
+        current_user_id = user_profile.data[0]['id']
+        try:
+            from utils.request_cache import set_cached_founder_id
+            set_cached_founder_id(clerk_user_id, current_user_id)
+        except ImportError:
+            pass
     
     # Check and mark expired matches
     _check_and_mark_expired_matches()
@@ -146,15 +160,29 @@ def _check_and_mark_expired_matches():
             supabase.table('matches').update({'is_expired': True}).eq('id', match_id).execute()
 
 def get_likes(clerk_user_id):
-    """Get people who liked you (swiped right on you) but you haven't swiped on them yet"""
+    """Get people who liked you (swiped right on you) but you haven't swiped on them yet
+    
+    OPTIMIZED: Uses request cache and combines queries where possible
+    """
     supabase = get_supabase()
     
-    # Get current user's founder ID
-    user_profile = supabase.table('founders').select('id').eq('clerk_user_id', clerk_user_id).execute()
-    if not user_profile.data:
-        raise ValueError("Profile not found")
+    # OPTIMIZATION: Use cached founder_id
+    try:
+        from utils.request_cache import get_cached_founder_id, set_cached_founder_id
+        current_user_id = get_cached_founder_id(clerk_user_id)
+    except ImportError:
+        current_user_id = None
     
-    current_user_id = user_profile.data[0]['id']
+    if not current_user_id:
+        user_profile = supabase.table('founders').select('id').eq('clerk_user_id', clerk_user_id).execute()
+        if not user_profile.data:
+            raise ValueError("Profile not found")
+        current_user_id = user_profile.data[0]['id']
+        try:
+            from utils.request_cache import set_cached_founder_id
+            set_cached_founder_id(clerk_user_id, current_user_id)
+        except ImportError:
+            pass
     
     # Get swipes where someone swiped right on current user
     # Only include swipes for projects that are still seeking co-founders
@@ -170,71 +198,66 @@ def get_likes(clerk_user_id):
     # Filter out swipes for projects that are no longer seeking or not active
     # This handles cases where project was matched or deleted after the swipe
     filtered_likes = []
+    swiper_ids_for_filter = set()
+    project_ids_for_filter = set()
+    
     for swipe in likes_swipes.data:
         project = swipe.get('project')
         # Only include if project exists, is active, and still seeking
         if project and project.get('is_active', True) and project.get('seeking_cofounder', True):
             filtered_likes.append(swipe)
+            swiper = swipe.get('swiper') or {}
+            if swiper.get('id'):
+                swiper_ids_for_filter.add(swiper['id'])
+            if swipe.get('project_id'):
+                project_ids_for_filter.add(swipe['project_id'])
     
-    likes_swipes.data = filtered_likes
-    
-    if not likes_swipes.data:
+    if not filtered_likes:
         return []
     
-    # Get swipes by current user to filter out already swiped (project-specific for project-based swipes)
-    my_swipes = supabase.table('swipes').select('swiped_id, project_id').eq('swiper_id', current_user_id).execute()
-    swiped_user_ids = set()
-    swiped_project_combinations = set()  # Track (user_id, project_id) combinations
-    
-    if my_swipes.data:
-        for swipe in my_swipes.data:
-            swiped_user_ids.add(swipe['swiped_id'])
-            if swipe.get('project_id'):
-                swiped_project_combinations.add((swipe['swiped_id'], swipe['project_id']))
-    
-    # Get matches to filter out already matched (one project, two founders)
-    matches1 = supabase.table('matches').select('founder1_id, founder2_id, project_id').eq('founder1_id', current_user_id).execute()
-    matches2 = supabase.table('matches').select('founder1_id, founder2_id, project_id').eq('founder2_id', current_user_id).execute()
-    
-    # Track matched user+project combinations
-    # Key: (other_user_id, project_id) - the project they matched on
-    # Only project-based matches are supported (no founder-level matches)
-    matched_combinations = set()
-    if matches1.data:
-        for m in matches1.data:
-            other_user_id = m['founder2_id']
-            project_id = m.get('project_id')
-            if project_id:
-                # Only include project-based matches
-                matched_combinations.add((other_user_id, project_id))
-            # Legacy matches without project_id are ignored (no longer supported)
-    if matches2.data:
-        for m in matches2.data:
-            other_user_id = m['founder1_id']
-            project_id = m.get('project_id')
-            if project_id:
-                # Only include project-based matches
-                matched_combinations.add((other_user_id, project_id))
-            # Legacy matches without project_id are ignored (no longer supported)
-    
-    # Batch fetch all projects to avoid N+1 queries
-    # Collect all swiper IDs and project IDs
-    swiper_ids = set()
-    project_ids = set()
-    for swipe in likes_swipes.data:
-        swiper = swipe.get('swiper') or {}
-        swiper_id = swiper.get('id')
-        project_id = swipe.get('project_id')
+    # OPTIMIZATION: Only fetch swipes for relevant swipers (not ALL swipes)
+    swiped_project_combinations = set()
+    if swiper_ids_for_filter:
+        my_swipes = supabase.table('swipes').select('swiped_id, project_id').eq(
+            'swiper_id', current_user_id
+        ).in_('swiped_id', list(swiper_ids_for_filter)).execute()
         
-        if swiper_id:
-            swiper_ids.add(swiper_id)
-        if project_id:
-            project_ids.add(project_id)
+        if my_swipes.data:
+            for swipe in my_swipes.data:
+                if swipe.get('project_id'):
+                    swiped_project_combinations.add((swipe['swiped_id'], swipe['project_id']))
+    
+    # OPTIMIZATION: Single query for matches using OR filter
+    matched_combinations = set()
+    try:
+        all_matches = supabase.table('matches').select('founder1_id, founder2_id, project_id').or_(
+            f'founder1_id.eq.{current_user_id},founder2_id.eq.{current_user_id}'
+        ).execute()
+        
+        if all_matches.data:
+            for m in all_matches.data:
+                project_id = m.get('project_id')
+                if project_id:
+                    other_user_id = m['founder2_id'] if m['founder1_id'] == current_user_id else m['founder1_id']
+                    matched_combinations.add((other_user_id, project_id))
+    except Exception:
+        # Fallback to two queries if OR not supported
+        matches1 = supabase.table('matches').select('founder1_id, founder2_id, project_id').eq('founder1_id', current_user_id).execute()
+        matches2 = supabase.table('matches').select('founder1_id, founder2_id, project_id').eq('founder2_id', current_user_id).execute()
+        
+        if matches1.data:
+            for m in matches1.data:
+                if m.get('project_id'):
+                    matched_combinations.add((m['founder2_id'], m['project_id']))
+        if matches2.data:
+            for m in matches2.data:
+                if m.get('project_id'):
+                    matched_combinations.add((m['founder1_id'], m['project_id']))
     
     # Batch fetch all projects for all swipers
     swiper_projects_map = {}
-    if swiper_ids:
-        all_swiper_projects = supabase.table('projects').select('*').in_('founder_id', list(swiper_ids)).order('display_order').execute()
+    if swiper_ids_for_filter:
+        all_swiper_projects = supabase.table('projects').select('*').in_('founder_id', list(swiper_ids_for_filter)).order('display_order').execute()
         if all_swiper_projects.data:
             for project in all_swiper_projects.data:
                 founder_id = project['founder_id']
@@ -244,15 +267,18 @@ def get_likes(clerk_user_id):
     
     # Batch fetch all interested projects
     interested_projects_map = {}
-    if project_ids:
-        all_interested_projects = supabase.table('projects').select('*').in_('id', list(project_ids)).execute()
+    if project_ids_for_filter:
+        all_interested_projects = supabase.table('projects').select('*').in_('id', list(project_ids_for_filter)).execute()
         if all_interested_projects.data:
             for project in all_interested_projects.data:
                 interested_projects_map[project['id']] = project
     
+    # Use filtered_likes instead of likes_swipes.data
+    likes_swipes_data = filtered_likes
+    
     # Format likes - exclude already swiped or matched
     formatted_likes = []
-    for swipe in likes_swipes.data:
+    for swipe in likes_swipes_data:
         swiper = swipe.get('swiper') or {}
         swiper_id = swiper.get('id')
         project_id = swipe.get('project_id')  # Project they swiped on (OUR project)
@@ -294,18 +320,32 @@ def get_likes(clerk_user_id):
     return formatted_likes
 
 def respond_to_like(clerk_user_id, swipe_id, response_type):
-    """Respond to a like - accept (creates match) or reject"""
+    """Respond to a like - accept (creates match) or reject
+    
+    OPTIMIZED: Uses request cache for founder_id
+    """
     supabase = get_supabase()
     
     if response_type not in ['accept', 'reject']:
         raise ValueError("response must be 'accept' or 'reject'")
     
-    # Get current user's founder ID
-    user_profile = supabase.table('founders').select('id').eq('clerk_user_id', clerk_user_id).execute()
-    if not user_profile.data:
-        raise ValueError("Profile not found")
+    # OPTIMIZATION: Use cached founder_id
+    try:
+        from utils.request_cache import get_cached_founder_id, set_cached_founder_id
+        current_user_id = get_cached_founder_id(clerk_user_id)
+    except ImportError:
+        current_user_id = None
     
-    current_user_id = user_profile.data[0]['id']
+    if not current_user_id:
+        user_profile = supabase.table('founders').select('id').eq('clerk_user_id', clerk_user_id).execute()
+        if not user_profile.data:
+            raise ValueError("Profile not found")
+        current_user_id = user_profile.data[0]['id']
+        try:
+            from utils.request_cache import set_cached_founder_id
+            set_cached_founder_id(clerk_user_id, current_user_id)
+        except ImportError:
+            pass
     
     # Get the swipe record
     swipe = supabase.table('swipes').select('*, swiper:founders!swiper_id(id)').eq('id', swipe_id).eq('swiped_id', current_user_id).execute()
@@ -514,17 +554,31 @@ def respond_to_like(clerk_user_id, swipe_id, response_type):
         return {"message": "Like rejected"}
 
 def unmatch(clerk_user_id, match_id):
-    """Remove a match (unmatch) and dissolve the partnership"""
+    """Remove a match (unmatch) and dissolve the partnership
+    
+    OPTIMIZED: Uses request cache for founder_id
+    """
     from utils.logger import log_error, log_info
     
     supabase = get_supabase()
     
-    # Get current user's founder ID
-    user_profile = supabase.table('founders').select('id').eq('clerk_user_id', clerk_user_id).execute()
-    if not user_profile.data:
-        raise ValueError("Profile not found")
+    # OPTIMIZATION: Use cached founder_id
+    try:
+        from utils.request_cache import get_cached_founder_id, set_cached_founder_id
+        current_user_id = get_cached_founder_id(clerk_user_id)
+    except ImportError:
+        current_user_id = None
     
-    current_user_id = user_profile.data[0]['id']
+    if not current_user_id:
+        user_profile = supabase.table('founders').select('id').eq('clerk_user_id', clerk_user_id).execute()
+        if not user_profile.data:
+            raise ValueError("Profile not found")
+        current_user_id = user_profile.data[0]['id']
+        try:
+            from utils.request_cache import set_cached_founder_id
+            set_cached_founder_id(clerk_user_id, current_user_id)
+        except ImportError:
+            pass
     
     # Verify user is part of this match and get match data
     match = supabase.table('matches').select('*').eq('id', match_id).execute()
