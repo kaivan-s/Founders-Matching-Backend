@@ -44,10 +44,16 @@ def exchange_code_for_token(code: str) -> Optional[Dict[str, Any]]:
     import base64
     
     try:
+        if not NOTION_CLIENT_ID or not NOTION_CLIENT_SECRET:
+            log_error("Notion OAuth credentials not configured (NOTION_CLIENT_ID or NOTION_CLIENT_SECRET missing)")
+            return None
+        
         # Notion uses Basic Auth for token exchange
         credentials = base64.b64encode(
             f"{NOTION_CLIENT_ID}:{NOTION_CLIENT_SECRET}".encode()
         ).decode()
+        
+        log_info(f"Exchanging Notion OAuth code, redirect_uri: {NOTION_REDIRECT_URI}")
         
         response = requests.post(
             NOTION_OAUTH_URL,
@@ -63,13 +69,21 @@ def exchange_code_for_token(code: str) -> Optional[Dict[str, Any]]:
         )
         
         data = response.json()
+        log_info(f"Notion OAuth response status: {response.status_code}")
         
         if 'error' in data:
-            log_error(f"Notion OAuth error: {data.get('error')}")
+            log_error(f"Notion OAuth error: {data.get('error')} - {data.get('error_description', '')}")
             return None
         
+        access_token = data.get('access_token')
+        if not access_token:
+            log_error(f"Notion OAuth response missing access_token. Response keys: {list(data.keys())}")
+            return None
+        
+        log_info(f"Notion OAuth successful for workspace: {data.get('workspace_name')}")
+        
         return {
-            'access_token': data.get('access_token'),
+            'access_token': access_token,
             'workspace_id': data.get('workspace_id'),
             'workspace_name': data.get('workspace_name'),
             'workspace_icon': data.get('workspace_icon'),
@@ -192,7 +206,13 @@ def save_workspace_notion_integration(
     if not result.data:
         raise ValueError("Failed to save Notion integration")
     
-    log_info(f"Notion integration saved for workspace {workspace_id}")
+    # Verify token was saved
+    saved_token = result.data[0].get('access_token')
+    if saved_token:
+        log_info(f"Notion integration saved for workspace {workspace_id} with token (length: {len(saved_token)})")
+    else:
+        log_error(f"Notion integration saved but access_token is missing for workspace {workspace_id}")
+    
     return result.data[0]
 
 
@@ -219,9 +239,14 @@ def get_workspace_notion_token(workspace_id: str) -> Optional[str]:
     ).eq('workspace_id', workspace_id).eq('provider', 'notion').eq('is_active', True).execute()
     
     if not result.data:
+        log_error(f"No Notion integration found for workspace {workspace_id}")
         return None
     
-    return result.data[0].get('access_token')
+    token = result.data[0].get('access_token')
+    if not token:
+        log_error(f"Notion integration exists but access_token is NULL for workspace {workspace_id}")
+    
+    return token
 
 
 def _notion_request(access_token: str, method: str, endpoint: str, data: Dict = None) -> Optional[Dict]:
@@ -267,24 +292,32 @@ def create_partnership_workspace(
     """
     access_token = get_workspace_notion_token(workspace_id)
     if not access_token:
-        log_error(f"No Notion token for workspace {workspace_id}")
+        log_error(f"No Notion token for workspace {workspace_id}. Check that OAuth completed successfully.")
         return None
     
     try:
         # First, search for a page we can add content to
         # The integration needs a page selected during OAuth that we can write to
+        log_info(f"Searching for accessible pages in Notion for workspace {workspace_id}")
         search_result = _notion_request(access_token, 'POST', '/search', {
             'filter': {'property': 'object', 'value': 'page'},
-            'page_size': 1
+            'page_size': 10
         })
         
-        if not search_result or not search_result.get('results'):
-            log_error("No accessible pages found in Notion workspace")
+        if not search_result:
+            log_error("Notion search API returned None - check access token validity")
             return None
+            
+        if not search_result.get('results'):
+            log_error(f"No accessible pages found. User may not have selected pages during OAuth. Search response: {search_result}")
+            return None
+        
+        log_info(f"Found {len(search_result.get('results', []))} accessible pages in Notion")
         
         # Get the parent page ID (first accessible page)
         parent_page = search_result['results'][0]
         parent_id = parent_page['id']
+        log_info(f"Using parent page: {parent_page.get('properties', {}).get('title', {})}")
         
         # Create the main Partnership Hub page
         partnership_page = _notion_request(access_token, 'POST', '/pages', {
