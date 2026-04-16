@@ -4229,11 +4229,16 @@ def get_workspace_summary(workspace_id):
         if not clerk_user_id:
             return jsonify({"error": "User ID required"}), 401
         
+        # Get founder ID from clerk
+        founder_id, error = _get_founder_id_from_clerk(clerk_user_id)
+        if error:
+            return error
+        
         # Verify user is a participant
         supabase = get_supabase()
         participant = supabase.table('workspace_participants').select('id').eq(
             'workspace_id', workspace_id
-        ).eq('user_id', _get_founder_id_from_clerk(clerk_user_id)).execute()
+        ).eq('user_id', founder_id).execute()
         
         if not participant.data:
             return jsonify({"error": "Not a participant of this workspace"}), 403
