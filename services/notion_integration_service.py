@@ -586,3 +586,218 @@ def is_user_connected_to_notion(workspace_id: str, clerk_user_id: str) -> bool:
     
     connected_users = integration.get('slack_user_ids') or []
     return any(u.get('clerk_user_id') == clerk_user_id for u in connected_users)
+
+
+# ==================== DATA FETCHING ====================
+
+def _extract_title(page: Dict) -> str:
+    """Extract title from a Notion page/database item"""
+    properties = page.get('properties', {})
+    
+    # Try common title property names
+    for key in ['Task', 'Decision', 'Meeting', 'Name', 'Title', 'title']:
+        prop = properties.get(key, {})
+        if prop.get('type') == 'title':
+            title_arr = prop.get('title', [])
+            if title_arr:
+                return title_arr[0].get('text', {}).get('content', 'Untitled')
+    
+    return 'Untitled'
+
+
+def _extract_select(page: Dict, property_name: str) -> Optional[str]:
+    """Extract a select property value"""
+    properties = page.get('properties', {})
+    prop = properties.get(property_name, {})
+    if prop.get('type') == 'select' and prop.get('select'):
+        return prop['select'].get('name')
+    return None
+
+
+def _extract_date(page: Dict, property_name: str) -> Optional[str]:
+    """Extract a date property value"""
+    properties = page.get('properties', {})
+    prop = properties.get(property_name, {})
+    if prop.get('type') == 'date' and prop.get('date'):
+        return prop['date'].get('start')
+    return None
+
+
+def fetch_tasks_from_notion(workspace_id: str, limit: int = 50) -> Optional[List[Dict]]:
+    """Fetch tasks from the Notion Tasks database"""
+    access_token = get_workspace_notion_token(workspace_id)
+    if not access_token:
+        return None
+    
+    integration = get_workspace_notion_integration(workspace_id)
+    if not integration:
+        return None
+    
+    page_ids = integration.get('notion_page_ids', {})
+    tasks_db_id = page_ids.get('tasks_db_id')
+    
+    if not tasks_db_id:
+        log_error(f"No tasks database ID for workspace {workspace_id}")
+        return None
+    
+    try:
+        result = _notion_request(access_token, 'POST', f'/databases/{tasks_db_id}/query', {
+            'page_size': limit,
+            'sorts': [{'property': 'Status', 'direction': 'ascending'}]
+        })
+        
+        if not result or not result.get('results'):
+            return []
+        
+        tasks = []
+        for page in result['results']:
+            tasks.append({
+                'id': page['id'],
+                'title': _extract_title(page),
+                'status': _extract_select(page, 'Status'),
+                'priority': _extract_select(page, 'Priority'),
+                'assignee': _extract_select(page, 'Assignee'),
+                'category': _extract_select(page, 'Category'),
+                'due_date': _extract_date(page, 'Due Date'),
+                'url': page.get('url'),
+            })
+        
+        return tasks
+        
+    except Exception as e:
+        log_error(f"Error fetching tasks from Notion: {e}")
+        return None
+
+
+def fetch_decisions_from_notion(workspace_id: str, limit: int = 50) -> Optional[List[Dict]]:
+    """Fetch decisions from the Notion Decisions database"""
+    access_token = get_workspace_notion_token(workspace_id)
+    if not access_token:
+        return None
+    
+    integration = get_workspace_notion_integration(workspace_id)
+    if not integration:
+        return None
+    
+    page_ids = integration.get('notion_page_ids', {})
+    decisions_db_id = page_ids.get('decisions_db_id')
+    
+    if not decisions_db_id:
+        log_error(f"No decisions database ID for workspace {workspace_id}")
+        return None
+    
+    try:
+        result = _notion_request(access_token, 'POST', f'/databases/{decisions_db_id}/query', {
+            'page_size': limit,
+            'sorts': [{'property': 'Date', 'direction': 'descending'}]
+        })
+        
+        if not result or not result.get('results'):
+            return []
+        
+        decisions = []
+        for page in result['results']:
+            decisions.append({
+                'id': page['id'],
+                'title': _extract_title(page),
+                'status': _extract_select(page, 'Status'),
+                'category': _extract_select(page, 'Category'),
+                'impact': _extract_select(page, 'Impact'),
+                'date': _extract_date(page, 'Date'),
+                'url': page.get('url'),
+            })
+        
+        return decisions
+        
+    except Exception as e:
+        log_error(f"Error fetching decisions from Notion: {e}")
+        return None
+
+
+def fetch_meeting_notes_from_notion(workspace_id: str, limit: int = 20) -> Optional[List[Dict]]:
+    """Fetch meeting notes from the Notion Meeting Notes database"""
+    access_token = get_workspace_notion_token(workspace_id)
+    if not access_token:
+        return None
+    
+    integration = get_workspace_notion_integration(workspace_id)
+    if not integration:
+        return None
+    
+    page_ids = integration.get('notion_page_ids', {})
+    notes_db_id = page_ids.get('notes_db_id')
+    
+    if not notes_db_id:
+        log_error(f"No meeting notes database ID for workspace {workspace_id}")
+        return None
+    
+    try:
+        result = _notion_request(access_token, 'POST', f'/databases/{notes_db_id}/query', {
+            'page_size': limit,
+            'sorts': [{'property': 'Date', 'direction': 'descending'}]
+        })
+        
+        if not result or not result.get('results'):
+            return []
+        
+        notes = []
+        for page in result['results']:
+            notes.append({
+                'id': page['id'],
+                'title': _extract_title(page),
+                'type': _extract_select(page, 'Type'),
+                'date': _extract_date(page, 'Date'),
+                'url': page.get('url'),
+            })
+        
+        return notes
+        
+    except Exception as e:
+        log_error(f"Error fetching meeting notes from Notion: {e}")
+        return None
+
+
+def get_workspace_notion_summary(workspace_id: str) -> Optional[Dict[str, Any]]:
+    """Get a summary of all Notion data for the workspace"""
+    integration = get_workspace_notion_integration(workspace_id)
+    if not integration:
+        return None
+    
+    page_ids = integration.get('notion_page_ids', {})
+    if not page_ids.get('partnership_page_id'):
+        return {'connected': True, 'has_workspace': False}
+    
+    # Fetch all data
+    tasks = fetch_tasks_from_notion(workspace_id) or []
+    decisions = fetch_decisions_from_notion(workspace_id) or []
+    notes = fetch_meeting_notes_from_notion(workspace_id) or []
+    
+    # Calculate task stats
+    task_stats = {
+        'total': len(tasks),
+        'todo': len([t for t in tasks if t.get('status') == 'To Do']),
+        'in_progress': len([t for t in tasks if t.get('status') == 'In Progress']),
+        'done': len([t for t in tasks if t.get('status') == 'Done']),
+        'blocked': len([t for t in tasks if t.get('status') == 'Blocked']),
+    }
+    
+    # Calculate decision stats
+    decision_stats = {
+        'total': len(decisions),
+        'approved': len([d for d in decisions if d.get('status') == 'Approved']),
+        'proposed': len([d for d in decisions if d.get('status') == 'Proposed']),
+        'high_impact': len([d for d in decisions if d.get('impact') == 'High']),
+    }
+    
+    return {
+        'connected': True,
+        'has_workspace': True,
+        'workspace_name': integration.get('notion_workspace_name') or integration.get('team_name'),
+        'partnership_page_url': get_partnership_page_url(workspace_id),
+        'tasks': tasks[:10],  # Recent 10
+        'task_stats': task_stats,
+        'decisions': decisions[:10],  # Recent 10
+        'decision_stats': decision_stats,
+        'meeting_notes': notes[:5],  # Recent 5
+        'meeting_count': len(notes),
+    }

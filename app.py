@@ -4219,6 +4219,41 @@ def create_notion_workspace(workspace_id):
         return jsonify({"error": str(e)}), 500
 
 
+@app.route('/api/workspaces/<workspace_id>/summary', methods=['GET'])
+def get_workspace_summary(workspace_id):
+    """Get a summary of workspace data from Notion"""
+    from services import notion_integration_service
+    
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        # Verify user is a participant
+        supabase = get_supabase()
+        participant = supabase.table('workspace_participants').select('id').eq(
+            'workspace_id', workspace_id
+        ).eq('user_id', _get_founder_id_from_clerk(clerk_user_id)).execute()
+        
+        if not participant.data:
+            return jsonify({"error": "Not a participant of this workspace"}), 403
+        
+        # Get Notion summary
+        summary = notion_integration_service.get_workspace_notion_summary(workspace_id)
+        
+        if not summary:
+            return jsonify({
+                "connected": False,
+                "message": "Notion not connected"
+            }), 200
+        
+        return jsonify(summary), 200
+        
+    except Exception as e:
+        log_error("Error getting workspace summary", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
 # ==================== CRON JOBS ====================
 
 @app.route('/api/cron/weekly-checkin-reminders', methods=['POST'])
