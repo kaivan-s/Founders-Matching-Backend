@@ -65,23 +65,121 @@ def exchange_code_for_token(code: str) -> Optional[Dict[str, Any]]:
         return None
 
 
+class SlackWorkspaceMismatchError(Exception):
+    """Raised when co-founder tries to connect a different Slack workspace"""
+    def __init__(self, existing_team_name: str, new_team_name: str):
+        self.existing_team_name = existing_team_name
+        self.new_team_name = new_team_name
+        super().__init__(f"Slack workspace mismatch: existing={existing_team_name}, new={new_team_name}")
+
+
+def check_existing_slack_integration(workspace_id: str) -> Optional[Dict[str, Any]]:
+    """Check if there's an existing Slack integration for this workspace"""
+    supabase = get_supabase()
+    
+    result = supabase.table('workspace_integrations').select(
+        'id, team_id, team_name, channel_id, channel_name, slack_user_ids, connected_by_user_id, connected_by_name, is_active'
+    ).eq('workspace_id', workspace_id).eq('provider', 'slack').execute()
+    
+    if not result.data:
+        return None
+    
+    return result.data[0]
+
+
 def save_workspace_slack_integration(
     workspace_id: str,
     slack_data: Dict[str, Any],
-    connected_by_user_id: str
+    connected_by_user_id: str,
+    connected_by_name: str = None
 ) -> Dict[str, Any]:
-    """Save Slack integration details for a workspace"""
+    """
+    Save Slack integration details for a workspace.
+    
+    If an integration already exists:
+    - If same Slack workspace (team_id): adds the new user as a connected co-founder
+    - If different Slack workspace: raises SlackWorkspaceMismatchError
+    """
     supabase = get_supabase()
+    from datetime import datetime
+    
+    new_slack_user_id = slack_data.get('authed_user_id')
+    new_team_id = slack_data['team_id']
+    new_team_name = slack_data['team_name']
+    
+    # Check for existing integration
+    existing = supabase.table('workspace_integrations').select(
+        'id, team_id, team_name, channel_id, slack_user_ids, is_active'
+    ).eq('workspace_id', workspace_id).eq('provider', 'slack').execute()
+    
+    if existing.data and existing.data[0].get('is_active'):
+        existing_integration = existing.data[0]
+        existing_team_id = existing_integration.get('team_id')
+        existing_team_name = existing_integration.get('team_name')
+        
+        # Check if it's the same Slack workspace
+        if existing_team_id and existing_team_id != new_team_id:
+            raise SlackWorkspaceMismatchError(existing_team_name, new_team_name)
+        
+        # Same workspace - add this user to slack_user_ids
+        slack_user_ids = existing_integration.get('slack_user_ids') or []
+        
+        # Check if user is already connected
+        already_connected = any(
+            u.get('clerk_user_id') == connected_by_user_id 
+            for u in slack_user_ids
+        )
+        
+        if not already_connected and new_slack_user_id:
+            slack_user_ids.append({
+                'clerk_user_id': connected_by_user_id,
+                'slack_user_id': new_slack_user_id,
+                'name': connected_by_name,
+                'connected_at': datetime.now().isoformat(),
+            })
+        
+        # Update with new user added
+        result = supabase.table('workspace_integrations').update({
+            'slack_user_ids': slack_user_ids,
+            'access_token': slack_data['access_token'],  # Update token
+        }).eq('id', existing_integration['id']).execute()
+        
+        # Invite the new user to existing channel if one exists
+        if existing_integration.get('channel_id') and new_slack_user_id:
+            _invite_user_to_channel(
+                slack_data['access_token'],
+                existing_integration['channel_id'],
+                new_slack_user_id
+            )
+            log_info(f"Invited second co-founder to existing Slack channel for workspace {workspace_id}")
+        
+        if not result.data:
+            raise ValueError("Failed to update Slack integration")
+        
+        log_info(f"Added co-founder to existing Slack integration for workspace {workspace_id}")
+        return result.data[0]
+    
+    # No existing integration or inactive - create new one
+    slack_user_ids = []
+    if new_slack_user_id:
+        slack_user_ids.append({
+            'clerk_user_id': connected_by_user_id,
+            'slack_user_id': new_slack_user_id,
+            'name': connected_by_name,
+            'connected_at': datetime.now().isoformat(),
+        })
     
     integration_data = {
         'workspace_id': workspace_id,
         'provider': 'slack',
         'access_token': slack_data['access_token'],
-        'team_id': slack_data['team_id'],
-        'team_name': slack_data['team_name'],
+        'team_id': new_team_id,
+        'team_name': new_team_name,
         'bot_user_id': slack_data.get('bot_user_id'),
-        'slack_user_id': slack_data.get('authed_user_id'),  # Slack user ID of who connected
+        'slack_user_id': new_slack_user_id,  # Keep for backward compatibility
+        'slack_user_ids': slack_user_ids,
         'connected_by_user_id': connected_by_user_id,
+        'connected_by_name': connected_by_name,
         'settings': {
             'notifications': {
                 'checkin_reminders': True,
@@ -92,12 +190,8 @@ def save_workspace_slack_integration(
         'is_active': True,
     }
     
-    # Upsert - update if exists, insert if not
-    existing = supabase.table('workspace_integrations').select('id').eq(
-        'workspace_id', workspace_id
-    ).eq('provider', 'slack').execute()
-    
     if existing.data:
+        # Reactivate existing integration
         result = supabase.table('workspace_integrations').update(
             integration_data
         ).eq('id', existing.data[0]['id']).execute()
@@ -118,13 +212,28 @@ def get_workspace_slack_integration(workspace_id: str) -> Optional[Dict[str, Any
     supabase = get_supabase()
     
     result = supabase.table('workspace_integrations').select(
-        'id, team_id, team_name, channel_id, channel_name, settings, is_active, created_at'
+        'id, team_id, team_name, channel_id, channel_name, settings, is_active, created_at, slack_user_ids, connected_by_user_id, connected_by_name'
     ).eq('workspace_id', workspace_id).eq('provider', 'slack').eq('is_active', True).execute()
     
     if not result.data:
         return None
     
     return result.data[0]
+
+
+def get_all_slack_user_ids(workspace_id: str) -> List[str]:
+    """Get all Slack user IDs for both co-founders"""
+    supabase = get_supabase()
+    
+    result = supabase.table('workspace_integrations').select(
+        'slack_user_ids'
+    ).eq('workspace_id', workspace_id).eq('provider', 'slack').eq('is_active', True).execute()
+    
+    if not result.data:
+        return []
+    
+    slack_user_ids = result.data[0].get('slack_user_ids') or []
+    return [u.get('slack_user_id') for u in slack_user_ids if u.get('slack_user_id')]
 
 
 def get_workspace_slack_token(workspace_id: str) -> Optional[str]:
@@ -193,8 +302,8 @@ def create_partnership_channel(
         log_error(f"No Slack token for workspace {workspace_id}")
         return None
     
-    # Get the Slack user ID to invite them to the channel
-    slack_user_id = get_workspace_slack_user_id(workspace_id)
+    # Get ALL Slack user IDs to invite them to the channel
+    slack_user_ids = get_all_slack_user_ids(workspace_id)
     
     # Default channel name if None
     if not channel_name:
@@ -221,10 +330,11 @@ def create_partnership_channel(
         if not data.get('ok'):
             # Channel might already exist
             if data.get('error') == 'name_taken':
-                # Try to find existing channel and invite user
+                # Try to find existing channel and invite all users
                 existing = _find_existing_channel(access_token, safe_name)
-                if existing and slack_user_id:
-                    _invite_user_to_channel(access_token, existing['channel_id'], slack_user_id)
+                if existing:
+                    for user_id in slack_user_ids:
+                        _invite_user_to_channel(access_token, existing['channel_id'], user_id)
                 return existing
             log_error(f"Error creating Slack channel: {data.get('error')}")
             return None
@@ -232,9 +342,9 @@ def create_partnership_channel(
         channel = data.get('channel', {})
         channel_id = channel.get('id')
         
-        # Invite the user who connected the integration to the channel
-        if slack_user_id:
-            _invite_user_to_channel(access_token, channel_id, slack_user_id)
+        # Invite all connected co-founders to the channel
+        for user_id in slack_user_ids:
+            _invite_user_to_channel(access_token, channel_id, user_id)
         
         # Save channel info to integration
         supabase = get_supabase()
@@ -547,10 +657,10 @@ def disconnect_slack(workspace_id: str) -> bool:
         return False
 
 
-def invite_user_to_existing_channel(workspace_id: str) -> bool:
+def invite_all_users_to_existing_channel(workspace_id: str) -> bool:
     """
-    Invite the connected user to the existing Slack channel.
-    Use this to fix channels where the user wasn't initially invited.
+    Invite all connected co-founders to the existing Slack channel.
+    Use this to fix channels where users weren't initially invited.
     """
     integration = get_workspace_slack_integration(workspace_id)
     if not integration or not integration.get('channel_id'):
@@ -562,15 +672,30 @@ def invite_user_to_existing_channel(workspace_id: str) -> bool:
         log_error(f"No Slack token for workspace {workspace_id}")
         return False
     
-    slack_user_id = get_workspace_slack_user_id(workspace_id)
-    if not slack_user_id:
-        log_error(f"No Slack user ID stored for workspace {workspace_id}")
+    slack_user_ids = get_all_slack_user_ids(workspace_id)
+    if not slack_user_ids:
+        log_error(f"No Slack user IDs stored for workspace {workspace_id}")
         return False
     
     channel_id = integration['channel_id']
-    success = _invite_user_to_channel(access_token, channel_id, slack_user_id)
+    all_success = True
     
-    if success:
-        log_info(f"Successfully invited user to channel for workspace {workspace_id}")
+    for user_id in slack_user_ids:
+        success = _invite_user_to_channel(access_token, channel_id, user_id)
+        if not success:
+            all_success = False
     
-    return success
+    if all_success:
+        log_info(f"Successfully invited all users to channel for workspace {workspace_id}")
+    
+    return all_success
+
+
+def is_user_connected_to_slack(workspace_id: str, clerk_user_id: str) -> bool:
+    """Check if a specific user has connected their Slack account"""
+    integration = get_workspace_slack_integration(workspace_id)
+    if not integration:
+        return False
+    
+    slack_user_ids = integration.get('slack_user_ids') or []
+    return any(u.get('clerk_user_id') == clerk_user_id for u in slack_user_ids)

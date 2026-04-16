@@ -3736,6 +3736,7 @@ def get_slack_auth_url():
 def slack_oauth_callback():
     """Handle Slack OAuth callback"""
     from services import slack_integration_service
+    from urllib.parse import quote
     
     code = request.args.get('code')
     state = request.args.get('state')
@@ -3776,14 +3777,28 @@ def slack_oauth_callback():
         if not slack_data:
             return redirect(f"{frontend_url}/workspaces/{workspace_id}?error=slack_failed")
         
-        # Save integration
-        slack_integration_service.save_workspace_slack_integration(
-            workspace_id, slack_data, user_id
-        )
-        
-        # Auto-create the partnership channel
+        # Get user's name for display
+        user_name = None
         try:
-            supabase = get_supabase()
+            founder = supabase.table('founders').select('name').eq('clerk_user_id', user_id).execute()
+            if founder.data:
+                user_name = founder.data[0].get('name')
+        except:
+            pass
+        
+        # Save integration (handles both first and second co-founder)
+        try:
+            slack_integration_service.save_workspace_slack_integration(
+                workspace_id, slack_data, user_id, connected_by_name=user_name
+            )
+        except slack_integration_service.SlackWorkspaceMismatchError as e:
+            # Co-founder tried to connect a different Slack workspace
+            base_url = frontend_url.rstrip('/')
+            error_msg = quote(f"Your co-founder already connected to '{e.existing_team_name}'. Please connect to the same Slack workspace.")
+            return redirect(f"{base_url}/workspaces/{workspace_id}/integrations?error=slack_mismatch&message={error_msg}")
+        
+        # Auto-create the partnership channel (or invite to existing)
+        try:
             workspace = supabase.table('workspaces').select('title').eq('id', workspace_id).execute()
             channel_name = workspace.data[0].get('title') if workspace.data else None
             channel_name = channel_name or 'partnership'
@@ -3793,7 +3808,6 @@ def slack_oauth_callback():
             # Don't fail the whole flow if channel creation fails
         
         # Redirect back to workspace integrations tab with success
-        # Remove trailing slash from frontend_url if present
         base_url = frontend_url.rstrip('/')
         return redirect(f"{base_url}/workspaces/{workspace_id}/integrations?slack=connected")
         
@@ -3818,15 +3832,31 @@ def get_workspace_integrations(workspace_id):
         # Get Slack integration
         slack = slack_integration_service.get_workspace_slack_integration(workspace_id)
         if slack:
+            # Get connected users info
+            slack_user_ids = slack.get('slack_user_ids') or []
+            connected_users = [
+                {'name': u.get('name'), 'clerk_user_id': u.get('clerk_user_id')}
+                for u in slack_user_ids
+            ]
+            
+            # Check if current user has connected
+            current_user_connected = any(
+                u.get('clerk_user_id') == clerk_user_id 
+                for u in slack_user_ids
+            )
+            
             integrations['slack'] = {
                 'connected': True,
                 'team_name': slack.get('team_name'),
                 'channel_name': slack.get('channel_name'),
                 'channel_id': slack.get('channel_id'),
                 'settings': slack.get('settings', {}),
+                'connected_by_name': slack.get('connected_by_name'),
+                'connected_users': connected_users,
+                'current_user_connected': current_user_connected,
             }
         else:
-            integrations['slack'] = {'connected': False}
+            integrations['slack'] = {'connected': False, 'current_user_connected': False}
         
         # Placeholder for future integrations
         integrations['notion'] = {'connected': False}
@@ -3949,7 +3979,7 @@ def test_slack_notification(workspace_id):
 
 @app.route('/api/workspaces/<workspace_id>/integrations/slack/join-channel', methods=['POST'])
 def join_slack_channel(workspace_id):
-    """Join the existing Slack channel (for fixing membership issues)"""
+    """Invite all connected users to the Slack channel (for fixing membership issues)"""
     from services import slack_integration_service
     
     try:
@@ -3957,12 +3987,12 @@ def join_slack_channel(workspace_id):
         if not clerk_user_id:
             return jsonify({"error": "User ID required"}), 401
         
-        success = slack_integration_service.invite_user_to_existing_channel(workspace_id)
+        success = slack_integration_service.invite_all_users_to_existing_channel(workspace_id)
         
         if not success:
             return jsonify({"error": "Failed to join channel. You may need to disconnect and reconnect Slack."}), 500
         
-        return jsonify({"success": True, "message": "You have been added to the Slack channel"}), 200
+        return jsonify({"success": True, "message": "All co-founders have been added to the Slack channel"}), 200
         
     except Exception as e:
         log_error("Error joining Slack channel", error=e)
