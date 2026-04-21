@@ -3709,6 +3709,7 @@ def download_equity_document(workspace_id, document_id, file_type):
 def get_slack_auth_url():
     """Get Slack OAuth URL for connecting a workspace"""
     from services import slack_integration_service
+    from services import plan_service
     from datetime import datetime, timedelta
     import secrets
     
@@ -3716,6 +3717,14 @@ def get_slack_auth_url():
         clerk_user_id = get_clerk_user_id()
         if not clerk_user_id:
             return jsonify({"error": "User ID required"}), 401
+        
+        # Check if user has access to Slack integration (Pro/Pro+ only)
+        if not plan_service.check_feature_access(clerk_user_id, 'workspaceFeatures.slackIntegration'):
+            return jsonify({
+                "error": "Slack integration requires Pro plan",
+                "upgrade_required": True,
+                "feature": "slackIntegration"
+            }), 403
         
         workspace_id = request.args.get('workspace_id')
         if not workspace_id:
@@ -3833,6 +3842,7 @@ def get_workspace_integrations(workspace_id):
     """Get all integrations for a workspace"""
     from services import slack_integration_service
     from services import notion_integration_service
+    from services import plan_service
     
     try:
         clerk_user_id = get_clerk_user_id()
@@ -3840,6 +3850,11 @@ def get_workspace_integrations(workspace_id):
             return jsonify({"error": "User ID required"}), 401
         
         integrations = {}
+        
+        # Check feature access for integrations
+        has_slack_access = plan_service.check_feature_access(clerk_user_id, 'workspaceFeatures.slackIntegration')
+        has_notion_access = plan_service.check_feature_access(clerk_user_id, 'workspaceFeatures.notionIntegration')
+        has_summary_access = plan_service.check_feature_access(clerk_user_id, 'workspaceFeatures.summaryDashboard')
         
         # Get Slack integration
         slack = slack_integration_service.get_workspace_slack_integration(workspace_id)
@@ -3866,9 +3881,10 @@ def get_workspace_integrations(workspace_id):
                 'connected_by_name': slack.get('connected_by_name'),
                 'connected_users': connected_users,
                 'current_user_connected': current_user_connected,
+                'has_access': has_slack_access,
             }
         else:
-            integrations['slack'] = {'connected': False, 'current_user_connected': False}
+            integrations['slack'] = {'connected': False, 'current_user_connected': False, 'has_access': has_slack_access}
         
         # Get Notion integration
         notion = notion_integration_service.get_workspace_notion_integration(workspace_id)
@@ -3896,12 +3912,20 @@ def get_workspace_integrations(workspace_id):
                 'has_workspace': bool(partnership_page_id),
                 'partnership_page_url': notion_integration_service.get_partnership_page_url(workspace_id) if partnership_page_id else None,
                 'page_ids': page_ids,
+                'has_access': has_notion_access,
             }
         else:
-            integrations['notion'] = {'connected': False, 'current_user_connected': False}
+            integrations['notion'] = {'connected': False, 'current_user_connected': False, 'has_access': has_notion_access}
         
         # Placeholder for future integrations
         integrations['google_calendar'] = {'connected': False}
+        
+        # Include feature access summary
+        integrations['feature_access'] = {
+            'slackIntegration': has_slack_access,
+            'notionIntegration': has_notion_access,
+            'summaryDashboard': has_summary_access,
+        }
         
         return jsonify(integrations), 200
         
@@ -4046,6 +4070,7 @@ def join_slack_channel(workspace_id):
 def get_notion_auth_url():
     """Generate Notion OAuth URL"""
     from services import notion_integration_service
+    from services import plan_service
     from datetime import datetime, timedelta
     import secrets
     
@@ -4053,6 +4078,14 @@ def get_notion_auth_url():
         clerk_user_id = get_clerk_user_id()
         if not clerk_user_id:
             return jsonify({"error": "User ID required"}), 401
+        
+        # Check if user has access to Notion integration (Pro/Pro+ only)
+        if not plan_service.check_feature_access(clerk_user_id, 'workspaceFeatures.notionIntegration'):
+            return jsonify({
+                "error": "Notion integration requires Pro plan",
+                "upgrade_required": True,
+                "feature": "notionIntegration"
+            }), 403
         
         workspace_id = request.args.get('workspace_id')
         if not workspace_id:
@@ -4234,11 +4267,20 @@ def create_notion_workspace(workspace_id):
 def get_workspace_summary(workspace_id):
     """Get a summary of workspace data from Notion"""
     from services import notion_integration_service
+    from services import plan_service
     
     try:
         clerk_user_id = get_clerk_user_id()
         if not clerk_user_id:
             return jsonify({"error": "User ID required"}), 401
+        
+        # Check if user has access to Summary dashboard (Pro/Pro+ only)
+        if not plan_service.check_feature_access(clerk_user_id, 'workspaceFeatures.summaryDashboard'):
+            return jsonify({
+                "error": "Summary dashboard requires Pro plan",
+                "upgrade_required": True,
+                "feature": "summaryDashboard"
+            }), 403
         
         # Get founder ID from clerk
         founder_id, error = _get_founder_id_from_clerk(clerk_user_id)
@@ -4274,11 +4316,20 @@ def get_workspace_summary(workspace_id):
 def get_notion_changes(workspace_id):
     """Get pending Notion changes for this workspace"""
     from services import notion_integration_service
+    from services import plan_service
     
     try:
         clerk_user_id = get_clerk_user_id()
         if not clerk_user_id:
             return jsonify({"error": "User ID required"}), 401
+        
+        # Check if user has access to Summary dashboard (Pro/Pro+ only)
+        if not plan_service.check_feature_access(clerk_user_id, 'workspaceFeatures.summaryDashboard'):
+            return jsonify({
+                "error": "This feature requires Pro plan",
+                "upgrade_required": True,
+                "feature": "summaryDashboard"
+            }), 403
         
         # Get founder ID from clerk
         founder_id, error = _get_founder_id_from_clerk(clerk_user_id)

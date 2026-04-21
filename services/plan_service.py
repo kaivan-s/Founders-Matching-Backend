@@ -14,7 +14,7 @@ FOUNDER_PLANS: Dict[FounderPlan, Dict[str, Any]] = {
         "maxWorkspaces": 1,
         "maxProjects": 1,
         "discovery": {
-            "maxSwipesPerMonth": 3,
+            "maxSwipesPerMonth": 5,
             "maxAccessRequestsPerMonth": 3,
             "showCompatDimensions": False,
         },
@@ -25,6 +25,9 @@ FOUNDER_PLANS: Dict[FounderPlan, Dict[str, Any]] = {
             "tasksBoard": False,
             "weeklyCheckins": True,
             "notifications": True,
+            "slackIntegration": False,
+            "notionIntegration": False,
+            "summaryDashboard": False,
         },
         "accountability": {
             "canUseMarketplace": False,
@@ -37,9 +40,9 @@ FOUNDER_PLANS: Dict[FounderPlan, Dict[str, Any]] = {
     },
     "PRO": {
         "id": "PRO",
-        "monthlyPriceUSD": 15,
-        "maxWorkspaces": 2,
-        "maxProjects": 3,
+        "monthlyPriceUSD": 19,
+        "maxWorkspaces": 3,
+        "maxProjects": 5,
         "discovery": {
             "maxSwipesPerMonth": "UNLIMITED",
             "maxAccessRequestsPerMonth": "UNLIMITED",
@@ -52,6 +55,9 @@ FOUNDER_PLANS: Dict[FounderPlan, Dict[str, Any]] = {
             "tasksBoard": True,
             "weeklyCheckins": True,
             "notifications": True,
+            "slackIntegration": True,
+            "notionIntegration": True,
+            "summaryDashboard": True,
         },
         "accountability": {
             "canUseMarketplace": True,
@@ -64,8 +70,8 @@ FOUNDER_PLANS: Dict[FounderPlan, Dict[str, Any]] = {
     },
     "PRO_PLUS": {
         "id": "PRO_PLUS",
-        "monthlyPriceUSD": 35,
-        "maxWorkspaces": 5,
+        "monthlyPriceUSD": 39,
+        "maxWorkspaces": "UNLIMITED",
         "maxProjects": "UNLIMITED",
         "discovery": {
             "maxSwipesPerMonth": "UNLIMITED",
@@ -79,6 +85,10 @@ FOUNDER_PLANS: Dict[FounderPlan, Dict[str, Any]] = {
             "tasksBoard": True,
             "weeklyCheckins": True,
             "notifications": True,
+            "slackIntegration": True,
+            "notionIntegration": True,
+            "summaryDashboard": True,
+            "prioritySupport": True,
         },
         "accountability": {
             "canUseMarketplace": True,
