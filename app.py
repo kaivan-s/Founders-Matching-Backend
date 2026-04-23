@@ -588,7 +588,7 @@ def check_project_access(project_id):
 @app.route('/api/projects/<project_id>/access/request', methods=['POST'])
 @limiter.limit(RATE_LIMITS['moderate'])
 def request_project_access(project_id):
-    """Request access to view a locked project"""
+    """Request access to view a locked project with optional question answers"""
     try:
         clerk_user_id = get_clerk_user_id()
         if not clerk_user_id:
@@ -596,9 +596,15 @@ def request_project_access(project_id):
         
         data = request.get_json() or {}
         message = data.get('message', '')
+        question_answers = data.get('question_answers', {})
+        video_intro_url = data.get('video_intro_url')
+        voice_intro_url = data.get('voice_intro_url')
         
         result = project_access_service.request_project_access(
-            clerk_user_id, project_id, message
+            clerk_user_id, project_id, message,
+            question_answers=question_answers,
+            video_intro_url=video_intro_url,
+            voice_intro_url=voice_intro_url
         )
         return jsonify(result), 201
     except ValueError as e:
@@ -714,6 +720,77 @@ def check_profile():
         return jsonify(result)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/profile', methods=['GET', 'PUT'])
+@limiter.limit(RATE_LIMITS['standard'])
+def manage_profile():
+    """Get or update the current user's profile"""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        if request.method == 'GET':
+            profile = profile_service.get_profile(clerk_user_id)
+            return jsonify(profile), 200
+        else:  # PUT
+            data = request.get_json()
+            if not data:
+                return jsonify({"error": "No data provided"}), 400
+            
+            updated_profile = profile_service.update_profile(clerk_user_id, data)
+            return jsonify(updated_profile), 200
+            
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 404
+    except Exception as e:
+        log_error("Error managing profile", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/profile/completeness', methods=['GET'])
+def get_profile_completeness():
+    """Get profile completeness score and missing fields"""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        result = profile_service.get_profile_completeness(clerk_user_id)
+        return jsonify(result), 200
+    except Exception as e:
+        log_error("Error getting profile completeness", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/profile/options', methods=['GET'])
+def get_profile_options():
+    """Get available options for profile fields (interests, work preferences, etc.)"""
+    try:
+        return jsonify({
+            "interests": profile_service.get_available_interests(),
+            "work_preferences": profile_service.get_work_preference_options(),
+        }), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/founders/<founder_id>/profile', methods=['GET'])
+@limiter.limit(RATE_LIMITS['standard'])
+def get_founder_public_profile(founder_id):
+    """Get a founder's public profile (for viewing by others)"""
+    try:
+        clerk_user_id = get_clerk_user_id()  # Optional - for tracking views
+        
+        profile = profile_service.get_public_profile(founder_id, clerk_user_id)
+        return jsonify(profile), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 404
+    except Exception as e:
+        log_error("Error getting public profile", error=e)
+        return jsonify({"error": str(e)}), 500
+
 
 # Debug endpoint removed for security - do not expose internal state in production
 

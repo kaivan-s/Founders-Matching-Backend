@@ -24,6 +24,8 @@ def create_swipe(clerk_user_id, data):
     Now supports project-based swiping where users swipe on specific projects
     Limits are enforced via plan_service.check_discovery_limit()
     
+    Also supports application questions and media intros for the 'apply to connect' flow.
+    
     OPTIMIZED: Reduced from ~15 DB calls to ~6 by caching founder_id and plan
     """
     supabase = get_supabase()
@@ -31,6 +33,9 @@ def create_swipe(clerk_user_id, data):
     swiped_id = data.get('swiped_id')
     swipe_type = data.get('swipe_type')
     project_id = data.get('project_id')
+    question_answers = data.get('question_answers', {})
+    video_intro_url = data.get('video_intro_url')
+    voice_intro_url = data.get('voice_intro_url')
     
     if not swiped_id or not swipe_type:
         raise ValueError("swiped_id and swipe_type required")
@@ -100,12 +105,15 @@ def create_swipe(clerk_user_id, data):
         if not can_swipe:
             raise ValueError(f"Discovery limit reached. You've used {current_count} of {max_allowed} swipes this month. Upgrade to Pro for unlimited discovery.")
     
-    # Insert swipe
+    # Insert swipe with optional application data
     swipe_data = {
         'swiper_id': swiper_id,
         'swiped_id': swiped_id,
         'swipe_type': swipe_type,
-        'project_id': project_id
+        'project_id': project_id,
+        'question_answers': question_answers or {},
+        'video_intro_url': video_intro_url.strip()[:1000] if video_intro_url else None,
+        'voice_intro_url': voice_intro_url.strip()[:1000] if voice_intro_url else None,
     }
     
     try:

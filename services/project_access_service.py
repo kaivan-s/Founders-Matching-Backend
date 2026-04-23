@@ -133,7 +133,10 @@ def check_user_access(clerk_user_id: str, project_id: str) -> Dict[str, Any]:
     return {'has_access': False, 'reason': 'no_access', 'request_status': None}
 
 
-def request_project_access(clerk_user_id: str, project_id: str, message: str = None) -> Dict[str, Any]:
+def request_project_access(clerk_user_id: str, project_id: str, message: str = None,
+                          question_answers: Dict[str, str] = None,
+                          video_intro_url: str = None,
+                          voice_intro_url: str = None) -> Dict[str, Any]:
     """
     Request access to view a locked project
     
@@ -141,6 +144,9 @@ def request_project_access(clerk_user_id: str, project_id: str, message: str = N
         clerk_user_id: Requester's Clerk user ID
         project_id: Project to request access to
         message: Optional message explaining interest
+        question_answers: Answers to the project's application questions
+        video_intro_url: Optional video introduction URL
+        voice_intro_url: Optional voice note introduction URL
     
     Returns:
         Request data or auto-approved grant
@@ -203,7 +209,10 @@ def request_project_access(clerk_user_id: str, project_id: str, message: str = N
         'status': 'pending',
         'created_at': datetime.now(timezone.utc).isoformat(),
         'expires_at': expires_at.isoformat(),
-        'responded_at': None
+        'responded_at': None,
+        'question_answers': question_answers or {},
+        'video_intro_url': video_intro_url.strip()[:1000] if video_intro_url else None,
+        'voice_intro_url': voice_intro_url.strip()[:1000] if voice_intro_url else None,
     }
     
     if existing.data:
@@ -359,12 +368,12 @@ def get_pending_requests_for_owner(clerk_user_id: str) -> List[Dict[str, Any]]:
     """
     Get all pending access requests for projects owned by this user
     
-    Returns list of requests with requester info
+    Returns list of requests with requester info, question answers, and media intros
     """
     owner_id = _get_founder_id(clerk_user_id)
     supabase = get_supabase()
     
-    # Get pending requests with requester info and project info
+    # Get pending requests with requester info and project info (including application questions)
     requests = supabase.table('project_access_requests').select(
         '''
         id,
@@ -373,14 +382,19 @@ def get_pending_requests_for_owner(clerk_user_id: str) -> List[Dict[str, Any]]:
         status,
         created_at,
         expires_at,
-        projects!inner(id, title),
+        question_answers,
+        video_intro_url,
+        voice_intro_url,
+        projects!inner(id, title, application_questions),
         founders!project_access_requests_requester_id_fkey(
-            id, name, email, location, skills, linkedin_url, linkedin_verified, profile_picture_url
+            id, name, email, location, skills, linkedin_url, linkedin_verified, profile_picture_url,
+            headline, bio, interests, expertise_details, past_projects, work_preferences,
+            looking_for_description, twitter_url, portfolio_url, github_url
         )
         '''
     ).eq('owner_id', owner_id).eq('status', 'pending').order('created_at', desc=True).execute()
     
-    # Format response
+    # Format response with enhanced profile data
     result = []
     for req in requests.data or []:
         requester = req.get('founders', {})
@@ -389,7 +403,11 @@ def get_pending_requests_for_owner(clerk_user_id: str) -> List[Dict[str, Any]]:
             'id': req['id'],
             'project_id': req['project_id'],
             'project_title': project.get('title', 'Unknown Project'),
+            'application_questions': project.get('application_questions', []),
             'message': req.get('message'),
+            'question_answers': req.get('question_answers', {}),
+            'video_intro_url': req.get('video_intro_url'),
+            'voice_intro_url': req.get('voice_intro_url'),
             'created_at': req['created_at'],
             'expires_at': req.get('expires_at'),
             'requester': {
@@ -400,7 +418,17 @@ def get_pending_requests_for_owner(clerk_user_id: str) -> List[Dict[str, Any]]:
                 'skills': requester.get('skills', []),
                 'linkedin_url': requester.get('linkedin_url'),
                 'linkedin_verified': requester.get('linkedin_verified', False),
-                'profile_picture_url': requester.get('profile_picture_url')
+                'profile_picture_url': requester.get('profile_picture_url'),
+                'headline': requester.get('headline'),
+                'bio': requester.get('bio'),
+                'interests': requester.get('interests', []),
+                'expertise_details': requester.get('expertise_details', {}),
+                'past_projects': requester.get('past_projects', []),
+                'work_preferences': requester.get('work_preferences', {}),
+                'looking_for_description': requester.get('looking_for_description'),
+                'twitter_url': requester.get('twitter_url'),
+                'portfolio_url': requester.get('portfolio_url'),
+                'github_url': requester.get('github_url'),
             }
         })
     

@@ -474,6 +474,7 @@ def get_available_founders(clerk_user_id, filters=None, mode='founders'):
                     'genre': project.get('genre'),
                     'needed_skills': project.get('needed_skills', []) if has_access else [],
                     'compatibility_answers': project.get('compatibility_answers', {}) if has_access else {},
+                    'application_questions': project.get('application_questions', []),
                     'is_primary': True,
                     'visibility': visibility,
                     'has_access': has_access,

@@ -188,8 +188,15 @@ def get_likes(clerk_user_id):
     # Only include swipes for projects that are still seeking co-founders
     # Join with projects table to filter by seeking_cofounder status
     # Order by created_at descending to show most recent first
+    # Include question_answers, media intros, and application_questions from project
     likes_swipes = supabase.table('swipes').select(
-        '*, swiper:founders!swiper_id(*), project:projects!project_id(id, seeking_cofounder, is_active)'
+        '''*, 
+        swiper:founders!swiper_id(
+            id, name, email, location, skills, linkedin_url, linkedin_verified, profile_picture_url,
+            headline, bio, interests, expertise_details, past_projects, work_preferences,
+            looking_for_description, twitter_url, portfolio_url, github_url, purpose
+        ), 
+        project:projects!project_id(id, seeking_cofounder, is_active, application_questions)'''
     ).eq('swiped_id', current_user_id).eq('swipe_type', 'right').order('created_at', desc=True).execute()
     
     if not likes_swipes.data:
@@ -305,13 +312,21 @@ def get_likes(clerk_user_id):
         # Get the specific project they're interested in (from batch fetch)
         interested_project = interested_projects_map.get(project_id) if project_id else None
         
+        # Get application questions from the project join
+        project_data = swipe.get('project') or {}
+        application_questions = project_data.get('application_questions', [])
+        
         formatted_likes.append({
             'swipe_id': swipe['id'],
             'liked_at': swipe['created_at'],
             'founder': swiper,
             'project': interested_project,  # The project they're interested in
             'project_id': project_id,  # Project ID they swiped on
-            'is_project_based': bool(project_id)
+            'is_project_based': bool(project_id),
+            'question_answers': swipe.get('question_answers', {}),
+            'video_intro_url': swipe.get('video_intro_url'),
+            'voice_intro_url': swipe.get('voice_intro_url'),
+            'application_questions': application_questions,
         })
     
     # Sort by liked_at descending (most recent first)

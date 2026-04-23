@@ -70,6 +70,15 @@ def create_project(clerk_user_id, data):
     if 'request_expires_days' in data:
         project_data['request_expires_days'] = data['request_expires_days']
     
+    # Add application questions (up to 3 custom questions for applicants)
+    if 'application_questions' in data:
+        questions = data.get('application_questions') or []
+        if isinstance(questions, list):
+            # Validate and limit to 3 questions
+            project_data['application_questions'] = [
+                q.strip()[:500] for q in questions[:3] if q and q.strip()
+            ]
+    
     response = supabase.table('projects').insert(project_data).execute()
     return response.data[0]
 
@@ -110,10 +119,20 @@ def update_project(clerk_user_id, project_id, data):
         update_data['auto_approve_verified'] = data['auto_approve_verified']
     if 'request_expires_days' in data:
         update_data['request_expires_days'] = data['request_expires_days']
-        if data['is_paused']:
+        if data.get('is_paused'):
             update_data['paused_at'] = datetime.now(timezone.utc).isoformat()
         else:
             update_data['paused_at'] = None
+    
+    # Update application questions
+    if 'application_questions' in data:
+        questions = data.get('application_questions') or []
+        if isinstance(questions, list):
+            update_data['application_questions'] = [
+                q.strip()[:500] for q in questions[:3] if q and q.strip()
+            ]
+        else:
+            update_data['application_questions'] = []
     
     response = supabase.table('projects').update(update_data).eq('id', project_id).execute()
     
