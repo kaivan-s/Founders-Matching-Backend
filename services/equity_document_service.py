@@ -1,7 +1,12 @@
 """
 Equity Document Generation Service
 
-Generates professional Co-Founder Agreement documents in PDF and DOCX formats.
+Generates jurisdiction-aware Founders' Agreement template documents in PDF and DOCX formats.
+
+The output is a structured starting-point template (NOT a final legal contract) intended
+to facilitate discussion between co-founders and serve as a basis for legal review.
+Supports US, India, UK, and other jurisdictions with adapted terminology and provisions.
+
 Uses python-docx for DOCX and reportlab for PDF generation.
 """
 
@@ -31,131 +36,141 @@ from utils.logger import log_error, log_info
 
 
 # ============================================================================
-# Document Template (Markdown/MMD format)
+# Jurisdiction-Aware Configuration
 # ============================================================================
 
-AGREEMENT_TEMPLATE = """# CO-FOUNDER AGREEMENT
+JURISDICTION_CONFIG = {
+    'india': {
+        'label': 'India',
+        'currency_symbol': '₹',
+        'currency_code': 'INR',
+        'company_form': 'Private Limited Company (Pvt. Ltd.)',
+        'governing_law': 'the laws of India',
+        'companies_act': 'Companies Act, 2013',
+        'arbitration_act': 'Arbitration and Conciliation Act, 1996',
+        'arbitration_seat': 'Bengaluru, India',
+        'court_jurisdiction': 'the courts at Bengaluru, India',
+        'non_compete_note': (
+            'Note: Post-employment non-compete restrictions are generally **not enforceable** under '
+            'Section 27 of the Indian Contract Act, 1872. Founders should rely primarily on '
+            'non-solicitation and confidentiality clauses for protection.'
+        ),
+        'tax_note': (
+            '- Founders should consider tax implications under the Income Tax Act, 1961, '
+            'including capital gains on share transfers and ESOP perquisite tax.\n'
+            '- If foreign capital is involved, FEMA and RBI compliance is required.\n'
+            '- GST registration may be required once turnover thresholds are met.'
+        ),
+        'specific_recommendations': [
+            'Execute a separate IP Assignment Agreement on stamp paper of appropriate value.',
+            'Stamp this document on stamp paper as per the Stamp Act of your state (e.g., ₹100 in Karnataka).',
+            'File necessary forms with the Registrar of Companies (RoC) for any equity changes.',
+            'Consider executing a Shareholders Agreement (SHA) alongside this Founders Agreement.',
+        ],
+    },
+    'us': {
+        'label': 'United States',
+        'currency_symbol': '$',
+        'currency_code': 'USD',
+        'company_form': 'Delaware C-Corporation (recommended for venture-backed startups)',
+        'governing_law': 'the laws of the State of Delaware',
+        'companies_act': 'Delaware General Corporation Law (DGCL)',
+        'arbitration_act': 'Federal Arbitration Act (FAA)',
+        'arbitration_seat': 'Wilmington, Delaware',
+        'court_jurisdiction': 'the Court of Chancery of the State of Delaware',
+        'non_compete_note': (
+            'Note: Post-employment non-compete clauses are **not enforceable** in California, '
+            'and have limited enforceability in many other states (e.g., North Dakota, Oklahoma, '
+            'Massachusetts has restrictions). Founders are strongly advised to rely on '
+            'non-solicitation, confidentiality, and trade secret protections.'
+        ),
+        'tax_note': (
+            '- **CRITICAL:** Founders should file an **83(b) election** with the IRS within '
+            '**30 days** of receiving restricted stock subject to vesting. Failure to do so can '
+            'result in significant adverse tax consequences.\n'
+            '- Consider Section 1202 (QSBS) implications for potential capital gains exclusion.\n'
+            '- Consult a tax advisor regarding state tax implications of stock grants.'
+        ),
+        'specific_recommendations': [
+            'File 83(b) election with the IRS within 30 days of stock issuance (CRITICAL).',
+            'Execute a separate IP Assignment Agreement (PIIA) at incorporation.',
+            'Obtain a 409A valuation before issuing options or granting equity to non-founders.',
+            'Maintain proper corporate governance: board minutes, stockholder consents, etc.',
+        ],
+    },
+    'uk': {
+        'label': 'United Kingdom',
+        'currency_symbol': '£',
+        'currency_code': 'GBP',
+        'company_form': 'Private Limited Company (Ltd.)',
+        'governing_law': 'the laws of England and Wales',
+        'companies_act': 'Companies Act 2006',
+        'arbitration_act': 'Arbitration Act 1996',
+        'arbitration_seat': 'London, United Kingdom',
+        'court_jurisdiction': 'the courts of England and Wales',
+        'non_compete_note': (
+            'Note: Under English law, restrictive covenants must be **reasonable in scope, '
+            'duration, and geography** to be enforceable. Overly broad non-compete clauses '
+            'are routinely struck down. Founders are advised to keep restrictions narrow '
+            'and consult counsel on enforceability.'
+        ),
+        'tax_note': (
+            '- Consider EMI (Enterprise Management Incentive) scheme for tax-efficient equity grants.\n'
+            '- Be aware of HMRC employment-related securities reporting obligations.\n'
+            '- SEIS/EIS qualification may be relevant for early-stage fundraising.'
+        ),
+        'specific_recommendations': [
+            'File necessary forms with Companies House for any share issuance or transfer.',
+            'Consider executing a Shareholders Agreement alongside this Founders Agreement.',
+            'Obtain HMRC valuation for tax purposes if granting equity at less than market value.',
+            'Ensure compliance with the Companies Act 2006 statutory requirements.',
+        ],
+    },
+    'other': {
+        'label': 'Other / International',
+        'currency_symbol': '$',
+        'currency_code': 'USD',
+        'company_form': '[Specify your company form, e.g., LLC, Pvt Ltd, GmbH, etc.]',
+        'governing_law': '[the laws of your jurisdiction — to be specified]',
+        'companies_act': '[Applicable company law — to be specified]',
+        'arbitration_act': '[Applicable arbitration law — to be specified]',
+        'arbitration_seat': '[City, Country to be specified]',
+        'court_jurisdiction': '[Courts of competent jurisdiction in your location]',
+        'non_compete_note': (
+            'Note: Enforceability of non-compete and restrictive covenants varies '
+            'significantly by jurisdiction. Founders are strongly advised to consult '
+            'local counsel on what restrictions are valid and reasonable in their location.'
+        ),
+        'tax_note': (
+            '- Founders should consult local tax counsel on the tax implications of equity grants, '
+            'vesting, and share transfers in their specific jurisdiction.'
+        ),
+        'specific_recommendations': [
+            'Consult local counsel to adapt this template to your jurisdiction.',
+            'Ensure compliance with local company law and registration requirements.',
+            'Execute a separate IP Assignment Agreement under local law.',
+            'Address local stamp duty, registration, and notarization requirements.',
+        ],
+    },
+}
 
-**Between:** {founder_a_name} and {founder_b_name}
-**Company:** {company_name}
-**Date:** {date}
 
----
+def _get_jurisdiction_config(jurisdiction: str) -> Dict[str, Any]:
+    """Get jurisdiction-specific configuration, defaulting to 'other'."""
+    return JURISDICTION_CONFIG.get((jurisdiction or 'other').lower(), JURISDICTION_CONFIG['other'])
 
-## 1. Equity Allocation
 
-The Founders agree to the following equity distribution:
+def _format_currency(amount: float, jurisdiction: str) -> str:
+    """Format a currency amount with the appropriate symbol for the jurisdiction."""
+    config = _get_jurisdiction_config(jurisdiction)
+    return f"{config['currency_symbol']}{amount:,.0f}"
 
-| Stakeholder | Equity Percentage |
-|---------|-------------------|
-| {founder_a_name} | {founder_a_percent}% |
-| {founder_b_name} | {founder_b_percent}% |
 
-**Total:** 100%
-
----
-
-## 2. Vesting Schedule
-
-{vesting_description}
-
-{advisor_vesting_section}
-
----
-
-## 3. Roles & Responsibilities
-
-### {founder_a_name} ({founder_a_role})
-{founder_a_responsibilities}
-
-### {founder_b_name} ({founder_b_role})
-{founder_b_responsibilities}
-
----
-
-## 4. Capital Contributions
-
-{capital_details}
-
----
-
-## 5. Intellectual Property
-
-{ip_statement}
-
----
-
-## 6. Decision Making
-
-Major decisions affecting the company shall require mutual agreement between the Founders. This includes but is not limited to:
-- Raising capital or taking on debt
-- Hiring or terminating key employees
-- Entering into significant contracts
-- Changing the company's direction or business model
-- Dissolution of the company
-
----
-
-## 7. Dispute Resolution
-
-Any disputes arising between the Founders shall be resolved through:
-1. Good faith negotiation between the parties
-2. Mediation by a mutually agreed third party
-3. Binding arbitration under the rules of {jurisdiction}
-
----
-
-## 8. Confidentiality
-
-Both Founders agree to maintain confidentiality regarding:
-- Company trade secrets and proprietary information
-- Business strategies and plans
-- Financial information
-- Customer and partner data
-
----
-
-## 9. Non-Compete
-
-During the term of this agreement and for a period of 12 months following departure, Founders agree not to:
-- Start or join a competing business
-- Solicit company employees or contractors
-- Solicit company customers or partners
-
----
-
-## 10. Termination
-
-This agreement may be terminated by:
-- Mutual written consent of both Founders
-- Material breach by either party
-- Death or permanent incapacity of a Founder
-- Dissolution of the company
-
----
-
-## Appendix A: Calculation Breakdown
-
-{calculation_breakdown_table}
-
----
-
-## Signatures
-
-By signing below, both Founders acknowledge that they have read, understood, and agree to the terms of this Co-Founder Agreement.
-
-**{founder_a_name}**
-Signature: _________________________
-Date: _____________
-
-**{founder_b_name}**
-Signature: _________________________
-Date: _____________
-
----
-
-*DISCLAIMER: This document is a template intended to facilitate discussion between co-founders. It is NOT a legally binding contract. We strongly recommend consulting with a qualified attorney before finalizing any legal agreements.*
-"""
+def _format_jurisdiction_recommendations(jurisdiction: str) -> str:
+    """Build the jurisdiction-specific recommendations list."""
+    config = _get_jurisdiction_config(jurisdiction)
+    items = '\n'.join(f"- {rec}" for rec in config['specific_recommendations'])
+    return items
 
 
 def _format_vesting_description(vesting_terms: Dict[str, Any]) -> str:
@@ -277,7 +292,11 @@ def generate_mmd_document(
     workspace_title: str
 ) -> str:
     """
-    Generate comprehensive co-founder agreement document in MMD (Markdown) format.
+    Generate comprehensive Founders' Agreement template document in MMD (Markdown) format.
+
+    Generates a jurisdiction-aware template (US, India, UK, or Other) with prominent
+    "DRAFT — FOR DISCUSSION & LEGAL REVIEW" disclaimers, jurisdiction-specific
+    provisions, and a "Before You Sign" checklist.
     
     Args:
         scenario: The approved equity scenario
@@ -443,11 +462,17 @@ def generate_mmd_document(
     founder_a_time_formatted = format_time_commitment(founder_a_time)
     founder_b_time_formatted = format_time_commitment(founder_b_time)
     
-    # Format capital table
-    capital_table = f"""| Founder | Cash (USD) | Assets/IP | Loans/Guarantees | Total Value (USD) |
+    # Get jurisdiction config for currency, governing law, etc.
+    jurisdiction = vesting_terms.get('jurisdiction', 'other')
+    juris_cfg = _get_jurisdiction_config(jurisdiction)
+    currency_symbol = juris_cfg['currency_symbol']
+    currency_code = juris_cfg['currency_code']
+    
+    # Format capital table (jurisdiction-aware currency)
+    capital_table = f"""| Founder | Cash ({currency_code}) | Assets/IP | Loans/Guarantees | Total Value ({currency_code}) |
 |---------|------------|-----------|------------------|------------------|
-| {founder_a_name} | ${founder_a_capital:,.0f} | [Assets/IP value] | [Loans/Guarantees] | ${founder_a_capital:,.0f} |
-| {founder_b_name} | ${founder_b_capital:,.0f} | [Assets/IP value] | [Loans/Guarantees] | ${founder_b_capital:,.0f} |"""
+| {founder_a_name} | {currency_symbol}{founder_a_capital:,.0f} | [Assets/IP value] | [Loans/Guarantees] | {currency_symbol}{founder_a_capital:,.0f} |
+| {founder_b_name} | {currency_symbol}{founder_b_capital:,.0f} | [Assets/IP value] | [Loans/Guarantees] | {currency_symbol}{founder_b_capital:,.0f} |"""
     
     if founder_a_capital == 0 and founder_b_capital == 0:
         capital_table = "No initial capital contributions have been made by either Founder at the time of this agreement."
@@ -505,25 +530,51 @@ def generate_mmd_document(
 """
     
     # Build comprehensive document
-    document = f"""# CO-FOUNDER AGREEMENT
+    document = f"""# FOUNDERS' AGREEMENT
 
-**THIS AGREEMENT** is made on this {day_str} day of {month_str}, {year_str} (the "Effective Date")
+> ## ⚠️ DRAFT — FOR DISCUSSION & LEGAL REVIEW
+>
+> **This is a starting-point template** generated from the questionnaire responses provided by the Founders. It is intended to facilitate structured discussion and to serve as the basis for a formal legal agreement.
+>
+> **This document is NOT a legally binding contract on its own.** To be legally enforceable, this agreement must be:
+> 1. **Reviewed and adapted by qualified legal counsel** in your jurisdiction ({juris_cfg['label']});
+> 2. **Properly executed** by all Founders in accordance with applicable law (including, where required, on stamp paper, with witnesses, or before a notary);
+> 3. **Filed or registered** with the relevant authorities where required (e.g., Companies House, Registrar of Companies, Secretary of State).
+>
+> Bracketed placeholders such as `[Number]`, `[Address]`, or `[X]` indicate fields that must be completed by the Founders before execution.
 
 ---
 
-## EQUITY ALLOCATION SUMMARY
+## PART I — KEY TERMS AT A GLANCE
 
-**The equity in the Company is allocated as follows:**
+| Item | Detail |
+|------|--------|
+| **Effective Date** | {date_str} |
+| **Company (working name)** | {workspace_title or '[Company Name]'} |
+| **Jurisdiction** | {juris_cfg['label']} |
+| **Proposed Company Form** | {juris_cfg['company_form']} |
+| **Business Stage** | {business_stage_formatted} |
+| **Currency** | {currency_code} ({currency_symbol}) |
 
-| Stakeholder | Equity Percentage |
-|---------|-------------------|
+### Equity Allocation
+
+| Stakeholder | Equity % |
+|-------------|----------|
 | **{founder_a_name}** | **{founder_a_percent:.2f}%** |
 | **{founder_b_name}** | **{founder_b_percent:.2f}%** |
 {f"| **{advisor_name}** (Advisor) | **{advisor_percent:.2f}%** |" + chr(10) if advisor_percent > 0 else ""}| **Total** | **100.00%** |
 
-*This equity allocation is based on the approved equity scenario and is subject to the vesting schedule and other terms set forth in this Agreement.*
+### Vesting at a Glance
+
+- **Vesting period:** {vesting_years} years{' (no vesting — all equity fully vested at signing)' if not has_vesting else ''}
+- **Cliff:** {cliff_months} months{'' if has_vesting else ' (n/a)'}
+- **Acceleration:** {acceleration.replace('_', ' ').title() if acceleration and acceleration != 'none' else 'None'}
 
 ---
+
+## PART II — THE AGREEMENT
+
+**THIS FOUNDERS' AGREEMENT** ("Agreement") is made on this {day_str} day of {month_str}, {year_str} (the "**Effective Date**")
 
 **BETWEEN:**
 
@@ -537,7 +588,7 @@ AND
 
 **IN RESPECT OF:**
 
-**{workspace_title or '[COMPANY NAME]'}**, a company having its registered office at [Registered Address] (hereinafter referred to as the "**Company**")
+**{workspace_title or '[COMPANY NAME]'}**, [a {juris_cfg['company_form']} / a company proposed to be incorporated as a {juris_cfg['company_form']}] having its [proposed] registered office at [Registered Address] (hereinafter referred to as the "**Company**").
 
 ---
 
@@ -545,15 +596,15 @@ AND
 
 **WHEREAS:**
 
-A. The Founders have agreed to jointly establish and operate the Company for the purpose of {business_description or '[brief business description]'}.
+A. The Founders have agreed to jointly establish and operate the Company for the purpose of {business_description or '[brief business description]'};
 
-B. The Company is engaged in the business of {business_description or '[detailed business description]'} (hereinafter referred to as the "**Business**").
+B. The Company is engaged (or will engage) in the business of {business_description or '[detailed business description]'} (the "**Business**");
 
-C. The Founders desire to set forth their respective rights, duties, obligations, and the terms governing their relationship with each other and with the Company.
+C. The Founders desire to set forth their respective rights, duties, obligations, and the terms governing their relationship with each other and with the Company;
 
-D. The Founders have agreed to allocate equity in the Company as follows: **{founder_a_name}** shall hold **{founder_a_percent:.2f}%** and **{founder_b_name}** shall hold **{founder_b_percent:.2f}%** of the total equity{f", with **{advisor_percent:.2f}%** allocated to **{advisor_name}** (Advisor)" if advisor_percent > 0 else ""}, subject to the vesting schedule and other terms set forth herein.
+D. The Founders have agreed in principle to allocate equity in the Company as follows: **{founder_a_name}** shall hold **{founder_a_percent:.2f}%** and **{founder_b_name}** shall hold **{founder_b_percent:.2f}%** of the total founding equity{f", with **{advisor_percent:.2f}%** allocated to **{advisor_name}** (Advisor)" if advisor_percent > 0 else ""}, in each case subject to the vesting schedule and other terms set forth herein;
 
-E. This Agreement shall govern the relationship between the Founders and the Company in accordance with the terms and conditions set forth herein.
+E. This Agreement is intended to govern the relationship between the Founders pending (and to be superseded or supplemented by) a formal Shareholders' Agreement, Articles of Association/Incorporation, and any related instruments executed under {juris_cfg['governing_law']}.
 
 **NOW, THEREFORE**, in consideration of the mutual covenants and agreements contained herein and for other good and valuable consideration, the receipt and sufficiency of which are hereby acknowledged, the Parties agree as follows:
 
@@ -568,10 +619,10 @@ The Company shall engage in {business_description or '[detailed description of b
 As of the Effective Date, the Company is at the **{business_stage_formatted}** stage.
 
 ### 1.3 Business Objectives
-The Founders agree to work towards achieving the following key objectives:
-- [Objective 1 - To be specified]
-- [Objective 2 - To be specified]
-- [Objective 3 - To be specified]
+The Founders agree to work in good faith towards the following key objectives:
+- [Objective 1 — to be specified]
+- [Objective 2 — to be specified]
+- [Objective 3 — to be specified]
 
 ---
 
@@ -579,37 +630,39 @@ The Founders agree to work towards achieving the following key objectives:
 
 ### 2.1 Initial Equity Distribution
 
-The equity in the Company shall be allocated among the Founders as follows:
+The founding equity of the Company shall be allocated among the stakeholders as follows:
 
 | Stakeholder | Equity Percentage | Number of Shares |
-|---------|------------------|------------------|
+|-------------|-------------------|------------------|
 | {founder_a_name} | {founder_a_percent:.2f}% | [Number of shares] |
 | {founder_b_name} | {founder_b_percent:.2f}% | [Number of shares] |
-{advisor_equity_row_3col + chr(10) if advisor_equity_row_3col else ""}| **Total** | **100%** | **[Total Authorized Shares]** |
+{advisor_equity_row_3col + chr(10) if advisor_equity_row_3col else ""}| **Total** | **100%** | **[Total Founding Shares]** |
 
 ### 2.2 Basis of Equity Distribution
-The equity split has been determined based on the following factors:
+The equity split has been determined based on a structured assessment of the following factors:
 - Time commitment and availability
 - Capital contribution
 - Domain expertise and technical skills
-- Risk undertaken
+- Risk undertaken (including opportunity cost of leaving employment)
 - Network and connections
-- Idea origination and intellectual property
+- Idea origination and pre-existing intellectual property
 - Roles and responsibilities
 
-**Detailed breakdown is provided in Schedule A (Equity Calculation Matrix).**
+The detailed breakdown is provided in **Schedule A (Equity Calculation Matrix)**.
 
-### 2.3 Authorized Share Capital
-The authorized share capital of the Company is $[Amount] divided into [Number] equity shares of $[Face Value] each.
+### 2.3 Share Capital
+The {('authorized share capital' if jurisdiction in ['us', 'uk'] else 'share capital')} of the Company [is / shall be on incorporation] {currency_symbol}[Amount] divided into [Number] shares of {currency_symbol}[Face Value] each. The Founders agree to subscribe to the shares allocated to them in accordance with Section 2.1 upon incorporation or, if the Company is already incorporated, upon execution of the necessary share-issuance documents.
 
 ### 2.4 Future Dilution
 The Founders acknowledge and agree that their equity percentages may be diluted in the future due to:
-- Employee stock option pools (ESOP)
+- Employee stock option pools (ESOP / EMI / equivalent)
 - Fundraising rounds (angel, seed, venture capital)
-- Strategic advisor grants
-- Convertible instruments (SAFEs, convertible notes)
+- Strategic advisor or director grants
+- Convertible instruments (SAFEs, convertible notes, CCDs, etc.)
 
-Any dilution shall be proportional unless otherwise agreed in writing by all Founders.
+Unless otherwise agreed in writing by all Founders, dilution shall be borne **proportionally** by all existing shareholders.
+
+> 💡 **Note:** Specific share-issuance mechanics, classes of shares (ordinary, preferred, etc.), and pre-emption rights should be detailed in a formal Shareholders' Agreement and the Company's Articles. Founders are advised to consult counsel before issuing any shares to non-founders.
 
 ---
 
@@ -619,16 +672,19 @@ Any dilution shall be proportional unless otherwise agreed in writing by all Fou
 {vesting_schedule}
 {advisor_section}
 ### 3.2 Continuous Service Requirement
-Vesting is contingent upon the Founder's continuous active involvement and service with the Company. Any absence or leave exceeding [30/60/90] days may pause vesting, subject to mutual agreement.
+Vesting is contingent upon each Founder's continuous active involvement and service with the Company. Any leave of absence exceeding [30 / 60 / 90] consecutive days may pause vesting, subject to the mutual agreement of the other Founder(s).
 
 ### 3.3 Forfeiture of Unvested Shares
-If a Founder's relationship with the Company terminates for any reason before full vesting, all unvested shares shall be forfeited and transferred back to the Company or as determined by the Board.
+If a Founder ceases to be actively involved with the Company for any reason before full vesting, all unvested shares shall be forfeited and shall revert to the Company (or to a treasury / pool as agreed) on terms to be set out in a separate share buy-back or transfer instrument.
+
+### 3.4 Tax Considerations
+{('**IMPORTANT — 83(b) Election (US):** If the Company is a US entity and the Founders receive restricted stock subject to vesting, each Founder is strongly advised to file an **83(b) election** with the IRS within **30 days** of stock issuance. Failure to do so can result in significant adverse tax consequences as shares vest.' if jurisdiction == 'us' else 'Founders should consult a tax advisor in their jurisdiction regarding the tax treatment of vesting equity, including any required filings or elections.')}
 
 ---
 
 ## 4. ROLES, RESPONSIBILITIES, AND TIME COMMITMENT
 
-### 4.1 {founder_a_name} - {founder_a_role}
+### 4.1 {founder_a_name} — {founder_a_role}
 
 **Primary Responsibilities:**
 {founder_a_resp_formatted}
@@ -637,10 +693,10 @@ If a Founder's relationship with the Company terminates for any reason before fu
 {founder_a_time_formatted}
 
 **Key Performance Areas:**
-- [KPA 1 - To be specified]
-- [KPA 2 - To be specified]
+- [KPA 1 — to be specified]
+- [KPA 2 — to be specified]
 
-### 4.2 {founder_b_name} - {founder_b_role}
+### 4.2 {founder_b_name} — {founder_b_role}
 
 **Primary Responsibilities:**
 {founder_b_resp_formatted}
@@ -649,328 +705,302 @@ If a Founder's relationship with the Company terminates for any reason before fu
 {founder_b_time_formatted}
 
 **Key Performance Areas:**
-- [KPA 1 - To be specified]
-- [KPA 2 - To be specified]
+- [KPA 1 — to be specified]
+- [KPA 2 — to be specified]
 
-### 4.3 CEO and Leadership
-[Founder A / Founder B / To be determined] shall serve as the Chief Executive Officer (CEO) and shall have final decision-making authority on day-to-day operational matters, subject to Section 7 (Decision-Making).
+### 4.3 Chief Executive Officer
+[{founder_a_name} / {founder_b_name} / To be determined] shall serve as the **Chief Executive Officer (CEO)** of the Company and shall have final decision-making authority on day-to-day operational matters, subject to the Major Decisions reserved in Section 7.
 
-### 4.4 Commitment to Company
-Each Founder agrees to:
-- Devote the agreed time commitment exclusively to the Company's business
-- Not engage in any competing business without prior written consent
-- Prioritize Company matters during the committed hours
-- Maintain regular communication and attendance at meetings
+### 4.4 Commitment to the Company
+Each Founder agrees, during the period of their active engagement with the Company, to:
+- Devote the agreed time commitment to the Company's Business in good faith;
+- Not engage in any business or activity that materially conflicts with their duties to the Company without the prior written consent of the other Founder(s);
+- Maintain regular communication and attend agreed meetings.
 
 ### 4.5 Modification of Roles
-Roles and responsibilities may be modified by mutual written consent of all Founders and documented via amendment to this Agreement.
+Roles, responsibilities, and time commitments may be modified by **mutual written consent** of all Founders and shall be documented as a written amendment to this Agreement.
 
 ---
 
 ## 5. CAPITAL CONTRIBUTIONS
 
 ### 5.1 Initial Capital
-The Founders have made the following capital contributions to the Company:
+The Founders have made (or have agreed to make) the following capital contributions to the Company:
 
 {capital_table}
 
 ### 5.2 Future Capital Requirements
-Any future capital requirements shall be:
-- Discussed and agreed upon by all Founders
-- Contributed proportionally to equity ownership, OR
-- Structured as founder loans with [X]% interest rate and repayment terms
-- Failing agreement, external funding shall be sought
+Any future capital requirements shall be addressed by the Founders in good faith. Possible mechanisms include:
+- Pro-rata cash contributions by the Founders;
+- Founder loans on documented commercial terms (interest rate, repayment schedule);
+- Raising external capital through equity or convertible instruments.
+
+No Founder shall be obligated to contribute additional capital beyond Section 5.1 except by their own written consent.
 
 ### 5.3 Personal Guarantees
-[If applicable] The following Founders have provided personal guarantees for Company obligations:
-- [Founder Name]: [Description of guarantee, amount, institution]
+Where any Founder has provided (or proposes to provide) a personal guarantee in respect of Company obligations, the details shall be set out in **Schedule B** and the Founders shall agree on appropriate compensation, indemnity, or rebalancing.
 
 ### 5.4 Reimbursement
-Founders shall be reimbursed for reasonable business expenses incurred on behalf of the Company, subject to documentation and approval.
+Founders shall be reimbursed for reasonable, documented business expenses incurred on behalf of the Company, in accordance with an expense policy adopted by the Founders.
 
 ---
 
-## 6. INTELLECTUAL PROPERTY RIGHTS
+## 6. INTELLECTUAL PROPERTY
 
-### 6.1 Assignment of IP
-All intellectual property, including but not limited to:
-- Ideas, inventions, and innovations
-- Source code, algorithms, and technical documentation
-- Designs, trademarks, and branding materials
-- Business processes and methodologies
-- Customer data and databases
+> 💡 **Strongly Recommended:** A standalone **IP Assignment Agreement** (sometimes called a Proprietary Information and Inventions Agreement, or PIIA) should be executed by each Founder in favour of the Company. The clauses below set out the parties' intent, but a separate IP assignment is the standard market practice and is more readily enforceable.
 
-created by any Founder in relation to the Business, whether before or after the Effective Date, shall be the **sole and exclusive property of the Company**.
+### 6.1 Assignment of Company IP
+All intellectual property created by any Founder in the course of, or in connection with, the Business — including but not limited to:
+- ideas, inventions, and innovations;
+- source code, algorithms, technical documentation, and architecture;
+- designs, brand assets, trademarks, and copyrighted works;
+- business processes, methodologies, and trade secrets;
+- customer lists, data, and databases;
+
+— shall be the **sole and exclusive property of the Company**, and each Founder hereby assigns (and agrees to formally assign) all right, title, and interest in such intellectual property to the Company.
 
 ### 6.2 Pre-Existing IP
 {_format_ip_statement(startup_context, founder_a_name, founder_b_name)}
 
 ### 6.3 IP Assignment Documentation
-Each Founder agrees to execute all necessary documents, including assignment deeds, to transfer and vest all IP rights in the Company.
+Each Founder agrees to execute, and to procure the execution of, all such further deeds, assignments, and instruments as the Company may reasonably require to perfect the Company's ownership of the intellectual property described in this Section 6.
 
-### 6.4 Work for Hire
-All work product created by Founders during their engagement shall be deemed "work made for hire" under applicable copyright law, with the Company as the author and owner.
-
-### 6.5 Third-Party IP
-Founders warrant that they have not and will not incorporate any third-party intellectual property into the Company's products without proper licenses.
+### 6.4 Third-Party IP and Open Source
+Founders warrant that they have not, and will not, incorporate any third-party intellectual property (including open-source software with restrictive licensing, such as copyleft licenses) into the Company's products without proper licensing and disclosure to the other Founder(s).
 
 ---
 
 ## 7. DECISION-MAKING AND GOVERNANCE
 
 ### 7.1 Day-to-Day Decisions
-Operational decisions within the defined roles and responsibilities of each Founder may be made independently.
+Operational decisions falling within a Founder's defined role and responsibilities (Section 4) may be made by that Founder independently.
 
 ### 7.2 Major Decisions Requiring Unanimous Consent
-The following decisions require the written consent of **all Founders**:
-- Changes to equity structure or issuance of new shares
-- Fundraising, debt financing, or sale of significant assets
-- Hiring or termination of C-level executives
-- Changes to business model or pivot
-- Entry into material contracts exceeding $[Amount]
-- Sale, merger, or acquisition of the Company
-- Admission of new co-founders
-- Amendments to this Agreement
-- Dissolution or winding up of the Company
+The following decisions ("**Major Decisions**") require the prior written consent of **all Founders**:
+- Any change to the equity structure or issuance of new shares;
+- Any fundraising, debt financing, or sale of material assets;
+- Hiring or termination of any C-level executive;
+- Any material change to the business model, strategic direction, or pivot;
+- Entry into any contract with a value exceeding {currency_symbol}[Amount] or a duration exceeding [12] months;
+- Any sale, merger, acquisition, or change of control of the Company;
+- Admission of any new founder or co-founder;
+- Amendment of this Agreement, the Articles, or any Shareholders' Agreement;
+- Voluntary dissolution or winding up of the Company.
 
 ### 7.3 Deadlock Resolution
-In the event of a deadlock on major decisions:
-1. Founders shall engage in good-faith mediation within 15 days
-2. If unresolved, the matter shall be referred to a mutually agreed advisor/mentor
-3. If still unresolved, the matter shall proceed to arbitration per Section 12
+In the event of a genuine deadlock on a Major Decision:
+1. The Founders shall first engage in good-faith direct negotiation for not less than 15 days;
+2. If unresolved, the matter shall be referred to a mutually agreed independent advisor or mediator;
+3. If still unresolved, the matter shall be resolved in accordance with Section 12 (Dispute Resolution).
 
 ### 7.4 Board Composition
-The Board of Directors shall initially consist of:
+Upon incorporation (or if already incorporated), the Board of Directors shall initially consist of:
 - {founder_a_name}
 - {founder_b_name}
-- [Independent Director - if applicable]
+- [Independent Director — if applicable]
 
-Board decisions shall require [simple majority / unanimous] approval.
+Board meeting procedures, quorum, and voting requirements shall be set out in the Articles and any Shareholders' Agreement.
 
 ---
 
 ## 8. COMPENSATION AND BENEFITS
 
-### 8.1 Founder Salaries
-Until the Company achieves [revenue milestone / funding milestone], Founders shall:
-- [Draw no salary / Draw nominal salary of $[Amount] per month]
+### 8.1 Founder Compensation
+Until the Company achieves [a defined revenue or funding milestone], each Founder shall:
+- [Draw no salary / Draw a nominal salary of {currency_symbol}[Amount] per month].
 
-Post-milestone, salaries shall be determined by the Board based on:
-- Company financial position
-- Market benchmarks for similar roles
-- Founder responsibilities and performance
+After such milestone, salaries and benefits shall be determined by the Board (or by unanimous Founder consent) based on:
+- the Company's financial position;
+- market benchmarks for similar roles in the Company's jurisdiction; and
+- each Founder's responsibilities and performance.
 
 ### 8.2 Reimbursements
-All reasonable business expenses shall be reimbursed upon submission of proper documentation.
+All reasonable, documented business expenses shall be reimbursed in accordance with the Company's expense policy.
 
 ### 8.3 Benefits
-Founders shall be entitled to:
-- [Health insurance]
-- [Professional development budget]
-- [Other benefits as approved by Board]
+Founders shall be entitled to such benefits (e.g., health insurance, professional development) as the Founders may unanimously agree from time to time.
 
 ---
 
-## 9. CONFIDENTIALITY AND NON-DISCLOSURE
+## 9. CONFIDENTIALITY
 
 ### 9.1 Confidential Information
-Each Founder acknowledges access to Confidential Information, including:
-- Business plans, strategies, and financial projections
-- Customer and supplier lists
-- Technical specifications and trade secrets
-- Marketing plans and pricing strategies
-- Any information marked or reasonably understood as confidential
+"**Confidential Information**" means any non-public information disclosed by, or learned in the course of working with, the Company or another Founder, including:
+- business plans, strategies, and financial projections;
+- customer, supplier, and investor lists;
+- technical specifications, source code, and trade secrets;
+- marketing plans, pricing, and product roadmaps;
+- any information marked, or reasonably understood to be, confidential.
 
 ### 9.2 Obligations
 Each Founder agrees to:
-- Maintain strict confidentiality during and after termination
-- Use Confidential Information solely for Company purposes
-- Not disclose to any third party without prior written consent
-- Return all confidential materials upon termination
+- maintain strict confidentiality during their engagement with the Company and after it ends;
+- use Confidential Information solely for the purposes of the Business;
+- not disclose Confidential Information to any third party without prior written consent of the other Founder(s);
+- return or securely destroy all Confidential Information upon ceasing involvement with the Company.
 
 ### 9.3 Exceptions
 Confidentiality obligations do not apply to information that:
-- Is publicly available through no breach of this Agreement
-- Was known to Founder before disclosure
-- Is required to be disclosed by law or court order (with notice to Company)
+- is or becomes publicly available without breach of this Agreement;
+- was demonstrably known to the Founder before disclosure;
+- is independently developed without reference to Confidential Information; or
+- is required to be disclosed by law, court order, or competent regulatory authority (with prompt notice to the Company where lawfully permitted).
 
 ### 9.4 Duration
-Confidentiality obligations shall survive for [3/5/7] years after termination of this Agreement or the Founder's relationship with the Company.
+The obligations in this Section 9 shall survive for **[3 / 5] years** after a Founder ceases to be involved with the Company, except that obligations relating to **trade secrets** shall continue for so long as the information remains a trade secret.
 
 ---
 
-## 10. NON-COMPETE AND NON-SOLICITATION
+## 10. NON-SOLICITATION AND NON-COMPETE
 
-### 10.1 Non-Compete
-During the term of this Agreement and for [12/24] months after termination, each Founder agrees not to:
-- Directly or indirectly engage in any competing business
-- Provide services to any competitor
-- Invest in or advise any competing venture
-- Establish a competing business
+> ⚠️ **Jurisdiction-specific note:** {juris_cfg['non_compete_note']}
 
-**Geographic Scope:** [To be specified]  
-**Business Scope:** [Specific industry/market definition]
+### 10.1 Non-Solicitation (Primary Restriction)
+For a period of **[12] months** following the date a Founder ceases to be involved with the Company (the "**Restricted Period**"), such Founder shall not, directly or indirectly:
+- solicit for employment, hire, or engage any then-current employee or contractor of the Company;
+- solicit, divert, or take away any then-current customer, client, or strategic partner of the Company; or
+- induce any supplier or partner to terminate or materially adversely modify its relationship with the Company.
 
-### 10.2 Non-Solicitation
-For [12/24] months after termination, each Founder agrees not to:
-- Solicit or hire any Company employees
-- Solicit or divert any Company customers or clients
-- Induce any suppliers or partners to terminate relationships with Company
+### 10.2 Non-Compete (Reasonable Restriction)
+During the Restricted Period, each Founder agrees not to, directly or indirectly, **engage in a business that is materially competitive** with the Business of the Company within [Geographic Scope]. The Founders acknowledge that this restriction is intended to be the minimum necessary to protect the Company's legitimate interests.
 
-### 10.3 Enforceability
-If any provision is deemed unenforceable, it shall be modified to the minimum extent necessary to make it enforceable.
+> Founders should review this clause with local counsel. In jurisdictions where post-employment non-compete restrictions are not enforceable (e.g., California, India), this Section 10.2 shall not apply, and the parties shall rely on Sections 6 (IP), 9 (Confidentiality), and 10.1 (Non-Solicit).
+
+### 10.3 Reasonableness and Severability
+The Founders acknowledge that the restrictions in this Section 10 are reasonable in scope, duration, and geography. If any restriction is held to be unenforceable, it shall be modified to the minimum extent necessary to make it enforceable, and the remaining restrictions shall continue in full force.
 
 ---
 
 ## 11. FOUNDER DEPARTURE AND EXIT
 
 ### 11.1 Voluntary Resignation
-If a Founder voluntarily resigns:
-- All unvested shares are immediately forfeited
-- Vested shares may be subject to repurchase per Section 11.3
-- Founder must provide [30/60/90] days notice
+A Founder may voluntarily cease their active involvement with the Company by giving the other Founder(s) at least **[60] days' written notice**. On such departure:
+- all unvested shares shall be forfeited (subject to Section 11.4);
+- vested shares shall be subject to the buy-back rights set out in Section 11.3.
 
 ### 11.2 Termination for Cause
-A Founder may be terminated for cause including:
-- Material breach of this Agreement
-- Gross negligence or willful misconduct
-- Criminal conviction
-- Prolonged absence without justification
-- Violation of non-compete or confidentiality
+A Founder's involvement may be terminated by the unanimous written decision of the other Founder(s) for "**Cause**", which means:
+- material and uncured breach of this Agreement;
+- gross negligence, fraud, or wilful misconduct;
+- conviction of an offence involving moral turpitude;
+- material breach of fiduciary duties;
+- prolonged unjustified absence.
 
-Upon termination for cause:
-- All unvested shares are forfeited
-- Company has right to repurchase vested shares at fair market value
+On termination for Cause:
+- all unvested shares are forfeited;
+- the Company may exercise the buy-back rights in Section 11.3 at the **Bad Leaver** valuation.
 
-### 11.3 Share Repurchase (Buy-Sell)
-Upon departure, the Company or remaining Founders shall have the right (but not obligation) to repurchase the departing Founder's vested shares:
+### 11.3 Share Buy-Back
+On a Founder's departure, the Company (or the remaining Founders) shall have the right (but not the obligation) to buy back the departing Founder's vested shares:
 
-**Valuation Method:**
-- Pre-revenue: Lower of (a) original cost or (b) fair market value as determined by independent valuer
-- Post-revenue: [X] times revenue or EBITDA, or fair market value
-
-**Payment Terms:**
-- [Lump sum within 90 days / Installments over 12-24 months]
+- **Valuation:** The price shall be the most recent fair value of the shares as determined by [(a) the most recent priced funding round / (b) an independent valuer / (c) a method to be agreed]. Pre-revenue, the price may be the lower of book value and fair market value.
+- **Payment Terms:** Lump sum within [90] days, or in instalments over [12 / 24] months as the parties may agree.
 
 ### 11.4 Good Leaver vs. Bad Leaver
-**Good Leaver** (death, disability, mutual agreement):
-- Retains all vested shares
-- Accelerated vesting of [X]% of unvested shares
+- **Good Leaver** (death, permanent disability, departure by mutual agreement): retains all vested shares; the Founders may, at their discretion, accelerate vesting of an additional [X]% of unvested shares.
+- **Bad Leaver** (termination for Cause, material breach): forfeits all unvested shares; vested shares may be bought back at the lower of cost and fair value.
 
-**Bad Leaver** (termination for cause, breach):
-- Forfeits unvested shares
-- Vested shares repurchased at lower valuation
-
-### 11.5 Drag-Along Rights
-If [X]% of shareholders agree to sell the Company, minority shareholders (including departed Founders) must also sell on same terms.
-
-### 11.6 Tag-Along Rights
-If majority shareholders sell, minority shareholders have the right (but not obligation) to participate on same terms.
+### 11.5 Drag-Along and Tag-Along
+Drag-along and tag-along rights, anti-dilution rights, rights of first refusal, and other transfer restrictions shall be set out in a formal **Shareholders' Agreement** to be executed alongside or following this Agreement.
 
 ---
 
 ## 12. DISPUTE RESOLUTION
 
 ### 12.1 Good Faith Negotiation
-In the event of any dispute, Founders shall first attempt to resolve through good-faith direct negotiation within 15 days.
+The Founders shall first attempt to resolve any dispute arising out of or in connection with this Agreement through good-faith direct negotiation for a period of at least 15 days.
 
 ### 12.2 Mediation
-If negotiation fails, Founders agree to mediation by a mutually agreed mediator within 30 days. Cost shall be shared equally.
+If negotiation fails, the Founders shall attempt mediation by a mutually agreed mediator. The cost of mediation shall be shared equally.
 
 ### 12.3 Arbitration
-If mediation fails, disputes shall be resolved through arbitration:
-- **Governing Law:** [Applicable jurisdiction's arbitration law]
-- **Seat of Arbitration:** [City, State/Country]
-- **Language:** English
-- **Number of Arbitrators:** [1 / 3]
-- **Arbitral Institution:** [To be specified]
+Any dispute not resolved through mediation shall be referred to and finally resolved by arbitration:
+- **Governing law of arbitration:** {juris_cfg['arbitration_act']};
+- **Seat of arbitration:** {juris_cfg['arbitration_seat']};
+- **Language:** English;
+- **Number of arbitrators:** [1 / 3];
+- **Arbitral institution / rules:** [To be specified — e.g., LCIA, ICC, AAA, MCIA, SIAC].
 
 ### 12.4 Interim Relief
-Either party may seek interim injunctive relief from courts of competent jurisdiction while arbitration is pending.
-
-### 12.5 Costs
-The prevailing party shall be entitled to recovery of reasonable legal costs and arbitration fees.
+Notwithstanding the agreement to arbitrate, either party may seek interim or injunctive relief from a court of competent jurisdiction in respect of breaches of confidentiality, intellectual property, or non-solicitation obligations.
 
 ---
 
 ## 13. REPRESENTATIONS AND WARRANTIES
 
 ### 13.1 Each Founder represents and warrants that:
-- They have full legal capacity to enter into this Agreement
-- This Agreement does not conflict with any existing obligations
-- They have disclosed all relevant information to other Founders
-- All capital contributions are from legitimate sources
-- They have not misrepresented their skills, experience, or connections
+- they have full legal capacity and authority to enter into this Agreement;
+- entering into this Agreement does not breach any other contract, employment obligation, or fiduciary duty owed by them to a third party;
+- they have disclosed all material information relevant to the other Founder(s) and the Company, including any prior agreements relating to the Business;
+- any capital contributions are from lawful sources and made in compliance with applicable laws;
+- they have not knowingly misrepresented their skills, experience, or material connections.
 
 ### 13.2 No Encumbrances
-Founders warrant that their shares are free from any liens, charges, or encumbrances.
+Each Founder warrants that, on issuance, their shares shall be free from any liens, charges, or encumbrances, save as may be expressly disclosed in **Schedule B**.
 
 ---
 
-## 14. GENERAL PROVISIONS
+## 14. JURISDICTION-SPECIFIC PROVISIONS — {juris_cfg['label'].upper()}
 
-### 14.1 Entire Agreement
-This Agreement constitutes the entire understanding between Founders and supersedes all prior discussions, agreements, or understandings.
+### 14.1 Governing Company Law
+The Company is intended to be incorporated as (or is currently) a **{juris_cfg['company_form']}** under {juris_cfg['companies_act']}.
 
-### 14.2 Amendments
-This Agreement may only be amended by written document signed by all Founders.
+### 14.2 Tax and Regulatory Matters
+{juris_cfg['tax_note']}
 
-### 14.3 Severability
-If any provision is found invalid or unenforceable, the remaining provisions shall remain in full force.
+### 14.3 Recommended Companion Steps
+{_format_jurisdiction_recommendations(jurisdiction)}
 
-### 14.4 Waiver
-Failure to enforce any provision shall not constitute a waiver of future enforcement.
-
-### 14.5 Governing Law
-This Agreement shall be governed by and construed in accordance with the laws of [Jurisdiction].
-
-### 14.6 Jurisdiction
-The courts of [City, State] shall have exclusive jurisdiction, subject to arbitration clause.
-
-### 14.7 Notices
-All notices shall be in writing and delivered to the addresses mentioned above or such other address as may be notified.
-
-### 14.8 Counterparts
-This Agreement may be executed in counterparts, each constituting an original.
-
-### 14.9 Successors and Assigns
-This Agreement binds and benefits the parties and their respective heirs, legal representatives, and permitted assigns.
-
-### 14.10 Assignment
-No Founder may assign rights or obligations under this Agreement without written consent of all other Founders.
+> ⚠️ The recommendations above are **not exhaustive** and are no substitute for specific advice from local counsel and a tax advisor.
 
 ---
 
-## 15. MISCELLANEOUS
+## 15. GENERAL PROVISIONS
 
-### 15.1 Compliance with Laws
-Founders shall ensure compliance with:
-- Applicable corporate and company laws
-- Applicable tax laws
-- All applicable labor and employment laws
-- Industry-specific regulations
+### 15.1 Entire Agreement
+This Agreement, together with any Schedules, constitutes the entire understanding between the Founders in respect of its subject matter and supersedes all prior discussions, communications, and agreements (whether oral or written), save for any binding pre-existing confidentiality undertakings.
 
-### 15.2 Insurance
-The Company shall obtain appropriate insurance coverage including:
-- Key person insurance on Founders
-- Directors and Officers (D&O) liability insurance
-- Professional indemnity insurance
+### 15.2 Amendments
+This Agreement may only be amended by a written instrument signed by all Founders.
 
-### 15.3 Financial Records
-The Company shall maintain proper books of accounts and provide quarterly financial statements to all Founders.
+### 15.3 Severability
+If any provision is held invalid or unenforceable by a court or arbitrator of competent jurisdiction, the remaining provisions shall remain in full force, and the parties shall negotiate in good faith to replace the affected provision with one that achieves, to the extent permitted, the original commercial intent.
 
-### 15.4 Annual Review
-This Agreement shall be reviewed annually and updated as necessary by mutual consent.
+### 15.4 Waiver
+A failure or delay by any party to enforce any right under this Agreement shall not constitute a waiver of such right.
+
+### 15.5 Governing Law
+This Agreement shall be governed by, and construed in accordance with, **{juris_cfg['governing_law']}**.
+
+### 15.6 Jurisdiction
+Subject to the arbitration clause in Section 12, **{juris_cfg['court_jurisdiction']}** shall have exclusive jurisdiction in respect of any matter arising out of this Agreement.
+
+### 15.7 Notices
+All notices shall be in writing and delivered to the addresses set out above (or such other address as a party may notify the others). Notices may be served by hand, recognised courier, or email (with delivery receipt).
+
+### 15.8 Counterparts
+This Agreement may be executed in any number of counterparts, including by electronic signature, each of which shall be deemed an original and which together shall constitute one and the same Agreement.
+
+### 15.9 Successors and Assigns
+This Agreement shall bind, and benefit, the parties and their respective heirs, legal representatives, and permitted assigns. No Founder may assign their rights or obligations under this Agreement without the prior written consent of the other Founder(s).
 
 ---
 
-## SCHEDULE A: EQUITY CALCULATION MATRIX
+## SCHEDULE A — EQUITY CALCULATION MATRIX
 
 {calc_table}
 
 ---
 
-## SIGNATURES
+## SCHEDULE B — DISCLOSURES
+
+[Disclosures regarding pre-existing IP, personal guarantees, side projects, conflicting obligations, or other material matters should be set out here.]
+
+---
+
+## ✍️ EXECUTION
+
+> 💡 **Recommended:** Founders should consider executing this Agreement using a reputable e-signature platform (e.g., DocuSign, Dropbox Sign, Adobe Acrobat Sign) to maintain a tamper-evident audit trail. Where local law requires (e.g., stamp duty, notarisation, or wet-ink signatures), follow those requirements.
 
 **IN WITNESS WHEREOF**, the Founders have executed this Agreement on the date first written above.
 
@@ -981,7 +1011,7 @@ Name: {founder_a_name}
 Date: ___________________________  
 Place: ___________________________
 
-Witness 1:  
+Witness:  
 Name: ___________________________  
 Signature: ___________________________  
 Address: ___________________________
@@ -994,30 +1024,51 @@ Name: {founder_b_name}
 Date: ___________________________  
 Place: ___________________________
 
-Witness 1:  
+Witness:  
 Name: ___________________________  
 Signature: ___________________________  
 Address: ___________________________
 
 ---
 
-## NOTARIZATION (Optional but Recommended)
+## ✅ "BEFORE YOU SIGN" CHECKLIST
 
-Notarized before me on this _____ day of ________, {year_str}
+**Both Founders should verify each of these before treating this document as final:**
 
-Notary Public Signature: ___________________________  
-Name: ___________________________  
-Seal:
+- [ ] **Legal review completed** by a qualified lawyer in {juris_cfg['label']}
+- [ ] All `[bracketed placeholders]` have been filled in (addresses, amounts, milestones, etc.)
+- [ ] A **separate IP Assignment Agreement** has been (or will be) executed
+- [ ] A formal **Shareholders' Agreement** is planned or executed (especially before raising external capital)
+- [ ] The Company has been (or will be) properly incorporated and registered
+- [ ] Tax implications have been reviewed with an accountant or tax advisor
+{('- [ ] **83(b) election** filed within 30 days of stock issuance (US Founders ONLY — CRITICAL)' + chr(10)) if jurisdiction == 'us' else ''}{('- [ ] Stamp duty paid as per applicable State Stamp Act (India)' + chr(10)) if jurisdiction == 'india' else ''}{('- [ ] Companies House filings prepared for any share issuance (UK)' + chr(10)) if jurisdiction == 'uk' else ''}- [ ] All Founders have **read and understood** this document in full
+- [ ] Each Founder has had the opportunity to seek **independent legal advice**
+- [ ] All material disclosures (Schedule B) have been completed honestly
 
 ---
 
-**DISCLAIMER:** This document is a template for informational purposes only and does not constitute legal advice. Founders are strongly advised to consult with qualified legal counsel before executing this Agreement. Laws vary by jurisdiction and individual circumstances.
+## 📋 IMPORTANT DISCLAIMER
+
+**This document is a starting-point template** generated by Guild Space based on the questionnaire responses provided by the Founders.
+
+It is intended to:
+- Help Founders structure a productive conversation about equity, roles, and exit;
+- Provide a reasonable starting framework for a legal agreement;
+- Capture the Founders' shared understanding at the time of generation.
+
+It is **NOT**:
+- A substitute for advice from a qualified lawyer in your jurisdiction;
+- A guarantee of legal enforceability — laws vary significantly by jurisdiction and over time;
+- A complete legal solution — a Shareholders' Agreement, IP Assignment, and proper corporate documents are typically also required.
+
+Guild Space and its affiliates make **no warranty** that this document is suitable for your specific circumstances, complies with the laws of your jurisdiction, or will be enforced as drafted. Use of this template is at your own risk. **Always consult qualified legal counsel before executing.**
 
 ---
 
-**Document Version:** 1.0  
-**Last Updated:** {date_str}  
-**Prepared Using:** Founder Match Platform
+**Document Version:** 2.0 (Jurisdiction-Aware)  
+**Generated:** {date_str}  
+**Jurisdiction:** {juris_cfg['label']}  
+**Prepared Using:** Guild Space — Founders' Agreement Template
 """
     
     return document
@@ -1038,7 +1089,7 @@ def generate_docx(document_content: str, founder_a_name: str, founder_b_name: st
     doc = Document()
     
     # Set document properties
-    doc.core_properties.title = "Co-Founder Agreement"
+    doc.core_properties.title = "Founders' Agreement (Draft Template)"
     doc.core_properties.author = f"{founder_a_name} & {founder_b_name}"
     
     # Set default font to Times New Roman (professional legal document font)
