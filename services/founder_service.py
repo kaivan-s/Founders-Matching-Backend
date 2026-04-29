@@ -223,6 +223,12 @@ def get_available_founders(clerk_user_id, filters=None, mode='founders'):
             
         if filters.get('genre'):
             query = query.eq('genre', filters['genre'])
+
+        # Multi-value DB-level filters (preferred over single-value above)
+        if filters.get('stages'):
+            query = query.in_('stage', filters['stages'])
+        if filters.get('genres'):
+            query = query.in_('genre', filters['genres'])
         
         # Order by most recent and fetch initial batch
         # When preferences are set, we fetch more to score them all
@@ -291,59 +297,60 @@ def get_available_founders(clerk_user_id, filters=None, mode='founders'):
                             swiped_combinations.add((swipe['project_id'], swipe['swiped_id']))
             
             
+            # Activation gate: hide projects whose owner has an incomplete
+            # profile so half-empty profiles don't pollute discovery.
+            from services import activation_service
+            from services.profile_service import get_profile_completeness as _completeness_for_founder
+
+            owner_visible_cache = {}
+
+            def _owner_is_visible(owner_founder_row):
+                fid = owner_founder_row.get('id')
+                if fid in owner_visible_cache:
+                    return owner_visible_cache[fid]
+                clerk_id = owner_founder_row.get('clerk_user_id')
+                if not clerk_id:
+                    owner_visible_cache[fid] = False
+                    return False
+                try:
+                    score = _completeness_for_founder(clerk_id).get('score', 0)
+                    visible = score >= activation_service.DISCOVERY_VISIBILITY_THRESHOLD
+                except Exception:
+                    visible = False
+                owner_visible_cache[fid] = visible
+                return visible
+
             # Filter the batch efficiently
             available_projects = []
             for project in all_projects.data:
                 project_id = project['id']
                 project_owner_id = project['founder_id']
-                
+
                 # Skip if project has workspace, has match, or already swiped (left or right)
-                if (project_id not in workspace_project_ids and 
-                    project_id not in matched_project_ids and
-                    (project_id, project_owner_id) not in swiped_combinations):
-                    available_projects.append(project)
+                if not (project_id not in workspace_project_ids and
+                        project_id not in matched_project_ids and
+                        (project_id, project_owner_id) not in swiped_combinations):
+                    continue
+
+                # Activation gate: skip projects whose owner has incomplete profile
+                if not _owner_is_visible(project.get('founder') or {}):
+                    continue
+
+                available_projects.append(project)
         
         
-        # Apply project-level filters (skills, location, looking_for)
+        # Apply richer Python-side filters (verification, interests, time
+        # commitment, location preference, compatibility answers, search).
+        # DB-level filters (search title, stage, genre) were already applied
+        # above; this pass refines further.
         if filters:
-            filtered_projects = []
-            for project in available_projects:
-                founder_info = project.get('founder', {})
-                founder_skills = founder_info.get('skills', [])
-                founder_location = founder_info.get('location', '')
-                founder_looking_for = founder_info.get('looking_for', '')
-                
-                # Filter by skills (founder's skills)
-                if filters.get('skills') and len(filters['skills']) > 0:
-                    if not any(skill in founder_skills for skill in filters['skills']):
-                        continue
-                
-                # Filter by location
-                if filters.get('location'):
-                    location_query = filters['location'].lower()
-                    if location_query not in founder_location.lower():
-                        continue
-                
-                # Filter by looking_for
-                if filters.get('looking_for'):
-                    looking_for_query = filters['looking_for'].lower()
-                    if looking_for_query not in founder_looking_for.lower():
-                        continue
-                
-                # Filter by search (project title/description or founder name)
-                if filters.get('search'):
-                    search_query = filters['search'].lower()
-                    project_title = (project.get('title') or '').lower()
-                    project_desc = (project.get('description') or '').lower()
-                    founder_name = (founder_info.get('name') or '').lower()
-                    if (search_query not in project_title and 
-                        search_query not in project_desc and 
-                        search_query not in founder_name):
-                        continue
-                
-                filtered_projects.append(project)
-            
-            available_projects = filtered_projects
+            from services import discovery_filter_service
+            available_projects = [
+                p for p in available_projects
+                if discovery_filter_service.apply_python_filters(
+                    p, p.get('founder') or {}, filters
+                )
+            ]
         
         # Format projects as founder-like objects for UI compatibility
         # Each project becomes a separate card
@@ -455,6 +462,44 @@ def get_available_founders(clerk_user_id, filters=None, mode='founders'):
                     has_access = False
                     access_status = 'no_access'
             
+            # Compute verification tier for the founder card badge
+            try:
+                from services.verification_service import compute_verification_tier, VERIFICATION_TIERS
+                tier_name = compute_verification_tier(founder_info)
+                tier_info = VERIFICATION_TIERS[tier_name]
+                li_data = founder_info.get('linkedin_data') or {}
+                gh_data = founder_info.get('github_data') or {}
+                
+                public_linkedin = {
+                    'verified': True,
+                    'name': li_data.get('name'),
+                    'picture': li_data.get('picture'),
+                } if founder_info.get('linkedin_verified') else {'verified': False}
+                
+                public_github = {
+                    'verified': True,
+                    'login': gh_data.get('login'),
+                    'public_repos': gh_data.get('public_repos'),
+                    'followers': gh_data.get('followers'),
+                    'account_age_years': gh_data.get('account_age_years'),
+                } if founder_info.get('github_verified') else {'verified': False}
+                
+                verification_summary = {
+                    'tier': tier_name,
+                    'tier_level': tier_info['level'],
+                    'tier_label': tier_info['label'],
+                    'tier_badge': tier_info['badge'],
+                    'linkedin': public_linkedin,
+                    'github': public_github,
+                }
+            except Exception:
+                verification_summary = {
+                    'tier': 'UNVERIFIED',
+                    'tier_badge': None,
+                    'linkedin': {'verified': False},
+                    'github': {'verified': False},
+                }
+
             formatted_result = {
                 'id': project['id'],  # Use project ID as unique ID
                 'founder_id': founder_info.get('id'),  # Keep original founder ID for swiping
@@ -466,6 +511,7 @@ def get_available_founders(clerk_user_id, filters=None, mode='founders'):
                 'profile_picture_url': founder_info.get('profile_picture_url'),
                 'linkedin_url': founder_info.get('linkedin_url'),
                 'website_url': founder_info.get('website_url'),
+                'verification': verification_summary,
                 'projects': [{
                     'id': project.get('id'),
                     'title': project.get('title', 'Untitled Project'),

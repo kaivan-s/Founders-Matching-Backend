@@ -68,6 +68,17 @@ def send_message(clerk_user_id, match_id, content):
     
     response = supabase.table('messages').insert(message_data).execute()
     message = response.data[0] if response.data else None
+
+    # Activation: FIRST_MESSAGE_SENT (idempotent)
+    if message:
+        try:
+            from services import activation_service
+            activation_service.record_milestone(
+                current_user_id, activation_service.Milestone.FIRST_MESSAGE_SENT,
+                {'match_id': match_id, 'message_id': message.get('id')},
+            )
+        except Exception:
+            pass
     
     # Create notification for the recipient if workspace exists
     if message and workspace_id:

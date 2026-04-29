@@ -98,29 +98,61 @@ def get_public_profile(founder_id: str, viewer_clerk_user_id: Optional[str] = No
     Get a founder's public profile (for viewing by others)
     
     Excludes sensitive fields like email, clerk_user_id, etc.
+    Includes verification tier + public-safe verification signals so other
+    founders see badges when browsing.
     """
+    from services.verification_service import compute_verification_tier, VERIFICATION_TIERS
+
     supabase = get_supabase()
-    
+
     profile = supabase.table('founders').select('''
-        id, name, location, skills,
+        id, name, location, skills, email,
         headline, bio, interests, expertise_details, past_projects,
         work_preferences, looking_for_description,
-        linkedin_url, linkedin_verified, twitter_url, portfolio_url, github_url,
+        linkedin_url, linkedin_verified, linkedin_data,
+        github_verified, github_data,
+        twitter_url, portfolio_url, github_url,
         profile_picture_url, purpose, created_at
     ''').eq('id', founder_id).execute()
-    
+
     if not profile.data:
         raise ValueError("Profile not found")
-    
+
     founder = profile.data[0]
-    
-    # Get their active projects count (public metric)
+
+    # Active projects count (public metric)
     projects = supabase.table('projects').select('id', count='exact').eq(
         'founder_id', founder_id
     ).eq('is_active', True).eq('is_deleted', False).execute()
-    
-    return {
-        **founder,
+
+    # Compute verification tier from raw signals
+    tier_name = compute_verification_tier(founder)
+    tier_info = VERIFICATION_TIERS[tier_name]
+
+    # Strip sensitive bits from linkedin/github_data before surfacing publicly
+    li_data = founder.get('linkedin_data') or {}
+    gh_data = founder.get('github_data') or {}
+
+    public_linkedin = {
+        'verified': bool(founder.get('linkedin_verified')),
+        'name': li_data.get('name'),
+        'picture': li_data.get('picture'),
+    } if founder.get('linkedin_verified') else None
+
+    public_github = {
+        'verified': bool(founder.get('github_verified')),
+        'login': gh_data.get('login'),
+        'public_repos': gh_data.get('public_repos'),
+        'followers': gh_data.get('followers'),
+        'account_age_years': gh_data.get('account_age_years'),
+        'top_languages': gh_data.get('top_languages'),
+        'total_stars': gh_data.get('total_stars'),
+    } if founder.get('github_verified') else None
+
+    # Strip private fields from the response payload
+    response = {k: v for k, v in founder.items() if k not in {'email', 'linkedin_data', 'github_data'}}
+
+    response.update({
         'headline': founder.get('headline') or '',
         'bio': founder.get('bio') or '',
         'interests': founder.get('interests') or [],
@@ -129,7 +161,16 @@ def get_public_profile(founder_id: str, viewer_clerk_user_id: Optional[str] = No
         'work_preferences': founder.get('work_preferences') or {},
         'looking_for_description': founder.get('looking_for_description') or '',
         'active_projects_count': projects.count or 0,
-    }
+        'verification': {
+            'tier': tier_name,
+            'tier_level': tier_info['level'],
+            'tier_label': tier_info['label'],
+            'tier_badge': tier_info['badge'],
+            'linkedin': public_linkedin,
+            'github': public_github,
+        },
+    })
+    return response
 
 
 def update_profile(clerk_user_id: str, data: Dict[str, Any]) -> Dict[str, Any]:

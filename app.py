@@ -11,6 +11,8 @@ from utils.rate_limit import init_rate_limiter, RATE_LIMITS
 from config.database import get_supabase
 from services import founder_service, project_service, swipe_service, profile_service, match_service, waitlist_service, message_service, payment_service, workspace_service, task_service
 from services import plan_service, subscription_service, document_service, feedback_service, advanced_search_service, advisor_service, admin_service, feed_service, project_access_service
+from services import linkedin_service, github_service, verification_service
+from services import founder_date_service, video_service, activation_service
 from services.notification_service import NotificationService, ApprovalService
 
 app = Flask(__name__)
@@ -71,6 +73,17 @@ def health_check():
         "message": "API is running successfully"
     })
 
+@app.route('/api/discovery/filter-options', methods=['GET'])
+def discovery_filter_options():
+    """Return available values for each discovery filter (for picker UIs)."""
+    try:
+        from services import discovery_filter_service
+        return jsonify(discovery_filter_service.get_filter_options()), 200
+    except Exception as e:
+        log_error("Error getting discovery filter options", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route('/api/founders', methods=['GET'])
 def get_founders():
     """Get founders for swiping (excludes current user and already swiped)"""
@@ -78,24 +91,16 @@ def get_founders():
         clerk_user_id = get_clerk_user_id()
         if not clerk_user_id:
             return jsonify({"error": "User ID required", "received_headers": [k for k, v in request.headers]}), 401
-        
-        # Get and validate filter parameters from query string
-        filters = {
-            'skills': sanitize_list(request.args.getlist('skills'), max_items=20),  # Max 20 skills
-            'location': sanitize_string(request.args.get('location', ''), max_length=200),
-            'project_stage': validate_enum(request.args.get('project_stage', ''), 
-                                         ['idea', 'mvp', 'early_revenue', 'scaling', '']),
-            'looking_for': sanitize_string(request.args.get('looking_for', ''), max_length=100),
-            'search': sanitize_string(request.args.get('search', ''), max_length=200),
-            'genre': sanitize_string(request.args.get('genre', ''), max_length=50),
-            'limit': validate_integer(request.args.get('limit', 20), min_value=1, max_value=100),
-            'offset': validate_integer(request.args.get('offset', 0), min_value=0),
-            'preferences': sanitize_string(request.args.get('preferences', ''), max_length=5000)
-        }
-        
+
+        # Parse + validate filters via the centralized helper. Supports new
+        # multi-value filters (stages, genres, interests), verification tier,
+        # time/location preferences, and compatibility-answer matching.
+        from services import discovery_filter_service
+        filters = discovery_filter_service.parse_discovery_filters(request.args)
+
         # Validate mode parameter
         mode = validate_enum(request.args.get('mode', 'projects'), ['projects', 'founders'], case_sensitive=False) or 'projects'
-        
+
         founders = founder_service.get_available_founders(clerk_user_id, filters, mode=mode)
         return jsonify(founders)
     except ValueError as e:
@@ -241,7 +246,14 @@ def save_onboarding():
                 return jsonify({"error": "Failed to create founder"}), 500
             
             founder_id = result.data[0]['id']
-            
+
+            # Activation: SIGNED_UP + PROFILE_STARTED on first onboarding
+            try:
+                activation_service.record_milestone(founder_id, activation_service.Milestone.SIGNED_UP)
+                activation_service.record_milestone(founder_id, activation_service.Milestone.PROFILE_STARTED)
+            except Exception:
+                pass
+
             # Add projects if provided - batch insert for efficiency
             if data.get('projects'):
                 project_rows = []
@@ -413,21 +425,9 @@ def get_projects():
         discover = request.args.get('discover', '').lower() == 'true'
         
         if discover:
-            # Return discoverable projects (other users' projects for swiping)
-            filters = {
-                'skills': sanitize_list(request.args.getlist('skills'), max_items=20),
-                'location': sanitize_string(request.args.get('location', ''), max_length=200),
-                'project_stage': validate_enum(request.args.get('project_stage', ''), 
-                                             ['idea', 'mvp', 'early_revenue', 'scaling', '']),
-                'looking_for': sanitize_string(request.args.get('looking_for', ''), max_length=100),
-                'search': sanitize_string(request.args.get('search', ''), max_length=200),
-                'genre': sanitize_string(request.args.get('genre', ''), max_length=50),
-                'limit': validate_integer(request.args.get('limit', 20), min_value=1, max_value=100),
-                'offset': validate_integer(request.args.get('offset', 0), min_value=0),
-                'preferences': sanitize_string(request.args.get('preferences', ''), max_length=5000)
-            }
-            
-            # Use project mode for discovery
+            # Discoverable projects with the same rich filter set as /api/founders
+            from services import discovery_filter_service
+            filters = discovery_filter_service.parse_discovery_filters(request.args)
             projects = founder_service.get_available_founders(clerk_user_id, filters, mode='projects')
             return jsonify(projects)
         else:
@@ -773,6 +773,69 @@ def get_profile_options():
             "work_preferences": profile_service.get_work_preference_options(),
         }), 200
     except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# ============================================
+# ACTIVATION ROUTES
+# - GET  /api/activation/status         aggregate funnel state + next nudge
+# - GET  /api/activation/bio-templates  curated starter bios
+# - GET  /api/activation/milestones     full milestone history for this user
+# - GET  /api/activation/first-match-coaching/<match_id>  coaching for first match
+# ============================================
+
+@app.route('/api/activation/status', methods=['GET'])
+def get_activation_status():
+    """Get the user's activation funnel state."""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+
+        result = activation_service.get_activation_status(clerk_user_id)
+        return jsonify(result), 200
+    except Exception as e:
+        log_error("Error getting activation status", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/activation/bio-templates', methods=['GET'])
+def get_bio_templates():
+    """Curated starter bios shown during onboarding."""
+    return jsonify({"templates": activation_service.get_bio_templates()}), 200
+
+
+@app.route('/api/activation/milestones', methods=['GET'])
+def list_activation_milestones():
+    """Full ordered milestone history for the current user."""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+
+        return jsonify({
+            "milestones": activation_service.list_milestones(clerk_user_id),
+            "canonical_order": activation_service.MILESTONE_ORDER,
+        }), 200
+    except Exception as e:
+        log_error("Error listing milestones", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/activation/first-match-coaching/<match_id>', methods=['GET'])
+def get_first_match_coaching(match_id):
+    """Coaching content for a match: deadlines, suggested questions, founder date CTA."""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+
+        result = activation_service.get_first_match_coaching(clerk_user_id, match_id)
+        return jsonify(result), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 404
+    except Exception as e:
+        log_error("Error getting first-match coaching", error=e)
         return jsonify({"error": str(e)}), 500
 
 
@@ -2056,6 +2119,421 @@ def linkedin_revoke():
         return jsonify({"error": str(e)}), 400
     except Exception as e:
         log_error("Error revoking LinkedIn verification", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
+# ============================================
+# FOUNDER IDENTITY VERIFICATION ROUTES
+# LinkedIn + GitHub OAuth verification for founders.
+# Mirrors the advisor flow above but writes to the `founders` table.
+# ============================================
+
+@app.route('/api/founders/verification/status', methods=['GET'])
+def founder_verification_status():
+    """Aggregate verification status (tier + LinkedIn + GitHub)."""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+
+        status = verification_service.get_verification_status(clerk_user_id)
+        return jsonify(status), 200
+    except Exception as e:
+        log_error("Error getting founder verification status", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
+# ---------- LinkedIn (founder) ----------
+
+@app.route('/api/founders/linkedin/status', methods=['GET'])
+def founder_linkedin_status():
+    """LinkedIn-specific status for the current founder."""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+
+        status = linkedin_service.get_founder_linkedin_status(clerk_user_id)
+        return jsonify(status), 200
+    except Exception as e:
+        log_error("Error getting founder LinkedIn status", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/founders/linkedin/connect', methods=['GET'])
+def founder_linkedin_connect():
+    """Initiate LinkedIn OAuth flow for a founder."""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+
+        if not linkedin_service.is_linkedin_configured():
+            return jsonify({
+                "error": "LinkedIn verification is not yet configured. Please contact support."
+            }), 503
+
+        auth_url, state = linkedin_service.get_linkedin_auth_url(clerk_user_id, role='founder')
+        return jsonify({"auth_url": auth_url, "state": state}), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        log_error("Error initiating founder LinkedIn OAuth", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/founders/linkedin/callback', methods=['POST'])
+def founder_linkedin_callback():
+    """Complete LinkedIn OAuth verification for a founder."""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+
+        data = request.get_json() or {}
+        code = data.get('code')
+        state = data.get('state')
+
+        if not code:
+            return jsonify({"error": "Authorization code required"}), 400
+
+        if state:
+            stored_user_id = linkedin_service.verify_oauth_state(state)
+            if stored_user_id and stored_user_id != clerk_user_id:
+                return jsonify({"error": "Invalid OAuth state"}), 400
+
+        result = linkedin_service.verify_founder_linkedin(clerk_user_id, code)
+        return jsonify(result), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        log_error("Error completing founder LinkedIn verification", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/founders/linkedin/revoke', methods=['POST'])
+def founder_linkedin_revoke():
+    """Revoke LinkedIn verification for a founder."""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+
+        result = linkedin_service.revoke_founder_linkedin(clerk_user_id)
+        return jsonify(result), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        log_error("Error revoking founder LinkedIn verification", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
+# ---------- GitHub (founder) ----------
+# Routes at /api/integrations/github/* to match the registered OAuth callback URL
+
+@app.route('/api/integrations/github/status', methods=['GET'])
+def founder_github_status():
+    """GitHub-specific status for the current founder."""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+
+        status = github_service.get_founder_github_status(clerk_user_id)
+        return jsonify(status), 200
+    except Exception as e:
+        log_error("Error getting founder GitHub status", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/integrations/github/connect', methods=['GET'])
+def founder_github_connect():
+    """Initiate GitHub OAuth flow for a founder."""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+
+        if not github_service.is_github_configured():
+            return jsonify({
+                "error": "GitHub verification is not yet configured. Please contact support."
+            }), 503
+
+        auth_url, state = github_service.get_github_auth_url(clerk_user_id)
+        return jsonify({"auth_url": auth_url, "state": state}), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        log_error("Error initiating founder GitHub OAuth", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/integrations/github/callback', methods=['GET', 'POST'])
+def founder_github_callback():
+    """
+    Complete GitHub OAuth verification for a founder.
+    
+    Supports both:
+    - GET with query params (direct redirect from GitHub)
+    - POST with JSON body (frontend-mediated flow)
+    """
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+
+        # Handle both GET (query params) and POST (JSON body)
+        if request.method == 'GET':
+            code = request.args.get('code')
+            state = request.args.get('state')
+        else:
+            data = request.get_json() or {}
+            code = data.get('code')
+            state = data.get('state')
+
+        if not code:
+            return jsonify({"error": "Authorization code required"}), 400
+
+        if state:
+            stored_user_id = github_service.verify_oauth_state(state)
+            if stored_user_id and stored_user_id != clerk_user_id:
+                return jsonify({"error": "Invalid OAuth state"}), 400
+
+        result = github_service.verify_founder_github(clerk_user_id, code)
+        return jsonify(result), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        log_error("Error completing founder GitHub verification", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/integrations/github/revoke', methods=['POST'])
+def founder_github_revoke():
+    """Revoke GitHub verification for a founder."""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+
+        result = github_service.revoke_founder_github(clerk_user_id)
+        return jsonify(result), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        log_error("Error revoking founder GitHub verification", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
+# ============================================
+# FOUNDER DATE ROUTES
+# Structured 3-stage co-founder evaluation flow.
+# - GET    /api/founder-dates/stages         static stage definitions (prompts)
+# - GET    /api/founder-dates                 list current user's founder dates
+# - POST   /api/founder-dates                 start a founder date with another founder
+# - GET    /api/founder-dates/<id>            full state, calls, evaluations, next action
+# - POST   /api/founder-dates/<id>/schedule   schedule a call for current stage
+# - POST   /api/founder-dates/<id>/abandon    end the founder date early
+# - POST   /api/founder-dates/calls/<call_id>/start      mark call as IN_PROGRESS
+# - POST   /api/founder-dates/calls/<call_id>/complete   mark call as COMPLETED
+# - POST   /api/founder-dates/calls/<call_id>/evaluate   submit post-call evaluation
+# - PUT    /api/founders/cal-settings         update Cal.com username + event type
+# ============================================
+
+@app.route('/api/founder-dates/stages', methods=['GET'])
+def founder_date_stages():
+    """Return static stage definitions (used by frontend to render prompts)."""
+    return jsonify({"stages": founder_date_service.get_stage_definitions()}), 200
+
+
+@app.route('/api/founder-dates', methods=['GET'])
+def list_founder_dates():
+    """List founder dates for the current user."""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+
+        result = founder_date_service.list_founder_dates(clerk_user_id)
+        return jsonify({"founder_dates": result}), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        log_error("Error listing founder dates", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/founder-dates', methods=['POST'])
+def create_founder_date():
+    """Start (or fetch existing) founder date with another founder."""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+
+        data = request.get_json() or {}
+        other_founder_id = data.get('other_founder_id')
+        if not other_founder_id:
+            return jsonify({"error": "other_founder_id required"}), 400
+
+        result = founder_date_service.get_or_create_founder_date(
+            clerk_user_id,
+            other_founder_id,
+            match_id=data.get('match_id'),
+            project_id=data.get('project_id'),
+        )
+        return jsonify(result), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        log_error("Error creating founder date", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/founder-dates/<founder_date_id>', methods=['GET'])
+def get_founder_date(founder_date_id):
+    """Get full state of a founder date (calls, evaluations, next action)."""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+
+        result = founder_date_service.get_founder_date_detail(clerk_user_id, founder_date_id)
+        return jsonify(result), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 404
+    except Exception as e:
+        log_error("Error getting founder date", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/founder-dates/<founder_date_id>/schedule', methods=['POST'])
+def schedule_founder_date_call(founder_date_id):
+    """Schedule the next call for the founder date's current stage."""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+
+        data = request.get_json() or {}
+        result = founder_date_service.schedule_call(
+            clerk_user_id,
+            founder_date_id,
+            scheduled_at=data.get('scheduled_at'),
+            cal_booking_id=data.get('cal_booking_id'),
+            cal_booking_url=data.get('cal_booking_url'),
+        )
+        return jsonify(result), 201
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        log_error("Error scheduling founder date call", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/founder-dates/<founder_date_id>/abandon', methods=['POST'])
+def abandon_founder_date_route(founder_date_id):
+    """Abandon a founder date (either founder can do this)."""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+
+        result = founder_date_service.abandon_founder_date(clerk_user_id, founder_date_id)
+        return jsonify(result), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        log_error("Error abandoning founder date", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/founder-dates/calls/<call_id>/start', methods=['POST'])
+def start_founder_date_call(call_id):
+    """Mark a call as IN_PROGRESS and return the room URL."""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+
+        result = founder_date_service.start_call(clerk_user_id, call_id)
+        return jsonify(result), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        log_error("Error starting founder date call", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/founder-dates/calls/<call_id>/complete', methods=['POST'])
+def complete_founder_date_call(call_id):
+    """Mark a call as COMPLETED."""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+
+        result = founder_date_service.complete_call(clerk_user_id, call_id)
+        return jsonify(result), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        log_error("Error completing founder date call", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/founder-dates/calls/<call_id>/evaluate', methods=['POST'])
+def evaluate_founder_date_call(call_id):
+    """Submit post-call evaluation. Triggers stage transition if both submitted."""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+
+        data = request.get_json() or {}
+        vibe_rating = data.get('vibe_rating')
+        continue_decision = data.get('continue_decision')
+        if vibe_rating is None or continue_decision is None:
+            return jsonify({"error": "vibe_rating and continue_decision required"}), 400
+
+        result = founder_date_service.submit_evaluation(
+            clerk_user_id,
+            call_id,
+            vibe_rating=int(vibe_rating),
+            continue_decision=continue_decision,
+            working_style_score=data.get('working_style_score'),
+            communication_score=data.get('communication_score'),
+            alignment_score=data.get('alignment_score'),
+            private_notes=data.get('private_notes'),
+        )
+        return jsonify(result), 201
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        log_error("Error submitting founder date evaluation", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/founders/cal-settings', methods=['PUT'])
+def update_cal_settings():
+    """Update the founder's Cal.com username, event type, and timezone."""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+
+        data = request.get_json() or {}
+        result = founder_date_service.update_cal_settings(
+            clerk_user_id,
+            cal_username=data.get('cal_username'),
+            cal_event_type_id=data.get('cal_event_type_id'),
+            timezone_str=data.get('timezone'),
+        )
+        return jsonify(result), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        log_error("Error updating cal settings", error=e)
         return jsonify({"error": str(e)}), 500
 
 

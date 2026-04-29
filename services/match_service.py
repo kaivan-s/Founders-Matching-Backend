@@ -454,6 +454,17 @@ def respond_to_like(clerk_user_id, swipe_id, response_type):
             
             if match_result.data:
                 match_id = match_result.data[0]['id']
+
+                # Activation: FIRST_MATCH for both founders (idempotent)
+                try:
+                    from services import activation_service
+                    for fid in (current_user_id, swiper_id):
+                        activation_service.record_milestone(
+                            fid, activation_service.Milestone.FIRST_MATCH,
+                            {'match_id': match_id, 'project_id': project_id},
+                        )
+                except Exception:
+                    pass
                 
                 # Calculate and save compatibility score
                 try:

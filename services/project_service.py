@@ -80,6 +80,17 @@ def create_project(clerk_user_id, data):
             ]
     
     response = supabase.table('projects').insert(project_data).execute()
+
+    # Activation: FIRST_PROJECT_CREATED (idempotent)
+    try:
+        from services import activation_service
+        activation_service.record_milestone(
+            founder_id, activation_service.Milestone.FIRST_PROJECT_CREATED,
+            {'project_id': response.data[0].get('id') if response.data else None},
+        )
+    except Exception:
+        pass
+
     return response.data[0]
 
 def update_project(clerk_user_id, project_id, data):

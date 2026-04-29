@@ -39,13 +39,14 @@ def is_linkedin_configured() -> bool:
     return bool(LINKEDIN_CLIENT_ID and LINKEDIN_CLIENT_SECRET and LINKEDIN_REDIRECT_URI)
 
 
-def generate_oauth_state(clerk_user_id: str) -> str:
+def generate_oauth_state(clerk_user_id: str, role: str = 'advisor') -> str:
     """
     Generate a secure state token for OAuth flow.
     Stores the state in database for verification during callback.
     
     Args:
         clerk_user_id: The Clerk user ID initiating the OAuth flow
+        role: 'advisor' or 'founder' - determines which table the callback updates
         
     Returns:
         The generated state token
@@ -55,9 +56,9 @@ def generate_oauth_state(clerk_user_id: str) -> str:
     # Store state in database with expiry (15 minutes)
     supabase = get_supabase()
     
-    # Clean up old states for this user first
+    # Clean up old states for this user (same provider) first
     try:
-        supabase.table('oauth_states').delete().eq('clerk_user_id', clerk_user_id).execute()
+        supabase.table('oauth_states').delete().eq('clerk_user_id', clerk_user_id).eq('provider', f'linkedin_{role}').execute()
     except Exception:
         pass  # Table might not exist yet, will be created on insert
     
@@ -65,7 +66,7 @@ def generate_oauth_state(clerk_user_id: str) -> str:
         supabase.table('oauth_states').insert({
             'state': state,
             'clerk_user_id': clerk_user_id,
-            'provider': 'linkedin',
+            'provider': f'linkedin_{role}',
             'created_at': datetime.now(timezone.utc).isoformat(),
             'expires_at': datetime.now(timezone.utc).isoformat(),  # Will add 15 min in SQL
         }).execute()
@@ -102,12 +103,13 @@ def verify_oauth_state(state: str) -> Optional[str]:
     return None
 
 
-def get_linkedin_auth_url(clerk_user_id: str) -> Tuple[str, str]:
+def get_linkedin_auth_url(clerk_user_id: str, role: str = 'advisor') -> Tuple[str, str]:
     """
     Generate LinkedIn OAuth authorization URL.
     
     Args:
         clerk_user_id: The Clerk user ID initiating the OAuth flow
+        role: 'advisor' or 'founder'
         
     Returns:
         Tuple of (auth_url, state)
@@ -115,7 +117,7 @@ def get_linkedin_auth_url(clerk_user_id: str) -> Tuple[str, str]:
     if not is_linkedin_configured():
         raise ValueError("LinkedIn OAuth is not configured. Please set LINKEDIN_CLIENT_ID, LINKEDIN_CLIENT_SECRET, and LINKEDIN_REDIRECT_URI environment variables.")
     
-    state = generate_oauth_state(clerk_user_id)
+    state = generate_oauth_state(clerk_user_id, role=role)
     
     params = {
         'response_type': 'code',
@@ -312,5 +314,133 @@ def revoke_linkedin_verification(clerk_user_id: str) -> Dict[str, Any]:
         raise ValueError("Failed to update advisor profile")
     
     log_info(f"Advisor {founder_id} LinkedIn verification revoked")
+    
+    return {'success': True, 'linkedin_verified': False}
+
+
+# ============================================================
+# FOUNDER-SIDE FUNCTIONS
+# Mirrors the advisor flow but writes to the `founders` table
+# instead of `advisor_profiles`. The OAuth machinery above is
+# shared by passing role='founder' through generate_oauth_state.
+# ============================================================
+
+def verify_founder_linkedin(clerk_user_id: str, code: str) -> Dict[str, Any]:
+    """
+    Complete LinkedIn verification for a founder.
+    
+    Args:
+        clerk_user_id: The Clerk user ID
+        code: The authorization code from LinkedIn callback
+        
+    Returns:
+        Updated founder verification status
+    """
+    founder_id = _get_founder_id(clerk_user_id)
+    if not founder_id:
+        raise ValueError("User not found")
+    
+    token_data = exchange_code_for_token(code)
+    access_token = token_data.get('access_token')
+    
+    if not access_token:
+        raise ValueError("No access token received from LinkedIn")
+    
+    linkedin_profile = get_linkedin_profile(access_token)
+    
+    linkedin_data = {
+        'sub': linkedin_profile.get('sub'),
+        'name': linkedin_profile.get('name'),
+        'given_name': linkedin_profile.get('given_name'),
+        'family_name': linkedin_profile.get('family_name'),
+        'email': linkedin_profile.get('email'),
+        'email_verified': linkedin_profile.get('email_verified'),
+        'picture': linkedin_profile.get('picture'),
+        'locale': linkedin_profile.get('locale'),
+        'verified_at': datetime.now(timezone.utc).isoformat(),
+    }
+    
+    supabase = get_supabase()
+    
+    result = supabase.table('founders').update({
+        'linkedin_verified': True,
+        'linkedin_verified_at': datetime.now(timezone.utc).isoformat(),
+        'linkedin_data': linkedin_data,
+    }).eq('id', founder_id).execute()
+    
+    if not result.data:
+        raise ValueError("Failed to update founder profile")
+    
+    log_info(f"Founder {founder_id} LinkedIn verified successfully")
+
+    # Activation: LINKEDIN_VERIFIED (idempotent)
+    try:
+        from services import activation_service
+        activation_service.record_milestone(
+            founder_id, activation_service.Milestone.LINKEDIN_VERIFIED,
+            {'linkedin_name': linkedin_data.get('name')},
+        )
+    except Exception:
+        pass
+
+    return {
+        'success': True,
+        'linkedin_verified': True,
+        'linkedin_name': linkedin_data.get('name'),
+        'linkedin_email': linkedin_data.get('email'),
+        'linkedin_email_verified': linkedin_data.get('email_verified'),
+        'linkedin_picture': linkedin_data.get('picture'),
+    }
+
+
+def get_founder_linkedin_status(clerk_user_id: str) -> Dict[str, Any]:
+    """Get LinkedIn verification status for a founder."""
+    founder_id = _get_founder_id(clerk_user_id)
+    if not founder_id:
+        return {'linkedin_verified': False, 'linkedin_configured': is_linkedin_configured()}
+    
+    supabase = get_supabase()
+    
+    try:
+        result = supabase.table('founders').select(
+            'linkedin_verified, linkedin_verified_at, linkedin_data'
+        ).eq('id', founder_id).execute()
+        
+        if result.data:
+            profile = result.data[0]
+            data = profile.get('linkedin_data') or {}
+            return {
+                'linkedin_verified': profile.get('linkedin_verified', False),
+                'linkedin_verified_at': profile.get('linkedin_verified_at'),
+                'linkedin_name': data.get('name'),
+                'linkedin_email': data.get('email'),
+                'linkedin_email_verified': data.get('email_verified'),
+                'linkedin_picture': data.get('picture'),
+                'linkedin_configured': is_linkedin_configured(),
+            }
+    except Exception as e:
+        log_warning(f"Error getting founder LinkedIn status: {e}")
+    
+    return {'linkedin_verified': False, 'linkedin_configured': is_linkedin_configured()}
+
+
+def revoke_founder_linkedin(clerk_user_id: str) -> Dict[str, Any]:
+    """Revoke LinkedIn verification for a founder."""
+    founder_id = _get_founder_id(clerk_user_id)
+    if not founder_id:
+        raise ValueError("User not found")
+    
+    supabase = get_supabase()
+    
+    result = supabase.table('founders').update({
+        'linkedin_verified': False,
+        'linkedin_verified_at': None,
+        'linkedin_data': None,
+    }).eq('id', founder_id).execute()
+    
+    if not result.data:
+        raise ValueError("Failed to update founder profile")
+    
+    log_info(f"Founder {founder_id} LinkedIn verification revoked")
     
     return {'success': True, 'linkedin_verified': False}

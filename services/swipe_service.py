@@ -118,6 +118,12 @@ def create_swipe(clerk_user_id, data):
     
     try:
         response = supabase.table('swipes').insert(swipe_data).execute()
+        # Activation: first-swipe milestone (idempotent)
+        try:
+            from services import activation_service
+            activation_service.record_milestone(swiper_id, activation_service.Milestone.FIRST_SWIPE, {'project_id': project_id})
+        except Exception:
+            pass
     except Exception as e:
         if 'duplicate key value' in str(e):
             existing = supabase.table('swipes').select('*').eq(
