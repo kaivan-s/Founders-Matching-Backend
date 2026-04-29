@@ -2323,22 +2323,47 @@ def founder_github_callback():
     Complete GitHub OAuth verification for a founder.
     
     Supports both:
-    - GET with query params (direct redirect from GitHub)
-    - POST with JSON body (frontend-mediated flow)
+    - GET with query params (direct redirect from GitHub) - redirects to frontend
+    - POST with JSON body (frontend-mediated flow) - returns JSON
     """
+    # Handle GET request (redirect from GitHub)
+    if request.method == 'GET':
+        try:
+            code = request.args.get('code')
+            state = request.args.get('state')
+            error = request.args.get('error')
+            
+            # Handle OAuth errors from GitHub
+            if error:
+                log_error(f"GitHub OAuth error: {error}")
+                return redirect(f"{FRONTEND_URL}/profile")
+            
+            if not code or not state:
+                return redirect(f"{FRONTEND_URL}/profile")
+            
+            # Get user ID from state (not from headers - this is a redirect from GitHub)
+            clerk_user_id = github_service.verify_oauth_state(state)
+            
+            if not clerk_user_id:
+                return redirect(f"{FRONTEND_URL}/profile")
+            
+            # Verify the GitHub account
+            result = github_service.verify_founder_github(clerk_user_id, code)
+            return redirect(f"{FRONTEND_URL}/profile")
+            
+        except Exception as e:
+            log_error("Error completing GitHub verification via redirect", error=e)
+            return redirect(f"{FRONTEND_URL}/profile")
+    
+    # Handle POST request (frontend-mediated flow)
     try:
         clerk_user_id = get_clerk_user_id()
         if not clerk_user_id:
             return jsonify({"error": "User ID required"}), 401
 
-        # Handle both GET (query params) and POST (JSON body)
-        if request.method == 'GET':
-            code = request.args.get('code')
-            state = request.args.get('state')
-        else:
-            data = request.get_json() or {}
-            code = data.get('code')
-            state = data.get('state')
+        data = request.get_json() or {}
+        code = data.get('code')
+        state = data.get('state')
 
         if not code:
             return jsonify({"error": "Authorization code required"}), 400
