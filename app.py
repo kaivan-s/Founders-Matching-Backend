@@ -35,8 +35,8 @@ CORS(app, resources={
 # Initialize rate limiter
 limiter = init_rate_limiter(app)
 
-# Frontend URL for OAuth redirects
-FRONTEND_URL = os.getenv('FRONTEND_URL', 'https://guild-space.co')
+# Frontend URL for OAuth redirects (strip trailing slash to avoid //profile)
+FRONTEND_URL = os.getenv('FRONTEND_URL', 'https://guild-space.co').rstrip('/')
 
 # Clear request-scoped cache after each request
 @app.after_request
