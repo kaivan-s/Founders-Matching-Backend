@@ -297,29 +297,6 @@ def get_available_founders(clerk_user_id, filters=None, mode='founders'):
                             swiped_combinations.add((swipe['project_id'], swipe['swiped_id']))
             
             
-            # Activation gate: hide projects whose owner has an incomplete
-            # profile so half-empty profiles don't pollute discovery.
-            from services import activation_service
-            from services.profile_service import get_profile_completeness as _completeness_for_founder
-
-            owner_visible_cache = {}
-
-            def _owner_is_visible(owner_founder_row):
-                fid = owner_founder_row.get('id')
-                if fid in owner_visible_cache:
-                    return owner_visible_cache[fid]
-                clerk_id = owner_founder_row.get('clerk_user_id')
-                if not clerk_id:
-                    owner_visible_cache[fid] = False
-                    return False
-                try:
-                    score = _completeness_for_founder(clerk_id).get('score', 0)
-                    visible = score >= activation_service.DISCOVERY_VISIBILITY_THRESHOLD
-                except Exception:
-                    visible = False
-                owner_visible_cache[fid] = visible
-                return visible
-
             # Filter the batch efficiently
             available_projects = []
             for project in all_projects.data:
@@ -330,10 +307,6 @@ def get_available_founders(clerk_user_id, filters=None, mode='founders'):
                 if not (project_id not in workspace_project_ids and
                         project_id not in matched_project_ids and
                         (project_id, project_owner_id) not in swiped_combinations):
-                    continue
-
-                # Activation gate: skip projects whose owner has incomplete profile
-                if not _owner_is_visible(project.get('founder') or {}):
                     continue
 
                 available_projects.append(project)
