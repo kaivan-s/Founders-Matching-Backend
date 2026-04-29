@@ -2094,37 +2094,34 @@ def linkedin_unified_callback():
         if error:
             error_desc = request.args.get('error_description', 'LinkedIn authorization failed')
             log_error(f"LinkedIn OAuth error: {error} - {error_desc}")
-            # Redirect to profile page with error
-            return redirect(f"{FRONTEND_URL}/profile?linkedin_error={error_desc}")
+            return redirect(f"{FRONTEND_URL}/profile")
         
         if not code:
-            return redirect(f"{FRONTEND_URL}/profile?linkedin_error=No authorization code received")
+            return redirect(f"{FRONTEND_URL}/profile")
         
         if not state:
-            return redirect(f"{FRONTEND_URL}/profile?linkedin_error=Invalid state parameter")
+            return redirect(f"{FRONTEND_URL}/profile")
         
         # Verify state and get role
         clerk_user_id, role = linkedin_service.verify_oauth_state_with_role(state)
         
         if not clerk_user_id:
-            return redirect(f"{FRONTEND_URL}/profile?linkedin_error=Invalid or expired OAuth state")
+            return redirect(f"{FRONTEND_URL}/profile")
         
         # Call appropriate verification based on role
         if role == 'founder':
             result = linkedin_service.verify_founder_linkedin(clerk_user_id, code)
-            # Redirect to founder profile verification tab
-            return redirect(f"{FRONTEND_URL}/profile?tab=verification&linkedin_success=true")
+            return redirect(f"{FRONTEND_URL}/profile")
         else:
             result = linkedin_service.verify_advisor_linkedin(clerk_user_id, code)
-            # Redirect to advisor dashboard
-            return redirect(f"{FRONTEND_URL}/advisor/dashboard?linkedin_success=true")
+            return redirect(f"{FRONTEND_URL}/advisor/dashboard")
             
     except ValueError as e:
         log_error(f"LinkedIn callback ValueError: {e}")
-        return redirect(f"{FRONTEND_URL}/profile?linkedin_error={str(e)}")
+        return redirect(f"{FRONTEND_URL}/profile")
     except Exception as e:
         log_error("Error completing LinkedIn verification", error=e)
-        return redirect(f"{FRONTEND_URL}/profile?linkedin_error=Verification failed")
+        return redirect(f"{FRONTEND_URL}/profile")
 
 
 @app.route('/api/advisors/linkedin/callback', methods=['POST'])
