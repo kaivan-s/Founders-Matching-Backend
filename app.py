@@ -9,7 +9,7 @@ from utils.validation import sanitize_string, validate_integer, sanitize_list, v
 from utils.logger import log_error, log_warning, log_info
 from utils.rate_limit import init_rate_limiter, RATE_LIMITS
 from config.database import get_supabase
-from services import founder_service, project_service, swipe_service, profile_service, match_service, waitlist_service, message_service, payment_service, workspace_service, task_service
+from services import founder_service, project_service, swipe_service, profile_service, match_service, waitlist_service, message_service, payment_service, workspace_service
 from services import plan_service, subscription_service, document_service, feedback_service, advanced_search_service, advisor_service, admin_service, feed_service, project_access_service
 from services import linkedin_service, github_service, verification_service
 from services import founder_date_service, video_service, activation_service
@@ -1851,117 +1851,6 @@ def notification_preferences():
         
     except Exception as e:
         log_error("Error with notification preferences", error=e)
-        return jsonify({"error": str(e)}), 500
-
-# Task Board Endpoints
-@app.route('/api/workspaces/<workspace_id>/tasks', methods=['GET'])
-def get_workspace_tasks(workspace_id):
-    """Get all tasks for a workspace"""
-    try:
-        clerk_user_id = get_clerk_user_id()
-        if not clerk_user_id:
-            return jsonify({"error": "User ID required"}), 401
-        
-        owner_filter = request.args.get('owner')  # 'me', 'other', or None for all
-        link_filter = request.args.get('link')  # 'kpi', 'decision', or None for all
-        
-        tasks = task_service.get_tasks(clerk_user_id, workspace_id, owner_filter, link_filter)
-        return jsonify(tasks)
-    except ValueError as e:
-        return jsonify({"error": str(e)}), 400
-    except Exception as e:
-        log_error("Error getting tasks", error=e)
-        return jsonify({"error": str(e)}), 500
-
-@app.route('/api/workspaces/<workspace_id>/tasks', methods=['POST'])
-def create_workspace_task(workspace_id):
-    """Create a new task"""
-    try:
-        clerk_user_id = get_clerk_user_id()
-        if not clerk_user_id:
-            return jsonify({"error": "User ID required"}), 401
-        
-        data = request.get_json()
-        task = task_service.create_task(clerk_user_id, workspace_id, data)
-        return jsonify(task), 201
-    except ValueError as e:
-        return jsonify({"error": str(e)}), 400
-    except Exception as e:
-        log_error("Error creating task", error=e)
-        return jsonify({"error": str(e)}), 500
-
-@app.route('/api/workspaces/<workspace_id>/tasks/<task_id>', methods=['PATCH'])
-def update_workspace_task(workspace_id, task_id):
-    """Update a task"""
-    try:
-        clerk_user_id = get_clerk_user_id()
-        if not clerk_user_id:
-            return jsonify({"error": "User ID required"}), 401
-        
-        data = request.get_json()
-        task = task_service.update_task(clerk_user_id, workspace_id, task_id, data)
-        return jsonify(task)
-    except ValueError as e:
-        return jsonify({"error": str(e)}), 400
-    except Exception as e:
-        log_error("Error updating task", error=e)
-        return jsonify({"error": str(e)}), 500
-
-@app.route('/api/workspaces/<workspace_id>/tasks/<task_id>', methods=['DELETE'])
-def delete_workspace_task(workspace_id, task_id):
-    """Delete a task"""
-    try:
-        clerk_user_id = get_clerk_user_id()
-        if not clerk_user_id:
-            return jsonify({"error": "User ID required"}), 401
-        
-        task_service.delete_task(clerk_user_id, workspace_id, task_id)
-        return jsonify({"message": "Task deleted"}), 200
-    except ValueError as e:
-        return jsonify({"error": str(e)}), 400
-    except Exception as e:
-        log_error("Error deleting task", error=e)
-        return jsonify({"error": str(e)}), 500
-
-@app.route('/api/workspaces/<workspace_id>/task-metrics', methods=['GET'])
-def get_task_metrics(workspace_id):
-    """Get task metrics for investor reporting"""
-    try:
-        clerk_user_id = get_clerk_user_id()
-        if not clerk_user_id:
-            return jsonify({"error": "User ID required"}), 401
-        
-        from_date = request.args.get('from')
-        to_date = request.args.get('to')
-        
-        metrics = task_service.get_task_metrics(clerk_user_id, workspace_id, from_date, to_date)
-        return jsonify(metrics)
-    except ValueError as e:
-        return jsonify({"error": str(e)}), 400
-    except Exception as e:
-        log_error("Error getting task metrics", error=e)
-        return jsonify({"error": str(e)}), 500
-
-@app.route('/api/workspaces/<workspace_id>/tasks/completed-for-week', methods=['GET'])
-def get_completed_tasks_for_week(workspace_id):
-    """Get completed tasks for a specific week (for check-ins)"""
-    try:
-        clerk_user_id = get_clerk_user_id()
-        if not clerk_user_id:
-            return jsonify({"error": "User ID required"}), 401
-        
-        week_start = request.args.get('week_start')
-        week_end = request.args.get('week_end')
-        
-        if not week_start or not week_end:
-            return jsonify({"error": "week_start and week_end parameters required"}), 400
-        
-        tasks = task_service.get_completed_tasks_for_week(clerk_user_id, workspace_id, week_start, week_end)
-        return jsonify(tasks)
-    except ValueError as e:
-        return jsonify({"error": str(e)}), 400
-    except Exception as e:
-        log_error("Error getting completed tasks", error=e)
         return jsonify({"error": str(e)}), 500
 
 # ==================== ADVISOR ENDPOINTS ====================

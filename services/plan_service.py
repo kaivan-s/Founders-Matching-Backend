@@ -11,48 +11,48 @@ FOUNDER_PLANS: Dict[FounderPlan, Dict[str, Any]] = {
     "FREE": {
         "id": "FREE",
         "monthlyPriceUSD": 0,
-        "maxWorkspaces": 1,
-        "maxProjects": 1,
+        "yearlyPriceUSD": 0,
+        "maxWorkspacesCreated": 1,  # Can create 1 workspace
+        "maxWorkspacesJoined": "UNLIMITED",  # Can join unlimited (for virality)
+        "maxProjects": 2,
         "discovery": {
-            "maxSwipesPerMonth": 5,
-            "maxAccessRequestsPerMonth": 3,
-            "showCompatDimensions": False,
+            "maxSwipesPerDay": 25,  # Daily limit, more generous
+            "maxAccessRequestsPerMonth": 10,
         },
         "workspaceFeatures": {
             "equityFull": False,
             "kpiFull": True,
             "decisionsFull": True,
-            "tasksBoard": False,
             "weeklyCheckins": True,
             "notifications": True,
-            "slackIntegration": False,
+            "slackIntegration": True,  # Keep for virality
             "notionIntegration": False,
             "summaryDashboard": False,
         },
         "accountability": {
-            "canUseMarketplace": False,
-            "priorityAdvisors": False,
+            "canUseMarketplace": True,  # Can view and use marketplace
         },
         "investorFeatures": {
-            "advancedCompatAnalytics": False,
+            # Placeholder - to be built
             "investorProfile": False,
+            "advancedCompatAnalytics": False,
         },
     },
     "PRO": {
         "id": "PRO",
-        "monthlyPriceUSD": 19,
-        "maxWorkspaces": 3,
-        "maxProjects": 5,
+        "monthlyPriceUSD": 12,
+        "yearlyPriceUSD": 99,  # ~17% discount
+        "maxWorkspacesCreated": 3,
+        "maxWorkspacesJoined": "UNLIMITED",
+        "maxProjects": 10,
         "discovery": {
-            "maxSwipesPerMonth": "UNLIMITED",
+            "maxSwipesPerDay": "UNLIMITED",
             "maxAccessRequestsPerMonth": "UNLIMITED",
-            "showCompatDimensions": True,
         },
         "workspaceFeatures": {
-            "equityFull": True,
+            "equityFull": False,  # Equity only in PRO_PLUS
             "kpiFull": True,
             "decisionsFull": True,
-            "tasksBoard": True,
             "weeklyCheckins": True,
             "notifications": True,
             "slackIntegration": True,
@@ -61,51 +61,68 @@ FOUNDER_PLANS: Dict[FounderPlan, Dict[str, Any]] = {
         },
         "accountability": {
             "canUseMarketplace": True,
-            "priorityAdvisors": False,
         },
         "investorFeatures": {
-            "advancedCompatAnalytics": False,
+            # Placeholder - to be built
             "investorProfile": False,
+            "advancedCompatAnalytics": False,
         },
     },
     "PRO_PLUS": {
         "id": "PRO_PLUS",
-        "monthlyPriceUSD": 39,
-        "maxWorkspaces": "UNLIMITED",
+        "monthlyPriceUSD": 29,
+        "yearlyPriceUSD": 249,  # ~28% discount
+        "maxWorkspacesCreated": "UNLIMITED",
+        "maxWorkspacesJoined": "UNLIMITED",
         "maxProjects": "UNLIMITED",
         "discovery": {
-            "maxSwipesPerMonth": "UNLIMITED",
+            "maxSwipesPerDay": "UNLIMITED",
             "maxAccessRequestsPerMonth": "UNLIMITED",
-            "showCompatDimensions": True,
         },
         "workspaceFeatures": {
-            "equityFull": True,
+            "equityFull": True,  # Equity only in PRO_PLUS
             "kpiFull": True,
             "decisionsFull": True,
-            "tasksBoard": True,
             "weeklyCheckins": True,
             "notifications": True,
             "slackIntegration": True,
             "notionIntegration": True,
             "summaryDashboard": True,
-            "prioritySupport": True,
         },
         "accountability": {
             "canUseMarketplace": True,
-            "priorityAdvisors": True,
         },
         "investorFeatures": {
-            "advancedCompatAnalytics": True,
+            # Placeholder - to be built (PRO_PLUS will get all investor features when built)
             "investorProfile": True,
+            "advancedCompatAnalytics": True,
         },
     },
 }
 
 ADVISOR_PRICING = {
-    "projectAcceptanceFeeUSD": 69,  # One-time fee to accept a project
+    "projectAcceptanceFeeUSD": 29,  # Reduced from $69, refundable if no value in 30 days
+    "tiers": {
+        "JUNIOR": {
+            "minMonthlyRateUSD": 50,
+            "maxMonthlyRateUSD": 250,
+            "platformFeePercent": 25,
+        },
+        "STANDARD": {
+            "minMonthlyRateUSD": 250,
+            "maxMonthlyRateUSD": 1000,
+            "platformFeePercent": 20,
+        },
+        "SENIOR": {
+            "minMonthlyRateUSD": 1000,
+            "maxMonthlyRateUSD": 5000,
+            "platformFeePercent": 15,
+        },
+    },
+    # Legacy flat values for backward compatibility
     "minMonthlyRateUSD": 50,
-    "maxMonthlyRateUSD": 150,
-    "platformFeePercent": 25,
+    "maxMonthlyRateUSD": 5000,  # Expanded from 150
+    "platformFeePercent": 20,  # Default to middle tier
 }
 
 def _get_founder_id(clerk_user_id: str, email: str = None) -> str:
@@ -337,28 +354,46 @@ def check_workspace_feature_access(workspace_id: str, feature_path: str) -> bool
     
     return bool(value) if value is not None else False
 
-def check_workspace_limit(clerk_user_id: str) -> tuple[bool, int, int]:
+def check_workspace_limit(clerk_user_id: str, is_creating: bool = True) -> tuple[bool, int, int]:
     """
-    Check if user can create more workspaces.
-    Returns: (can_create, current_count, max_allowed)
+    Check if user can create or join more workspaces.
+    
+    Args:
+        clerk_user_id: User's Clerk ID
+        is_creating: True if creating a new workspace, False if joining an existing one
+        
+    Returns: (can_create_or_join, current_count, max_allowed)
     """
     founder_id = _get_founder_id(clerk_user_id)
     supabase = get_supabase()
     
     plan_config = get_founder_plan(clerk_user_id)
-    max_workspaces = plan_config.get('maxWorkspaces', 1)
     
-    # Count active workspaces
-    workspaces = supabase.table('workspace_participants').select('workspace_id').eq('user_id', founder_id).execute()
-    unique_workspaces = set()
-    if workspaces.data:
-        for wp in workspaces.data:
-            unique_workspaces.add(wp['workspace_id'])
+    # Use new structure if available, fallback to legacy
+    if is_creating:
+        max_workspaces = plan_config.get('maxWorkspacesCreated', plan_config.get('maxWorkspaces', 1))
+    else:
+        max_workspaces = plan_config.get('maxWorkspacesJoined', plan_config.get('maxWorkspaces', 1))
     
-    current_count = len(unique_workspaces)
-    can_create = current_count < max_workspaces
+    if max_workspaces == "UNLIMITED":
+        return (True, 0, -1)  # -1 means unlimited
     
-    return (can_create, current_count, max_workspaces)
+    if is_creating:
+        # Count workspaces created by this user
+        workspaces = supabase.table('workspaces').select('id', count='exact').eq('created_by', founder_id).execute()
+        current_count = workspaces.count if workspaces.count is not None else 0
+    else:
+        # Count all workspaces user is part of (for joining limit)
+        workspaces = supabase.table('workspace_participants').select('workspace_id').eq('user_id', founder_id).execute()
+        unique_workspaces = set()
+        if workspaces.data:
+            for wp in workspaces.data:
+                unique_workspaces.add(wp['workspace_id'])
+        current_count = len(unique_workspaces)
+    
+    can_proceed = current_count < max_workspaces
+    
+    return (can_proceed, current_count, max_workspaces)
 
 
 def check_project_limit(clerk_user_id: str) -> tuple[bool, int, int]:
@@ -386,19 +421,41 @@ def check_project_limit(clerk_user_id: str) -> tuple[bool, int, int]:
 
 def check_discovery_limit(clerk_user_id: str) -> tuple[bool, int, int]:
     """
-    Check if user can perform more discovery swipes using 30-day rolling window.
+    Check if user can perform more discovery swipes.
+    Uses daily limits for FREE tier, unlimited for paid tiers.
     Returns: (can_swipe, current_count, max_allowed)
     """
     founder_id = _get_founder_id(clerk_user_id)
     supabase = get_supabase()
     
     plan_config = get_founder_plan(clerk_user_id)
-    max_swipes = plan_config.get('discovery', {}).get('maxSwipesPerMonth', 3)
+    discovery_config = plan_config.get('discovery', {})
+    
+    # Check for daily limit first (new structure)
+    max_swipes_per_day = discovery_config.get('maxSwipesPerDay')
+    if max_swipes_per_day is not None:
+        if max_swipes_per_day == "UNLIMITED":
+            return (True, 0, -1)  # -1 means unlimited
+        
+        # Use daily window
+        now = datetime.now(timezone.utc)
+        today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        
+        # Count right swipes today from swipe_history table
+        swipe_count_result = supabase.table('swipe_history').select('id', count='exact').eq('user_id', founder_id).eq('swipe_type', 'right').gte('swipe_date', today_start.isoformat()).execute()
+        
+        current_count = swipe_count_result.count if swipe_count_result.count is not None else 0
+        can_swipe = current_count < max_swipes_per_day
+        
+        return (can_swipe, current_count, max_swipes_per_day)
+    
+    # Fallback to monthly limit (legacy structure)
+    max_swipes = discovery_config.get('maxSwipesPerMonth', 5)
     
     if max_swipes == "UNLIMITED":
         return (True, 0, -1)  # -1 means unlimited
     
-    # Use 30-day rolling window instead of calendar month
+    # Use 30-day rolling window
     now = datetime.now(timezone.utc)
     thirty_days_ago = now - timedelta(days=30)
     
@@ -406,7 +463,6 @@ def check_discovery_limit(clerk_user_id: str) -> tuple[bool, int, int]:
     swipe_count_result = supabase.table('swipe_history').select('id', count='exact').eq('user_id', founder_id).eq('swipe_type', 'right').gte('swipe_date', thirty_days_ago.isoformat()).execute()
     
     # Fallback to discovery_usage ONLY if swipe_history count is None (table doesn't exist or query failed)
-    # A count of 0 is valid (user has made no swipes), so don't fallback in that case
     if swipe_count_result.count is None:
         # Try legacy discovery_usage table
         month_year = now.strftime('%Y-%m')
@@ -525,9 +581,9 @@ def update_founder_plan(clerk_user_id: str, new_plan: FounderPlan, subscription_
     # Check if this is a downgrade that would exceed workspace limits
     is_downgrade = not _is_upgrade(old_plan, new_plan) and old_plan != new_plan
     if is_downgrade:
-        # This is a downgrade - check workspace limits
+        # This is a downgrade - check workspace limits (only for created workspaces)
         new_plan_config = FOUNDER_PLANS.get(new_plan, FOUNDER_PLANS['FREE'])
-        max_workspaces = new_plan_config.get('maxWorkspaces', 1)
+        max_workspaces = new_plan_config.get('maxWorkspacesCreated', new_plan_config.get('maxWorkspaces', 1))
         
         # Get user's current workspaces with more details
         workspaces_query = supabase.table('workspace_participants').select(
@@ -734,16 +790,33 @@ def renew_advisor_subscription(clerk_user_id: str) -> Dict[str, Any]:
     
     return get_advisor_billing_profile(clerk_user_id)
 
+def get_advisor_tier(monthly_rate_usd: int) -> str:
+    """Determine advisor tier based on monthly rate"""
+    tiers = ADVISOR_PRICING.get('tiers', {})
+    for tier_name, tier_config in tiers.items():
+        if tier_config['minMonthlyRateUSD'] <= monthly_rate_usd <= tier_config['maxMonthlyRateUSD']:
+            return tier_name
+    return 'STANDARD'  # Default fallback
+
 def calculate_advisor_pricing(monthly_rate_usd: int) -> Dict[str, float]:
-    """Calculate advisor and platform share from monthly rate"""
-    platform_fee_percent = ADVISOR_PRICING['platformFeePercent']
+    """Calculate advisor and platform share from monthly rate using tiered fees"""
+    tier = get_advisor_tier(monthly_rate_usd)
+    tiers = ADVISOR_PRICING.get('tiers', {})
+    
+    # Get tier-specific fee, fallback to default
+    if tier in tiers:
+        platform_fee_percent = tiers[tier]['platformFeePercent']
+    else:
+        platform_fee_percent = ADVISOR_PRICING['platformFeePercent']
+    
     platform_share = monthly_rate_usd * platform_fee_percent / 100
     advisor_share = monthly_rate_usd - platform_share
     
     return {
-        'display_price_usd': round(monthly_rate_usd * 1.25, 2),  # Founder sees this
+        'display_price_usd': round(monthly_rate_usd * (1 + platform_fee_percent / 100), 2),  # Founder sees this (rate + platform fee)
         'advisor_share_usd': round(advisor_share, 2),
         'platform_share_usd': round(platform_share, 2),
         'platform_fee_percent': platform_fee_percent,
+        'tier': tier,
     }
 

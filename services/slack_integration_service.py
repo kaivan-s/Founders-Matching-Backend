@@ -185,6 +185,7 @@ def save_workspace_slack_integration(
                 'checkin_reminders': True,
                 'equity_updates': True,
                 'advisor_activity': True,
+                'chat_messages': True,
             }
         },
         'is_active': True,
@@ -407,7 +408,7 @@ def _post_welcome_message(access_token: str, channel_id: str, workspace_id: str)
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
-                    "text": "This channel is connected to your Guild Space workspace. You'll receive notifications here for:\n\n• 📝 Weekly check-in reminders\n• ⚖️ Equity agreement updates\n• 👥 Advisor activity"
+                    "text": "This channel is connected to your Guild Space workspace. You'll receive notifications here for:\n\n• 💬 New chat messages\n• 📝 Weekly check-in reminders\n• ⚖️ Equity agreement updates\n• 👥 Advisor activity"
                 }
             },
             {
@@ -457,6 +458,7 @@ def send_slack_notification(
         'equity_approved': 'equity_updates',
         'advisor_joined': 'advisor_activity',
         'advisor_update': 'advisor_activity',
+        'chat_message': 'chat_messages',
     }
     
     setting_key = type_mapping.get(notification_type, None)
@@ -610,6 +612,50 @@ def send_advisor_notification(
         return False
     
     return send_slack_notification(workspace_id, message, notification_type='advisor_joined')
+
+
+def send_chat_message_notification(
+    workspace_id: str,
+    sender_name: str,
+    message_content: str
+) -> bool:
+    """Send a notification to Slack when a new chat message is received"""
+    # Truncate long messages for notification preview
+    preview = message_content.strip()
+    if len(preview) > 200:
+        preview = preview[:200] + '...'
+    
+    blocks = [
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"💬 *New message from {sender_name}*\n\n>{preview}"
+            }
+        },
+        {
+            "type": "actions",
+            "elements": [
+                {
+                    "type": "button",
+                    "text": {
+                        "type": "plain_text",
+                        "text": "Open Chat",
+                        "emoji": True
+                    },
+                    "url": f"{FRONTEND_URL}/workspaces/{workspace_id}/chat",
+                    "style": "primary"
+                }
+            ]
+        }
+    ]
+    
+    return send_slack_notification(
+        workspace_id,
+        f"New message from {sender_name}",
+        blocks=blocks,
+        notification_type='chat_message'
+    )
 
 
 def update_notification_settings(

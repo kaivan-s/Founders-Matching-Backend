@@ -104,6 +104,18 @@ def send_message(clerk_user_id, match_id, content):
         except Exception as e:
             # Don't fail message sending if notification creation fails
             pass
+        
+        # Send Slack notification (respects user's notification settings)
+        try:
+            from services import slack_integration_service
+            slack_integration_service.send_chat_message_notification(
+                workspace_id=workspace_id,
+                sender_name=sender_name,
+                message_content=content.strip()
+            )
+        except Exception:
+            # Don't fail message sending if Slack notification fails
+            pass
     
     return message
 
