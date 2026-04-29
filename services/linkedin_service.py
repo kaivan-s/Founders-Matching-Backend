@@ -103,6 +103,40 @@ def verify_oauth_state(state: str) -> Optional[str]:
     return None
 
 
+def verify_oauth_state_with_role(state: str) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Verify an OAuth state token and return both clerk_user_id and role.
+    
+    Args:
+        state: The state token to verify
+        
+    Returns:
+        Tuple of (clerk_user_id, role) if valid, (None, None) otherwise
+        role will be 'advisor' or 'founder'
+    """
+    supabase = get_supabase()
+    
+    try:
+        result = supabase.table('oauth_states').select('clerk_user_id, provider').eq('state', state).execute()
+        
+        if result.data:
+            clerk_user_id = result.data[0]['clerk_user_id']
+            provider = result.data[0].get('provider', '')
+            # Extract role from provider (e.g., 'linkedin_founder' -> 'founder')
+            role = 'advisor'  # default
+            if '_founder' in provider:
+                role = 'founder'
+            elif '_advisor' in provider:
+                role = 'advisor'
+            # Delete the used state
+            supabase.table('oauth_states').delete().eq('state', state).execute()
+            return clerk_user_id, role
+    except Exception as e:
+        log_warning(f"Could not verify OAuth state with role: {e}")
+    
+    return None, None
+
+
 def get_linkedin_auth_url(clerk_user_id: str, role: str = 'advisor') -> Tuple[str, str]:
     """
     Generate LinkedIn OAuth authorization URL.

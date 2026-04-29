@@ -35,6 +35,9 @@ CORS(app, resources={
 # Initialize rate limiter
 limiter = init_rate_limiter(app)
 
+# Frontend URL for OAuth redirects
+FRONTEND_URL = os.getenv('FRONTEND_URL', 'https://guild-space.co')
+
 # Clear request-scoped cache after each request
 @app.after_request
 def clear_request_cache(response):
@@ -2075,9 +2078,58 @@ def linkedin_connect():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route('/api/linkedin/callback', methods=['GET'])
+def linkedin_unified_callback():
+    """
+    Unified LinkedIn OAuth callback that handles both advisors and founders.
+    LinkedIn redirects here with ?code=...&state=...
+    We determine the role from state and call the appropriate service.
+    """
+    try:
+        code = request.args.get('code')
+        state = request.args.get('state')
+        error = request.args.get('error')
+        
+        # Handle OAuth errors from LinkedIn
+        if error:
+            error_desc = request.args.get('error_description', 'LinkedIn authorization failed')
+            log_error(f"LinkedIn OAuth error: {error} - {error_desc}")
+            # Redirect to profile page with error
+            return redirect(f"{FRONTEND_URL}/profile?linkedin_error={error_desc}")
+        
+        if not code:
+            return redirect(f"{FRONTEND_URL}/profile?linkedin_error=No authorization code received")
+        
+        if not state:
+            return redirect(f"{FRONTEND_URL}/profile?linkedin_error=Invalid state parameter")
+        
+        # Verify state and get role
+        clerk_user_id, role = linkedin_service.verify_oauth_state_with_role(state)
+        
+        if not clerk_user_id:
+            return redirect(f"{FRONTEND_URL}/profile?linkedin_error=Invalid or expired OAuth state")
+        
+        # Call appropriate verification based on role
+        if role == 'founder':
+            result = linkedin_service.verify_founder_linkedin(clerk_user_id, code)
+            # Redirect to founder profile verification tab
+            return redirect(f"{FRONTEND_URL}/profile?tab=verification&linkedin_success=true")
+        else:
+            result = linkedin_service.verify_advisor_linkedin(clerk_user_id, code)
+            # Redirect to advisor dashboard
+            return redirect(f"{FRONTEND_URL}/advisor/dashboard?linkedin_success=true")
+            
+    except ValueError as e:
+        log_error(f"LinkedIn callback ValueError: {e}")
+        return redirect(f"{FRONTEND_URL}/profile?linkedin_error={str(e)}")
+    except Exception as e:
+        log_error("Error completing LinkedIn verification", error=e)
+        return redirect(f"{FRONTEND_URL}/profile?linkedin_error=Verification failed")
+
+
 @app.route('/api/advisors/linkedin/callback', methods=['POST'])
 def linkedin_callback():
-    """Complete LinkedIn OAuth verification"""
+    """Complete LinkedIn OAuth verification (legacy POST endpoint)"""
     try:
         clerk_user_id = get_clerk_user_id()
         if not clerk_user_id:
