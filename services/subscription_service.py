@@ -20,8 +20,10 @@ FRONTEND_URL = os.getenv('FRONTEND_URL', 'http://localhost:3000').rstrip('/')
 # Product IDs from Dodo Payments dashboard
 DODO_PRODUCT_PRO_ID = os.getenv('DODO_PRODUCT_PRO_ID')
 DODO_PRODUCT_PRO_PLUS_ID = os.getenv('DODO_PRODUCT_PRO_PLUS_ID')
-DODO_PRODUCT_ADVISOR_PROJECT_ID = os.getenv('DODO_PRODUCT_ADVISOR_PROJECT_ID')
 
+# Advisor "Pro Advisor" subscription products (monthly + yearly billing cycles)
+DODO_PRODUCT_ADVISOR_PRO_MONTHLY_ID = os.getenv('DODO_PRODUCT_ADVISOR_PRO_MONTHLY_ID')
+DODO_PRODUCT_ADVISOR_PRO_YEARLY_ID = os.getenv('DODO_PRODUCT_ADVISOR_PRO_YEARLY_ID')
 # Dodo API base URL
 DODO_API_BASE = 'https://live.dodopayments.com' if DODO_ENVIRONMENT == 'live_mode' else 'https://test.dodopayments.com'
 
@@ -109,76 +111,167 @@ def create_subscription_checkout(clerk_user_id: str, plan_id: str) -> Dict[str, 
         raise ValueError(f"Failed to create checkout session: {error_msg}")
 
 
-def create_advisor_project_accept_checkout(clerk_user_id: str, request_id: str) -> Dict[str, str]:
-    """
-    Create a Dodo Payments checkout session for advisor to accept a project.
-    This is a per-project fee charged each time an advisor accepts a project ($69).
-    
+# ============================================================================
+# Advisor "Pro Advisor" subscription
+# ============================================================================
+#
+# Lifecycle:
+#   Advisor signs up                              -> subscription_status = 'free'
+#   Advisor confirms payment for first booking    -> subscription_status = 'trial'
+#                                                    (30-day grace period set)
+#   Trial ends without subscribing                -> can_accept_bookings becomes
+#                                                    False (soft cutoff via the
+#                                                    `_advisor_can_accept_bookings`
+#                                                    helper). DB status stays 'trial'
+#                                                    until they subscribe or cancel.
+#   Advisor subscribes via Dodo                   -> subscription_status = 'active'
+#   Subscription cancelled / payment fails        -> 'cancelled' / 'past_due'
+
+def create_advisor_subscription_checkout(
+    clerk_user_id: str,
+    billing_cycle: str = 'monthly',
+) -> Dict[str, str]:
+    """Create a Dodo checkout session for an advisor's Pro Advisor subscription.
+
     Args:
-        clerk_user_id: The Clerk user ID
-        request_id: The advisor request ID being accepted
-    
-    Returns:
-        dict: Checkout session data with checkout_url
+        clerk_user_id: The Clerk user ID of the advisor
+        billing_cycle: 'monthly' or 'yearly'
     """
-    if not DODO_API_KEY or not DODO_PRODUCT_ADVISOR_PROJECT_ID:
-        raise ValueError("Dodo Payments API or product ID not configured for advisor project accept.")
-    
+    if not DODO_API_KEY:
+        raise ValueError("Dodo Payments API not configured. Please set DODO_PAYMENTS_API_KEY.")
+
+    if billing_cycle not in ('monthly', 'yearly'):
+        raise ValueError("billing_cycle must be 'monthly' or 'yearly'")
+
+    product_id = (
+        DODO_PRODUCT_ADVISOR_PRO_YEARLY_ID
+        if billing_cycle == 'yearly'
+        else DODO_PRODUCT_ADVISOR_PRO_MONTHLY_ID
+    )
+    if not product_id:
+        raise ValueError(f"Dodo product ID not configured for advisor {billing_cycle} subscription")
+
     supabase = get_supabase()
-    
-    # Get email from founders table
-    profile = supabase.table('founders').select('id, email, name').eq('clerk_user_id', clerk_user_id).execute()
-    
+    profile = supabase.table('founders').select('email, name').eq('clerk_user_id', clerk_user_id).execute()
     if not profile.data:
-        raise ValueError("Profile not found. Please complete your advisor registration first.")
-    
-    user_email = profile.data[0].get('email', '').strip()
+        raise ValueError("Profile not found")
+
+    user_email = profile.data[0].get('email')
     user_name = profile.data[0].get('name', '')
-    
-    # If email is missing, try to get from Clerk
-    if not user_email:
-        try:
-            clerk_email = get_clerk_user_email(clerk_user_id)
-            if clerk_email and clerk_email.strip():
-                user_email = clerk_email.strip()
-                founder_id = profile.data[0].get('id')
-                supabase.table('founders').update({'email': user_email}).eq('id', founder_id).execute()
-        except Exception:
-            pass
-    
-    if not user_email:
-        raise ValueError("Email address is required for checkout.")
-    
-    # Validate email format
-    import re
-    email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
-    if not re.match(email_pattern, user_email):
-        raise ValueError(f"Invalid email address format: {user_email}")
-    
+    if not user_email or '@' not in user_email:
+        user_email = get_clerk_user_email(clerk_user_id)
+    if not user_email or '@' not in user_email:
+        raise ValueError("User email not found. Please complete your profile.")
+
     try:
         client = _get_dodo_client()
-        
         session = client.checkout_sessions.create(
-            product_cart=[{"product_id": DODO_PRODUCT_ADVISOR_PROJECT_ID, "quantity": 1}],
+            product_cart=[{"product_id": product_id, "quantity": 1}],
             customer={
                 "email": user_email,
-                "name": user_name or user_email.split('@')[0]
+                "name": user_name or user_email.split('@')[0],
             },
-            return_url=f"{FRONTEND_URL}/advisor/dashboard?payment=success&request_id={request_id}",
+            return_url=f"{FRONTEND_URL}/advisor/dashboard?advisor_subscription=success&cycle={billing_cycle}",
             metadata={
                 "clerk_user_id": clerk_user_id,
-                "subscription_type": "advisor_project_accept",
-                "request_id": request_id
-            }
+                "subscription_type": "advisor_pro",
+                "billing_cycle": billing_cycle,
+            },
         )
-        
         return {
             "checkout_url": session.checkout_url,
-            "checkout_id": session.session_id
+            "checkout_id": session.session_id,
         }
     except Exception as e:
-        error_msg = str(e)
-        raise ValueError(f"Failed to create checkout session: {error_msg}")
+        raise ValueError(f"Failed to create checkout session: {e}")
+
+
+def cancel_advisor_subscription(clerk_user_id: str) -> Dict[str, Any]:
+    """Cancel an advisor's Pro Advisor subscription in Dodo + mark cancelled in DB.
+
+    The advisor stays listed in the marketplace but `_advisor_can_accept_bookings`
+    will return False until/unless they resubscribe (soft cutoff).
+    """
+    from utils.logger import log_info, log_error, log_warning
+
+    if not DODO_API_KEY:
+        raise ValueError("Dodo Payments API not configured.")
+
+    supabase = get_supabase()
+
+    # Look up the advisor's subscription_id via founder -> advisor_profile
+    founder = supabase.table('founders').select('id').eq('clerk_user_id', clerk_user_id).execute()
+    if not founder.data:
+        raise ValueError("Profile not found")
+    founder_id = founder.data[0]['id']
+
+    profile = supabase.table('advisor_profiles').select(
+        'id, subscription_id, subscription_status'
+    ).eq('user_id', founder_id).execute()
+    if not profile.data:
+        raise ValueError("Advisor profile not found")
+
+    sub_id = profile.data[0].get('subscription_id')
+    if not sub_id:
+        # Already not subscribed; just normalize the status
+        supabase.table('advisor_profiles').update({
+            'subscription_status': 'cancelled',
+        }).eq('id', profile.data[0]['id']).execute()
+        return {"status": "success", "message": "No active subscription to cancel; marked cancelled."}
+
+    # Best-effort cancel in Dodo
+    try:
+        client = _get_dodo_client()
+        client.subscriptions.update(
+            subscription_id=sub_id,
+            status='cancelled',
+        )
+        log_info(f"Cancelled advisor subscription {sub_id} for {clerk_user_id}")
+    except Exception as e:
+        # Don't fail the user-facing call — record locally and let the webhook
+        # reconcile if Dodo cancellation succeeds asynchronously.
+        log_warning(f"Dodo cancellation API call failed (will rely on local status): {e}")
+
+    supabase.table('advisor_profiles').update({
+        'subscription_status': 'cancelled',
+    }).eq('id', profile.data[0]['id']).execute()
+
+    return {"status": "success", "message": "Subscription cancelled."}
+
+
+def _activate_advisor_subscription(
+    clerk_user_id: str,
+    subscription_id: Optional[str],
+    billing_cycle: str,
+) -> None:
+    """Mark the advisor as actively subscribed in the database.
+
+    Used by the payment.succeeded / subscription.active webhook handlers.
+    """
+    from utils.logger import log_info
+
+    supabase = get_supabase()
+
+    founder = supabase.table('founders').select('id').eq('clerk_user_id', clerk_user_id).execute()
+    if not founder.data:
+        return
+    founder_id = founder.data[0]['id']
+
+    # Period: 1 month for monthly, 1 year for yearly
+    if billing_cycle == 'yearly':
+        period_end = datetime.now(timezone.utc) + timedelta(days=365)
+    else:
+        period_end = datetime.now(timezone.utc) + timedelta(days=30)
+
+    update = {
+        'subscription_status': 'active',
+        'subscription_current_period_end': period_end.isoformat(),
+    }
+    if subscription_id:
+        update['subscription_id'] = subscription_id
+
+    supabase.table('advisor_profiles').update(update).eq('user_id', founder_id).execute()
+    log_info(f"Activated advisor subscription for {clerk_user_id} (cycle={billing_cycle})")
 
 
 def cancel_subscription(clerk_user_id: str) -> Dict[str, Any]:
@@ -517,27 +610,23 @@ def handle_payment_succeeded(webhook_data: Dict[str, Any]) -> Dict[str, Any]:
             _log_webhook_success(supabase, payment_id, 'payment.succeeded')
             log_info(f"Plan {plan_id} activated for {clerk_user_id}")
             return {"status": "success", "message": f"Plan {plan_id} activated"}
-            
-        elif subscription_type == 'advisor_project_accept':
-            request_id = metadata.get('request_id')
-            if not request_id:
-                return {"status": "error", "message": "Missing request_id for project accept"}
-            
-            try:
-                supabase.table('advisor_project_payments').insert({
-                    'clerk_user_id': clerk_user_id,
-                    'request_id': request_id,
-                    'order_id': payment_id,
-                    'paid_at': datetime.now(timezone.utc).isoformat(),
-                    'amount_usd': 69
-                }).execute()
-            except Exception:
-                pass
-            
+
+        if subscription_type == 'advisor_pro':
+            billing_cycle = metadata.get('billing_cycle') or 'monthly'
+            # Sometimes billing_cycle isn't in metadata (e.g. renewal); infer from product_id
+            if billing_cycle not in ('monthly', 'yearly'):
+                product_id = data.get('product_id')
+                if product_id == DODO_PRODUCT_ADVISOR_PRO_YEARLY_ID:
+                    billing_cycle = 'yearly'
+                else:
+                    billing_cycle = 'monthly'
+
+            subscription_id = data.get('subscription_id')
+            _activate_advisor_subscription(clerk_user_id, subscription_id, billing_cycle)
             _log_webhook_success(supabase, payment_id, 'payment.succeeded')
-            log_info(f"Project accept payment recorded for {clerk_user_id}, request {request_id}")
-            return {"status": "success", "message": f"Project accept payment recorded"}
-        
+            log_info(f"Advisor Pro ({billing_cycle}) activated for {clerk_user_id}")
+            return {"status": "success", "message": f"Advisor Pro {billing_cycle} activated"}
+
         return {"status": "ignored", "message": f"Unknown subscription type: {subscription_type}"}
         
     except Exception as e:
@@ -549,31 +638,45 @@ def handle_payment_succeeded(webhook_data: Dict[str, Any]) -> Dict[str, Any]:
 def handle_subscription_active(webhook_data: Dict[str, Any]) -> Dict[str, Any]:
     """Handle subscription.active webhook - subscription is now active"""
     from utils.logger import log_info
-    
+
     try:
         data = webhook_data.get('data', {})
         subscription_id = data.get('subscription_id') or data.get('id')
-        
+
         log_info(f"Subscription active: {subscription_id}")
-        
+
         metadata = _extract_metadata(data)
         clerk_user_id = metadata.get('clerk_user_id')
-        
+        subscription_type = metadata.get('subscription_type')
+
         supabase = get_supabase()
-        
+
         # Find user by subscription_id if no clerk_user_id
         if not clerk_user_id and subscription_id:
             founder = supabase.table('founders').select('clerk_user_id').eq('subscription_id', subscription_id).execute()
             if founder.data:
                 clerk_user_id = founder.data[0].get('clerk_user_id')
-        
-        if clerk_user_id:
+
+        # Founder plan activation
+        if subscription_type != 'advisor_pro' and clerk_user_id:
             supabase.table('founders').update({
                 'subscription_status': 'active'
             }).eq('clerk_user_id', clerk_user_id).execute()
-        
+
+        # Advisor Pro subscription activation
+        if subscription_type == 'advisor_pro' and clerk_user_id:
+            cycle = metadata.get('billing_cycle') or 'monthly'
+            _activate_advisor_subscription(clerk_user_id, subscription_id, cycle)
+        elif subscription_id:
+            # No metadata — try matching by subscription_id on advisor_profiles too
+            adv = supabase.table('advisor_profiles').select('user_id').eq('subscription_id', subscription_id).execute()
+            if adv.data:
+                supabase.table('advisor_profiles').update({
+                    'subscription_status': 'active'
+                }).eq('subscription_id', subscription_id).execute()
+
         return {"status": "success", "message": "Subscription activated"}
-        
+
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
@@ -581,25 +684,52 @@ def handle_subscription_active(webhook_data: Dict[str, Any]) -> Dict[str, Any]:
 def handle_subscription_renewed(webhook_data: Dict[str, Any]) -> Dict[str, Any]:
     """Handle subscription.renewed webhook - subscription renewed for next period"""
     from utils.logger import log_info
-    
+
     try:
         data = webhook_data.get('data', {})
         subscription_id = data.get('subscription_id') or data.get('id')
-        
+
         log_info(f"Subscription renewed: {subscription_id}")
-        
+
         supabase = get_supabase()
-        
-        # Update subscription period
-        current_period_end = datetime.now(timezone.utc) + timedelta(days=30)
-        
-        supabase.table('founders').update({
+
+        # Try founder first
+        founder_period_end = datetime.now(timezone.utc) + timedelta(days=30)
+        founder_res = supabase.table('founders').update({
             'subscription_status': 'active',
-            'subscription_current_period_end': current_period_end.isoformat()
+            'subscription_current_period_end': founder_period_end.isoformat()
         }).eq('subscription_id', subscription_id).execute()
-        
+
+        # Also try advisor — billing cycle determines period length
+        advisor = supabase.table('advisor_profiles').select(
+            'id, subscription_current_period_end'
+        ).eq('subscription_id', subscription_id).execute()
+        if advisor.data:
+            # Best-effort: detect cycle by previous period length; default monthly
+            previous_end = advisor.data[0].get('subscription_current_period_end')
+            cycle_days = 30
+            if previous_end:
+                try:
+                    prev = datetime.fromisoformat(str(previous_end).replace('Z', '+00:00'))
+                    if prev.tzinfo is None:
+                        prev = prev.replace(tzinfo=timezone.utc)
+                    delta = prev - (prev - timedelta(days=365))  # placeholder; fallback to 30
+                    # If the previous period was ~yearly (>= 300 days from creation), keep yearly
+                    # Simpler heuristic: default to 30, but use 365 if metadata says yearly
+                    metadata = _extract_metadata(data)
+                    if metadata.get('billing_cycle') == 'yearly':
+                        cycle_days = 365
+                except Exception:
+                    pass
+
+            new_period_end = datetime.now(timezone.utc) + timedelta(days=cycle_days)
+            supabase.table('advisor_profiles').update({
+                'subscription_status': 'active',
+                'subscription_current_period_end': new_period_end.isoformat(),
+            }).eq('subscription_id', subscription_id).execute()
+
         return {"status": "success", "message": "Subscription renewed"}
-        
+
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
@@ -633,28 +763,32 @@ def handle_subscription_updated(webhook_data: Dict[str, Any]) -> Dict[str, Any]:
 def handle_subscription_canceled(webhook_data: Dict[str, Any]) -> Dict[str, Any]:
     """Handle subscription.cancelled webhook"""
     from utils.logger import log_info
-    
+
     try:
         data = webhook_data.get('data', {})
         subscription_id = data.get('subscription_id') or data.get('id')
-        
+
         log_info(f"Subscription canceled: {subscription_id}")
-        
+
         supabase = get_supabase()
-        
-        # Update status to canceled
-        supabase.table('founders').update({
-            'subscription_status': 'canceled'
-        }).eq('subscription_id', subscription_id).execute()
-        
-        # Optionally downgrade to free (depends on business logic)
+
+        # Founder side: downgrade to FREE if matched
         founder = supabase.table('founders').select('clerk_user_id').eq('subscription_id', subscription_id).execute()
         if founder.data:
-            clerk_user_id = founder.data[0]['clerk_user_id']
-            plan_service.update_founder_plan(clerk_user_id, 'FREE')
-        
+            supabase.table('founders').update({
+                'subscription_status': 'canceled'
+            }).eq('subscription_id', subscription_id).execute()
+            plan_service.update_founder_plan(founder.data[0]['clerk_user_id'], 'FREE')
+
+        # Advisor side: mark cancelled (soft cutoff applies via the can_accept_bookings helper)
+        advisor = supabase.table('advisor_profiles').select('id').eq('subscription_id', subscription_id).execute()
+        if advisor.data:
+            supabase.table('advisor_profiles').update({
+                'subscription_status': 'cancelled',
+            }).eq('subscription_id', subscription_id).execute()
+
         return {"status": "success", "message": "Subscription canceled"}
-        
+
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
@@ -662,21 +796,26 @@ def handle_subscription_canceled(webhook_data: Dict[str, Any]) -> Dict[str, Any]
 def handle_subscription_on_hold(webhook_data: Dict[str, Any]) -> Dict[str, Any]:
     """Handle subscription.on_hold webhook - subscription paused due to payment failure"""
     from utils.logger import log_info
-    
+
     try:
         data = webhook_data.get('data', {})
         subscription_id = data.get('subscription_id') or data.get('id')
-        
+
         log_info(f"Subscription on hold: {subscription_id}")
-        
+
         supabase = get_supabase()
-        
+
         supabase.table('founders').update({
             'subscription_status': 'on_hold'
         }).eq('subscription_id', subscription_id).execute()
-        
+
+        # Advisor side: 'past_due' is the closest analog
+        supabase.table('advisor_profiles').update({
+            'subscription_status': 'past_due',
+        }).eq('subscription_id', subscription_id).execute()
+
         return {"status": "success", "message": "Subscription on hold"}
-        
+
     except Exception as e:
         return {"status": "error", "message": str(e)}
 

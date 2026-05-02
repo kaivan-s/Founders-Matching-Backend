@@ -13,6 +13,7 @@ from services import founder_service, project_service, swipe_service, profile_se
 from services import plan_service, subscription_service, document_service, feedback_service, advanced_search_service, advisor_service, admin_service, feed_service, project_access_service
 from services import linkedin_service, github_service, verification_service
 from services import founder_date_service, video_service, activation_service
+from services import consultation_service
 from services.notification_service import NotificationService, ApprovalService
 
 app = Flask(__name__)
@@ -2748,11 +2749,22 @@ def get_advisor_marketplace(workspace_id):
 
 @app.route('/api/workspaces/<workspace_id>/advisors/request', methods=['POST'])
 def create_advisor_request(workspace_id):
-    """Create an advisor request from marketplace"""
+    """Create an advisor request from marketplace.
+
+    Booking advisors requires Pro+ on the founder side.
+    """
     try:
         clerk_user_id = get_clerk_user_id()
         if not clerk_user_id:
             return jsonify({"error": "User ID required"}), 401
+        
+        # Booking is gated to Pro+ (any participant in the workspace having Pro+ unlocks it)
+        if not plan_service.check_workspace_feature_access(workspace_id, 'accountability.canBookAdvisor'):
+            return jsonify({
+                "error": "Booking an advisor requires a Pro+ subscription",
+                "upgrade_required": True,
+                "required_plan": "PRO_PLUS"
+            }), 403
         
         data = request.get_json()
         if not data or not data.get('advisor_user_id'):
@@ -2785,7 +2797,7 @@ def get_advisor_requests():
 
 @app.route('/api/advisors/requests/<request_id>/respond', methods=['POST'])
 def respond_to_advisor_request(request_id):
-    """Accept or decline an advisor request"""
+    """Accept or decline an advisor request (free for advisors)"""
     try:
         clerk_user_id = get_clerk_user_id()
         if not clerk_user_id:
@@ -2797,30 +2809,8 @@ def respond_to_advisor_request(request_id):
         
         response_type = data['response']
         
-        # For accepts, verify payment was made (per-project fee)
-        if response_type == 'accept':
-            payment_verified = data.get('payment_verified', False)
-            if payment_verified:
-                # Frontend claims payment was made after checkout redirect - verify it
-                supabase = get_supabase()
-                
-                # Check for payment record (with small retry for webhook race condition)
-                import time
-                payment_found = False
-                for attempt in range(3):
-                    payment_check = supabase.table('advisor_project_payments').select('id').eq('request_id', request_id).eq('clerk_user_id', clerk_user_id).execute()
-                    if payment_check.data:
-                        payment_found = True
-                        break
-                    if attempt < 2:
-                        time.sleep(1)  # Wait 1 second before retry
-                
-                if not payment_found:
-                    return jsonify({"error": "Payment verification pending. Please wait a moment and try again."}), 402
-            else:
-                # No payment_verified flag - this means user is trying to accept without going through payment
-                return jsonify({"error": "Payment required to accept this project", "payment_required": True}), 402
-        
+        # Acceptance is free for advisors. Platform monetizes via subscription
+        # after the advisor's first booking (handled separately).
         result = advisor_service.respond_to_advisor_request(
             clerk_user_id, request_id, response_type
         )
@@ -2844,6 +2834,394 @@ def get_advisor_workspaces():
     except Exception as e:
         log_error("Error getting advisor workspaces", error=e)
         return jsonify({"error": str(e)}), 500
+
+
+# ============================================================================
+# Advisor Consultations — pay-per-consultation booking
+# ============================================================================
+
+@app.route('/api/advisors/<advisor_user_id>/consultations', methods=['POST'])
+@limiter.limit(RATE_LIMITS['moderate'])
+def book_advisor_consultation(advisor_user_id):
+    """Founder books a consultation with an advisor.
+
+    Requires Pro+ subscription on the founder side (the platform fee for
+    discovering & booking advisors).
+    """
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+
+        # Founder-side gate: booking requires Pro+
+        if not plan_service.check_feature_access(clerk_user_id, 'accountability.canBookAdvisor'):
+            return jsonify({
+                "error": "Booking an advisor requires a Pro+ subscription",
+                "upgrade_required": True,
+                "required_plan": "PRO_PLUS",
+            }), 403
+
+        data = request.get_json() or {}
+        duration = data.get('duration_min')
+        if duration is None:
+            return jsonify({"error": "duration_min is required (30 or 60)"}), 400
+        try:
+            duration = int(duration)
+        except (TypeError, ValueError):
+            return jsonify({"error": "duration_min must be an integer"}), 400
+
+        consultation = consultation_service.book_consultation(
+            clerk_user_id=clerk_user_id,
+            advisor_user_id=advisor_user_id,
+            duration_min=duration,
+            proposed_time_iso=data.get('proposed_time_iso'),
+            timezone_name=data.get('timezone'),
+            topic=data.get('topic'),
+        )
+        return jsonify(consultation), 201
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        log_error("Error booking consultation", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/consultations', methods=['GET'])
+def list_my_consultations():
+    """List consultations involving the current user.
+
+    Query params:
+      role:    'advisor' | 'founder' | 'any' (default 'any')
+      status:  optional status filter
+      limit:   optional integer (default 50, max 200)
+    """
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+
+        role = request.args.get('role', 'any')
+        status = request.args.get('status')
+        try:
+            limit = int(request.args.get('limit', 50))
+        except (TypeError, ValueError):
+            limit = 50
+
+        consultations = consultation_service.list_consultations(
+            clerk_user_id=clerk_user_id,
+            role=role,
+            status=status,
+            limit=limit,
+        )
+        return jsonify(consultations), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        log_error("Error listing consultations", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/consultations/<consultation_id>', methods=['GET'])
+def get_consultation_detail(consultation_id):
+    """Get a single consultation; caller must be one of the parties."""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+
+        consultation = consultation_service.get_consultation(clerk_user_id, consultation_id)
+        return jsonify(consultation), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 404
+    except Exception as e:
+        log_error("Error getting consultation", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/consultations/<consultation_id>/accept', methods=['POST'])
+@limiter.limit(RATE_LIMITS['moderate'])
+def accept_consultation(consultation_id):
+    """Advisor accepts a consultation request."""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+
+        data = request.get_json() or {}
+        consultation = consultation_service.accept_consultation(
+            clerk_user_id=clerk_user_id,
+            consultation_id=consultation_id,
+            confirmed_time_iso=data.get('confirmed_time_iso'),
+        )
+        return jsonify(consultation), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        log_error("Error accepting consultation", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/consultations/<consultation_id>/decline', methods=['POST'])
+@limiter.limit(RATE_LIMITS['moderate'])
+def decline_consultation(consultation_id):
+    """Advisor declines a consultation request."""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+
+        data = request.get_json() or {}
+        consultation = consultation_service.decline_consultation(
+            clerk_user_id=clerk_user_id,
+            consultation_id=consultation_id,
+            reason=data.get('reason'),
+        )
+        return jsonify(consultation), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        log_error("Error declining consultation", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/consultations/<consultation_id>/cancel', methods=['POST'])
+@limiter.limit(RATE_LIMITS['moderate'])
+def cancel_consultation(consultation_id):
+    """Either party cancels a consultation before payment is confirmed."""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+
+        data = request.get_json() or {}
+        consultation = consultation_service.cancel_consultation(
+            clerk_user_id=clerk_user_id,
+            consultation_id=consultation_id,
+            reason=data.get('reason'),
+        )
+        return jsonify(consultation), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        log_error("Error cancelling consultation", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/consultations/<consultation_id>/payment-sent', methods=['POST'])
+@limiter.limit(RATE_LIMITS['moderate'])
+def mark_consultation_payment_sent(consultation_id):
+    """Founder marks payment as sent (off-platform direct payment).
+
+    Body: { payment_method: 'upi'|'paypal'|'razorpay_link'|'bank_transfer'|'other',
+            payment_reference: '<txn id>' }
+    """
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+
+        data = request.get_json() or {}
+        method = data.get('payment_method')
+        if not method:
+            return jsonify({"error": "payment_method is required"}), 400
+
+        consultation = consultation_service.mark_payment_sent(
+            clerk_user_id=clerk_user_id,
+            consultation_id=consultation_id,
+            payment_method=method,
+            payment_reference=data.get('payment_reference'),
+        )
+        return jsonify(consultation), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        log_error("Error marking payment sent", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/consultations/<consultation_id>/payment-received', methods=['POST'])
+@limiter.limit(RATE_LIMITS['moderate'])
+def confirm_consultation_payment(consultation_id):
+    """Advisor confirms receipt of payment; locks in the consultation.
+
+    Side effects:
+      - Creates a Daily.co video room (best-effort)
+      - Starts the advisor's 30-day Pro Advisor trial if it's their first booking
+    """
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+
+        consultation = consultation_service.confirm_payment_received(
+            clerk_user_id=clerk_user_id,
+            consultation_id=consultation_id,
+        )
+        return jsonify(consultation), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        log_error("Error confirming payment received", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/consultations/<consultation_id>/complete', methods=['POST'])
+@limiter.limit(RATE_LIMITS['moderate'])
+def complete_consultation(consultation_id):
+    """Either party marks a confirmed consultation as completed (after the call)."""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+
+        consultation = consultation_service.mark_completed(
+            clerk_user_id=clerk_user_id,
+            consultation_id=consultation_id,
+        )
+        return jsonify(consultation), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        log_error("Error completing consultation", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/consultations/<consultation_id>/refund-request', methods=['POST'])
+@limiter.limit(RATE_LIMITS['moderate'])
+def request_consultation_refund(consultation_id):
+    """Founder flags a refund request (within 7 days of the call).
+
+    Refund itself happens off-platform between the parties — we just log the
+    request and notify the advisor for resolution.
+    """
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+
+        data = request.get_json() or {}
+        consultation = consultation_service.request_refund(
+            clerk_user_id=clerk_user_id,
+            consultation_id=consultation_id,
+            reason=data.get('reason'),
+        )
+        return jsonify(consultation), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        log_error("Error requesting refund", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
+# ---------------------------------------------------------------------------
+# Consultation Reviews
+# ---------------------------------------------------------------------------
+
+@app.route('/api/consultations/<consultation_id>/reviews', methods=['POST'])
+@limiter.limit(RATE_LIMITS['moderate'])
+def submit_consultation_review(consultation_id):
+    """Submit a review for a completed consultation.
+
+    Either party can review the other. Founder reviews are displayed on the
+    advisor's public marketplace profile.
+
+    Body: { rating: 1-5, review_text?: string, is_public?: bool }
+    """
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+
+        data = request.get_json() or {}
+        rating = data.get('rating')
+        if rating is None:
+            return jsonify({"error": "rating is required"}), 400
+
+        review = consultation_service.submit_review(
+            clerk_user_id=clerk_user_id,
+            consultation_id=consultation_id,
+            rating=int(rating),
+            review_text=data.get('review_text'),
+            is_public=data.get('is_public', True),
+        )
+        return jsonify(review), 201
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        log_error("Error submitting review", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/consultations/<consultation_id>/reviews', methods=['GET'])
+def get_consultation_reviews(consultation_id):
+    """Get all reviews for a consultation (caller must be a party)."""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+
+        reviews = consultation_service.get_consultation_reviews(
+            clerk_user_id=clerk_user_id,
+            consultation_id=consultation_id,
+        )
+        return jsonify(reviews), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        log_error("Error fetching consultation reviews", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/consultations/<consultation_id>/can-review', methods=['GET'])
+def check_can_review_consultation(consultation_id):
+    """Check if current user can submit a review for a consultation."""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+
+        result = consultation_service.can_review_consultation(
+            clerk_user_id=clerk_user_id,
+            consultation_id=consultation_id,
+        )
+        return jsonify(result), 200
+    except Exception as e:
+        log_error("Error checking review eligibility", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/advisors/<advisor_user_id>/reviews', methods=['GET'])
+def get_advisor_reviews(advisor_user_id):
+    """Get public reviews for an advisor's marketplace profile.
+
+    Returns reviews with aggregate stats (avg rating, breakdown).
+    Query params: limit (default 50), offset (default 0)
+    """
+    try:
+        limit = request.args.get('limit', 50, type=int)
+        offset = request.args.get('offset', 0, type=int)
+
+        result = consultation_service.get_advisor_public_reviews(
+            advisor_user_id=advisor_user_id,
+            limit=min(limit, 100),
+            offset=offset,
+        )
+        return jsonify(result), 200
+    except Exception as e:
+        log_error("Error fetching advisor reviews", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/advisors/<advisor_user_id>/rating', methods=['GET'])
+def get_advisor_rating(advisor_user_id):
+    """Get just the aggregate rating stats for an advisor (lightweight)."""
+    try:
+        stats = consultation_service.get_advisor_rating_stats(advisor_user_id)
+        return jsonify(stats), 200
+    except Exception as e:
+        log_error("Error fetching advisor rating", error=e)
+        return jsonify({"error": str(e)}), 500
+
 
 @app.route('/api/advisors/notifications', methods=['GET'])
 def get_advisor_notifications():
@@ -3708,7 +4086,7 @@ def cancel_subscription():
 
 @app.route('/api/billing/advisor/profile', methods=['GET'])
 def get_advisor_billing_profile():
-    """Get advisor billing profile"""
+    """Get advisor billing / subscription profile (Pro Advisor)."""
     try:
         clerk_user_id = get_clerk_user_id()
         if not clerk_user_id:
@@ -3722,47 +4100,54 @@ def get_advisor_billing_profile():
         log_error("Error getting advisor billing profile", error=e)
         return jsonify({"error": str(e)}), 500
 
-@app.route('/api/billing/advisor/accept-project', methods=['POST'])
-def pay_advisor_accept_project():
-    """Pay to accept a project - per-project fee"""
+
+@app.route('/api/billing/advisor/subscribe', methods=['POST'])
+@limiter.limit(RATE_LIMITS['moderate'])
+def subscribe_advisor_pro():
+    """Create a Dodo checkout session for the Pro Advisor subscription.
+
+    Body: { billing_cycle: 'monthly' | 'yearly' }
+    """
     try:
         clerk_user_id = get_clerk_user_id()
         if not clerk_user_id:
             return jsonify({"error": "User ID required"}), 401
-        
+
         data = request.get_json() or {}
-        request_id = data.get('request_id')
-        if not request_id:
-            return jsonify({"error": "request_id is required"}), 400
-        
-        # Create Dodo checkout session with request_id
-        checkout = subscription_service.create_advisor_project_accept_checkout(clerk_user_id, request_id)
-        
+        billing_cycle = (data.get('billing_cycle') or 'monthly').lower()
+
+        checkout = subscription_service.create_advisor_subscription_checkout(
+            clerk_user_id, billing_cycle
+        )
         return jsonify(checkout), 200
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
     except Exception as e:
-        log_error("Error creating advisor project accept checkout", error=e)
-        import traceback
-        traceback.print_exc()
+        log_error("Error creating advisor subscription checkout", error=e)
         return jsonify({"error": str(e)}), 500
 
-@app.route('/api/billing/advisor/calculate-pricing', methods=['GET'])
-def calculate_advisor_pricing():
-    """Calculate advisor pricing breakdown"""
+
+@app.route('/api/billing/advisor/cancel-subscription', methods=['POST'])
+@limiter.limit(RATE_LIMITS['moderate'])
+def cancel_advisor_subscription():
+    """Cancel the advisor's Pro Advisor subscription.
+
+    Soft cutoff: the advisor stays listed in the marketplace but
+    `_advisor_can_accept_bookings` returns False until they resubscribe.
+    """
     try:
-        monthly_rate = request.args.get('monthly_rate')
-        if not monthly_rate:
-            return jsonify({"error": "monthly_rate parameter required"}), 400
-        
-        monthly_rate_usd = float(monthly_rate)
-        pricing = plan_service.calculate_advisor_pricing(monthly_rate_usd)
-        return jsonify(pricing), 200
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+
+        result = subscription_service.cancel_advisor_subscription(clerk_user_id)
+        return jsonify(result), 200
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
     except Exception as e:
-        log_error("Error calculating pricing", error=e)
+        log_error("Error cancelling advisor subscription", error=e)
         return jsonify({"error": str(e)}), 500
+
 
 # Product Feedback Routes
 @app.route('/api/feedback', methods=['POST'])

@@ -206,6 +206,32 @@ def create_advisor_profile(clerk_user_id, data, user_name=None, user_email=None)
     if twitter_url and not (twitter_url.startswith('http://') or twitter_url.startswith('https://')):
         raise ValueError("Twitter/X URL must be a valid URL starting with http:// or https://")
     
+    # Pay-per-consultation pricing (USD). Either may be omitted to disable that
+    # call length on the advisor's profile. Range checks come from ADVISOR_PRICING.
+    from services.plan_service import ADVISOR_PRICING
+
+    def _parse_rate(value, label):
+        if value in (None, '', 0, '0'):
+            return None
+        try:
+            v = float(value)
+        except (TypeError, ValueError):
+            raise ValueError(f"{label} must be a number")
+        if v < ADVISOR_PRICING['minConsultationRateUSD'] or v > ADVISOR_PRICING['maxConsultationRateUSD']:
+            raise ValueError(
+                f"{label} must be between ${ADVISOR_PRICING['minConsultationRateUSD']} "
+                f"and ${ADVISOR_PRICING['maxConsultationRateUSD']}"
+            )
+        return v
+
+    rate_30 = _parse_rate(data.get('consultation_rate_30min_usd'), '30-min consultation rate')
+    rate_60 = _parse_rate(data.get('consultation_rate_60min_usd'), '60-min consultation rate')
+
+    # Direct-payment methods (advisor-level, applies across all consultations)
+    payment_methods = data.get('payment_methods')
+    if payment_methods is not None and not isinstance(payment_methods, dict):
+        raise ValueError("payment_methods must be an object")
+
     profile_data = {
         'user_id': founder_id,
         'headline': data['headline'],
@@ -223,6 +249,10 @@ def create_advisor_profile(clerk_user_id, data, user_name=None, user_email=None)
         'contact_note': data.get('contact_note'),
         'linkedin_url': linkedin_url,
         'twitter_url': twitter_url if twitter_url else None,
+        # Pay-per-consultation fields
+        'consultation_rate_30min_usd': rate_30,
+        'consultation_rate_60min_usd': rate_60,
+        'payment_methods': payment_methods if payment_methods is not None else {},
     }
     
     # Handle questionnaire_data separately (JSONB field)
@@ -491,10 +521,49 @@ def get_available_advisors(workspace_id, filters=None, clerk_user_id=None):
         except Exception:
             pass  # If table doesn't exist, continue without request status
     
-    # Filter by capacity and format results
+    # Filter by capacity + subscription status; format results
+    from datetime import datetime, timezone
+
+    def _can_accept_bookings(p):
+        """Mirror of consultation_service._advisor_can_accept_bookings, inlined
+        to avoid an import cycle."""
+        status = p.get('subscription_status') or 'free'
+        now = datetime.now(timezone.utc)
+        if status == 'free':
+            return True
+        if status == 'trial':
+            ends = p.get('trial_ends_at')
+            if not ends:
+                return True
+            try:
+                t = datetime.fromisoformat(str(ends).replace('Z', '+00:00'))
+                if t.tzinfo is None:
+                    t = t.replace(tzinfo=timezone.utc)
+                return t > now
+            except (ValueError, AttributeError):
+                return False
+        if status == 'active':
+            ends = p.get('subscription_current_period_end')
+            if not ends:
+                return True
+            try:
+                t = datetime.fromisoformat(str(ends).replace('Z', '+00:00'))
+                if t.tzinfo is None:
+                    t = t.replace(tzinfo=timezone.utc)
+                return t > now
+            except (ValueError, AttributeError):
+                return False
+        return False
+
     available_partners = []
     for profile in (profiles.data or []):
         user_id = profile['user_id']
+
+        # Soft cutoff: advisor must have a non-lapsed subscription state to
+        # appear in the marketplace. Listed advisors with lapsed subs are
+        # hidden until they resubscribe.
+        if not _can_accept_bookings(profile):
+            continue
         
         # Check if this partner is already a founder/co-founder in this workspace
         # Advisors cannot be advisors for their own projects
@@ -532,8 +601,63 @@ def get_available_advisors(workspace_id, filters=None, clerk_user_id=None):
                 'available_slots': max_active - current_active,
                 'request_status': request_status  # 'PENDING', 'ACCEPTED', 'DECLINED', or None
             })
-    
+
+    # Batch-fetch rating stats for all advisors
+    if available_partners:
+        advisor_ids = [p['user_id'] for p in available_partners]
+        rating_stats = _batch_get_advisor_ratings(supabase, advisor_ids)
+        for partner in available_partners:
+            uid = partner['user_id']
+            partner['rating_stats'] = rating_stats.get(uid, {
+                'avg_rating': None,
+                'total_reviews': 0,
+            })
+
     return available_partners
+
+
+def _batch_get_advisor_ratings(supabase, advisor_ids):
+    """Batch-fetch rating stats for multiple advisors.
+
+    Returns a dict mapping user_id -> {avg_rating, total_reviews}.
+    """
+    if not advisor_ids:
+        return {}
+
+    try:
+        # Fetch all public founder reviews for these advisors
+        res = supabase.table('advisor_consultation_reviews').select(
+            'reviewee_id, rating'
+        ).in_('reviewee_id', advisor_ids).eq(
+            'reviewer_role', 'founder'
+        ).eq('is_public', True).execute()
+
+        reviews = res.data or []
+    except Exception:
+        # Table may not exist yet; return empty stats
+        return {}
+
+    # Group by reviewee_id and calculate stats
+    from collections import defaultdict
+    grouped = defaultdict(list)
+    for r in reviews:
+        grouped[r['reviewee_id']].append(r['rating'])
+
+    stats = {}
+    for advisor_id in advisor_ids:
+        ratings = grouped.get(advisor_id, [])
+        if ratings:
+            stats[advisor_id] = {
+                'avg_rating': round(sum(ratings) / len(ratings), 2),
+                'total_reviews': len(ratings),
+            }
+        else:
+            stats[advisor_id] = {
+                'avg_rating': None,
+                'total_reviews': 0,
+            }
+
+    return stats
 
 def _verify_workspace_access(clerk_user_id, workspace_id):
     """Verify that the user is a participant in the workspace (founder or partner)"""

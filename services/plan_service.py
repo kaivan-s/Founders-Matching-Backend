@@ -30,7 +30,8 @@ FOUNDER_PLANS: Dict[FounderPlan, Dict[str, Any]] = {
             "summaryDashboard": False,
         },
         "accountability": {
-            "canUseMarketplace": True,  # Can view and use marketplace
+            "canBrowseMarketplace": True,   # Can browse advisors (free preview)
+            "canBookAdvisor": False,        # Booking gated to PRO_PLUS
         },
         "investorFeatures": {
             # Placeholder - to be built
@@ -60,7 +61,8 @@ FOUNDER_PLANS: Dict[FounderPlan, Dict[str, Any]] = {
             "summaryDashboard": True,
         },
         "accountability": {
-            "canUseMarketplace": True,
+            "canBrowseMarketplace": True,
+            "canBookAdvisor": False,        # Booking still gated to PRO_PLUS
         },
         "investorFeatures": {
             # Placeholder - to be built
@@ -90,7 +92,8 @@ FOUNDER_PLANS: Dict[FounderPlan, Dict[str, Any]] = {
             "summaryDashboard": True,
         },
         "accountability": {
-            "canUseMarketplace": True,
+            "canBrowseMarketplace": True,
+            "canBookAdvisor": True,         # PRO_PLUS unlocks advisor bookings
         },
         "investorFeatures": {
             # Placeholder - to be built (PRO_PLUS will get all investor features when built)
@@ -100,29 +103,19 @@ FOUNDER_PLANS: Dict[FounderPlan, Dict[str, Any]] = {
     },
 }
 
+# Advisor monetization model:
+# - Advisors are free to list and free to accept bookings
+# - After their first booking, advisors get a 30-day grace period
+# - After grace, they must subscribe to "Pro Advisor" ($19/mo or $99/yr) to keep accepting bookings
+# - Founders pay advisors directly (UPI/PayPal/Razorpay link). The platform does NOT
+#   process founder->advisor payments. We only collect the advisor subscription via Dodo.
 ADVISOR_PRICING = {
-    "projectAcceptanceFeeUSD": 29,  # Reduced from $69, refundable if no value in 30 days
-    "tiers": {
-        "JUNIOR": {
-            "minMonthlyRateUSD": 50,
-            "maxMonthlyRateUSD": 250,
-            "platformFeePercent": 25,
-        },
-        "STANDARD": {
-            "minMonthlyRateUSD": 250,
-            "maxMonthlyRateUSD": 1000,
-            "platformFeePercent": 20,
-        },
-        "SENIOR": {
-            "minMonthlyRateUSD": 1000,
-            "maxMonthlyRateUSD": 5000,
-            "platformFeePercent": 15,
-        },
-    },
-    # Legacy flat values for backward compatibility
-    "minMonthlyRateUSD": 50,
-    "maxMonthlyRateUSD": 5000,  # Expanded from 150
-    "platformFeePercent": 20,  # Default to middle tier
+    "subscriptionMonthlyUSD": 19,
+    "subscriptionYearlyUSD": 99,
+    "trialDaysAfterFirstBooking": 30,
+    # Soft cutoff: when subscription lapses, advisor stays listed but can't accept new bookings
+    "minConsultationRateUSD": 5,
+    "maxConsultationRateUSD": 1000,
 }
 
 def _get_founder_id(clerk_user_id: str, email: str = None) -> str:
@@ -246,7 +239,7 @@ def get_founder_plan(clerk_user_id: str) -> Dict[str, Any]:
 def check_feature_access(clerk_user_id: str, feature_path: str) -> bool:
     """
     Check if user has access to a feature.
-    feature_path format: "workspaceFeatures.equityFull" or "accountability.canUseMarketplace"
+    feature_path format: "workspaceFeatures.equityFull" or "accountability.canBookAdvisor"
     """
     plan_config = get_founder_plan(clerk_user_id)
     
@@ -683,140 +676,105 @@ def log_plan_telemetry(user_id: str, event_type: str, from_plan: Optional[str] =
     }).execute()
 
 def get_advisor_billing_profile(clerk_user_id: str) -> Dict[str, Any]:
-    """Get advisor billing profile"""
+    """Get advisor's subscription / billing status.
+
+    Returns the new subscription model fields:
+      - subscription_status: 'free' | 'trial' | 'active' | 'cancelled' | 'past_due'
+      - first_booking_at: when first booking was confirmed (triggers trial)
+      - trial_ends_at: when 30-day trial ends (after first booking)
+      - subscription_id: Dodo subscription ID (if subscribed)
+      - subscription_current_period_end: end of current billing period
+      - can_accept_bookings: derived; True if free, trial active, or subscription active
+
+    See: ADVISOR_PRICING and migrations/025_advisor_consultations.sql.
+    """
+    default_profile = {
+        'subscription_status': 'free',
+        'effective_status': 'free',
+        'first_booking_at': None,
+        'trial_ends_at': None,
+        'subscription_id': None,
+        'subscription_current_period_end': None,
+        'can_accept_bookings': True,
+        'subscription_pricing': {
+            'monthly_usd': ADVISOR_PRICING['subscriptionMonthlyUSD'],
+            'yearly_usd': ADVISOR_PRICING['subscriptionYearlyUSD'],
+            'trial_days': ADVISOR_PRICING['trialDaysAfterFirstBooking'],
+        },
+    }
+
     try:
         founder_id = _get_founder_id(clerk_user_id)
     except ValueError:
-        # User doesn't have founder record - return default empty profile
-        return {
-            'onboarding_paid': False,
-            'renewal_paid_until': None,
-            'monthly_rate_usd': None,
-            'is_discoverable': False,
-        }
-    
+        return default_profile
+
     supabase = get_supabase()
-    
-    # Use monthly_rate_inr column to store USD values (column name is legacy)
     profile = supabase.table('advisor_profiles').select(
-        'onboarding_paid, onboarding_paid_at, renewal_paid_until, monthly_rate_inr'
+        'first_booking_at, trial_ends_at, subscription_status, '
+        'subscription_id, subscription_current_period_end'
     ).eq('user_id', founder_id).execute()
-    
+
     if not profile.data:
-        return {
-            'onboarding_paid': False,
-            'renewal_paid_until': None,
-            'monthly_rate_usd': None,
-            'is_discoverable': False,
-        }
-    
+        return default_profile
+
     data = profile.data[0]
-    renewal_until = data.get('renewal_paid_until')
-    is_paid = data.get('onboarding_paid', False)
-    # The monthly_rate_inr column stores USD values (legacy column name)
-    monthly_rate_usd = data.get('monthly_rate_inr')
-    
-    # Check if renewal is still valid
-    renewal_valid = False
-    if renewal_until:
-        renewal_dt = datetime.fromisoformat(renewal_until.replace('Z', '+00:00')) if isinstance(renewal_until, str) else renewal_until
-        if renewal_dt.tzinfo is None:
-            renewal_dt = renewal_dt.replace(tzinfo=timezone.utc)
-        renewal_valid = renewal_dt >= datetime.now(timezone.utc)
-    
-    is_discoverable = is_paid and renewal_valid
-    
+    status = data.get('subscription_status') or 'free'
+    trial_ends_at = data.get('trial_ends_at')
+    period_end = data.get('subscription_current_period_end')
+    now = datetime.now(timezone.utc)
+
+    # Derive can_accept_bookings:
+    #   free                      -> True (no first booking yet)
+    #   trial + trial_ends_at>now -> True (still in trial)
+    #   active + period_end>now   -> True (subscription valid)
+    #   anything else             -> False (lapsed; soft cutoff)
+    can_accept = False
+    if status == 'free':
+        can_accept = True
+    elif status == 'trial' and trial_ends_at:
+        try:
+            t = trial_ends_at if isinstance(trial_ends_at, datetime) else datetime.fromisoformat(str(trial_ends_at).replace('Z', '+00:00'))
+            if t.tzinfo is None:
+                t = t.replace(tzinfo=timezone.utc)
+            can_accept = t > now
+        except (ValueError, AttributeError):
+            can_accept = False
+    elif status == 'active' and period_end:
+        try:
+            p = period_end if isinstance(period_end, datetime) else datetime.fromisoformat(str(period_end).replace('Z', '+00:00'))
+            if p.tzinfo is None:
+                p = p.replace(tzinfo=timezone.utc)
+            can_accept = p > now
+        except (ValueError, AttributeError):
+            can_accept = False
+
+    # Effective status for UI: surface the "true" state. If they're in 'trial' but
+    # the trial ended without subscribing, surface 'past_due' so the UI can prompt
+    # them to subscribe. We deliberately don't write this to the DB; it's a
+    # derived view.
+    effective_status = status
+    if status == 'trial' and not can_accept:
+        effective_status = 'past_due'
+    elif status == 'active' and not can_accept:
+        effective_status = 'past_due'
+
     return {
-        'onboarding_paid': is_paid,
-        'onboarding_paid_at': data.get('onboarding_paid_at'),
-        'renewal_paid_until': renewal_until,
-        'monthly_rate_usd': monthly_rate_usd,
-        'is_discoverable': is_discoverable,
+        'subscription_status': status,
+        'effective_status': effective_status,
+        'first_booking_at': data.get('first_booking_at'),
+        'trial_ends_at': trial_ends_at,
+        'subscription_id': data.get('subscription_id'),
+        'subscription_current_period_end': period_end,
+        'can_accept_bookings': can_accept,
+        'subscription_pricing': {
+            'monthly_usd': ADVISOR_PRICING['subscriptionMonthlyUSD'],
+            'yearly_usd': ADVISOR_PRICING['subscriptionYearlyUSD'],
+            'trial_days': ADVISOR_PRICING['trialDaysAfterFirstBooking'],
+        },
     }
 
-def update_advisor_billing(clerk_user_id: str, onboarding_paid: Optional[bool] = None, monthly_rate_usd: Optional[int] = None, monthly_rate_inr: Optional[int] = None) -> Dict[str, Any]:
-    """Update advisor billing information"""
-    founder_id = _get_founder_id(clerk_user_id)
-    supabase = get_supabase()
-    
-    # Handle monthly rate - use USD throughout (stored in monthly_rate_inr column due to legacy naming)
-    monthly_rate_value = None
-    if monthly_rate_usd is not None:
-        # Validate USD range
-        if monthly_rate_usd < ADVISOR_PRICING['minMonthlyRateUSD'] or monthly_rate_usd > ADVISOR_PRICING['maxMonthlyRateUSD']:
-            raise ValueError(f"Monthly rate must be between ${ADVISOR_PRICING['minMonthlyRateUSD']} and ${ADVISOR_PRICING['maxMonthlyRateUSD']} USD")
-        monthly_rate_value = monthly_rate_usd
-    elif monthly_rate_inr is not None:
-        # Support legacy INR parameter (treating it as USD)
-        monthly_rate_value = monthly_rate_inr
-    
-    update_data = {}
-    if onboarding_paid is not None:
-        update_data['onboarding_paid'] = onboarding_paid
-        if onboarding_paid:
-            update_data['onboarding_paid_at'] = datetime.now(timezone.utc).isoformat()
-    
-    # Store USD value in monthly_rate_inr column (legacy column name)
-    if monthly_rate_value is not None:
-        update_data['monthly_rate_inr'] = monthly_rate_value
-    
-    # Update profile
-    existing = supabase.table('advisor_profiles').select('id').eq('user_id', founder_id).execute()
-    if not existing.data:
-        raise ValueError("Advisor profile not found")
-    
-    supabase.table('advisor_profiles').update(update_data).eq('id', existing.data[0]['id']).execute()
-    
-    return get_advisor_billing_profile(clerk_user_id)
 
-def renew_advisor_subscription(clerk_user_id: str) -> Dict[str, Any]:
-    """Renew advisor annual subscription"""
-    founder_id = _get_founder_id(clerk_user_id)
-    supabase = get_supabase()
-    
-    # Calculate renewal end date (1 year from now) - use relativedelta to handle leap years correctly
-    renewal_end = datetime.now(timezone.utc) + relativedelta(years=1)
-    
-    existing = supabase.table('advisor_profiles').select('id').eq('user_id', founder_id).execute()
-    if not existing.data:
-        raise ValueError("Advisor profile not found")
-    
-    supabase.table('advisor_profiles').update({
-        'renewal_paid_until': renewal_end.isoformat()
-    }).eq('id', existing.data[0]['id']).execute()
-    
-    # Log telemetry
-    log_plan_telemetry(founder_id, 'RENEWAL', metadata={'type': 'advisor_renewal'})
-    
-    return get_advisor_billing_profile(clerk_user_id)
-
-def get_advisor_tier(monthly_rate_usd: int) -> str:
-    """Determine advisor tier based on monthly rate"""
-    tiers = ADVISOR_PRICING.get('tiers', {})
-    for tier_name, tier_config in tiers.items():
-        if tier_config['minMonthlyRateUSD'] <= monthly_rate_usd <= tier_config['maxMonthlyRateUSD']:
-            return tier_name
-    return 'STANDARD'  # Default fallback
-
-def calculate_advisor_pricing(monthly_rate_usd: int) -> Dict[str, float]:
-    """Calculate advisor and platform share from monthly rate using tiered fees"""
-    tier = get_advisor_tier(monthly_rate_usd)
-    tiers = ADVISOR_PRICING.get('tiers', {})
-    
-    # Get tier-specific fee, fallback to default
-    if tier in tiers:
-        platform_fee_percent = tiers[tier]['platformFeePercent']
-    else:
-        platform_fee_percent = ADVISOR_PRICING['platformFeePercent']
-    
-    platform_share = monthly_rate_usd * platform_fee_percent / 100
-    advisor_share = monthly_rate_usd - platform_share
-    
-    return {
-        'display_price_usd': round(monthly_rate_usd * (1 + platform_fee_percent / 100), 2),  # Founder sees this (rate + platform fee)
-        'advisor_share_usd': round(advisor_share, 2),
-        'platform_share_usd': round(platform_share, 2),
-        'platform_fee_percent': platform_fee_percent,
-        'tier': tier,
-    }
+# Note: Per-call pricing is set by each advisor on their profile (see advisor_service.py).
+# Founders pay advisors directly via UPI/PayPal/Razorpay link — the platform doesn't process
+# those payments. The platform only collects the recurring "Pro Advisor" subscription via Dodo.
 
