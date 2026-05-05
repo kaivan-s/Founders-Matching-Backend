@@ -940,23 +940,6 @@ def get_advisor_requests(clerk_user_id, status=None):
     for request in (requests.data or []):
         workspace_id = request.get('workspace_id')
         if workspace_id:
-            # Get ALL KPIs (not just samples)
-            kpis = supabase.table('workspace_kpis').select('id, label, status, target_value, target_date').eq('workspace_id', workspace_id).execute()
-            kpi_summary = {
-                'total': len(kpis.data) if kpis.data else 0,
-                'not_started': len([k for k in (kpis.data or []) if k.get('status') == 'not_started']),
-                'in_progress': len([k for k in (kpis.data or []) if k.get('status') == 'in_progress']),
-                'done': len([k for k in (kpis.data or []) if k.get('status') == 'done']),
-                'all': [{'label': k['label'], 'status': k['status'], 'target_value': k.get('target_value'), 'target_date': k.get('target_date')} for k in (kpis.data or [])]
-            }
-            
-            # Get ALL decisions (not just samples)
-            decisions = supabase.table('workspace_decisions').select('id, content, tag, created_at').eq('workspace_id', workspace_id).eq('is_active', True).order('created_at', desc=True).execute()
-            decision_summary = {
-                'total': len(decisions.data) if decisions.data else 0,
-                'all': [{'content': d['content'], 'tag': d.get('tag', 'general'), 'created_at': d.get('created_at')} for d in (decisions.data or [])]
-            }
-            
             # Get ALL participants
             participants = supabase.table('workspace_participants').select('id, founders!workspace_participants_user_id_fkey(id, name)').eq('workspace_id', workspace_id).execute()
             participant_summary = {
@@ -1002,8 +985,6 @@ def get_advisor_requests(clerk_user_id, status=None):
                             projects_info.append(project.data[0])
             
             request['workspace_details'] = {
-                'kpis': kpi_summary,
-                'decisions': decision_summary,
                 'participants': participant_summary,
                 'match_id': match_id,
                 'projects': projects_info,
@@ -1468,61 +1449,12 @@ def compute_advisor_impact_scorecard(clerk_user_id: str, workspace_id: str, advi
     important_tasks_per_week_current = len(important_tasks_done_current) / review_weeks if review_weeks > 0 else 0
     important_tasks_per_week_baseline = len(important_tasks_done_baseline) / 8 if baseline_window_start_iso and 8 > 0 else 0
     
-    # 3. KPI trajectory calculation
-    # Note: workspace_kpis doesn't have current_value, so we use status to estimate progress
-    kpis = supabase.table('workspace_kpis').select(
-        'id, label, target_value, target_date, status, created_at'
-    ).eq('workspace_id', workspace_id).order('created_at', desc=False).execute()
-    
-    # Get primary KPIs (top 3-5, or all if less than 5)
-    primary_kpis = (kpis.data or [])[:5]
-    
-    kpi_progresses = []
-    for kpi in primary_kpis:
-        status = kpi.get('status', 'not_started')
-        target_value = kpi.get('target_value')
-        
-        # Map status to progress percentage since we don't have current_value
-        # not_started = 0%, in_progress = 50%, done = 100%
-        status_to_progress = {
-            'not_started': 0,
-            'in_progress': 50,
-            'done': 100
-        }
-        
-        progress_pct = status_to_progress.get(status, 0)
-        
-        # If KPI was created before partner joined, calculate progress since join
-        kpi_created_at = None
-        if kpi.get('created_at'):
-            kpi_created_at = parse_datetime_safe(kpi['created_at'])
-        
-        # If partner joined after KPI was created, we can't measure progress since join
-        # So we use current status as a proxy
-        # For more accurate tracking, we'd need KPI history/snapshots
-        if advisor_joined_at and kpi_created_at:
-            if kpi_created_at < advisor_joined_at:
-                # KPI existed before partner joined - use current status as progress
-                # This is an approximation since we don't have historical values
-                kpi_progresses.append(progress_pct)
-            else:
-                # KPI created after partner joined - use current status
-                kpi_progresses.append(progress_pct)
-        else:
-            # No partner join date or KPI creation date - use current status
-            kpi_progresses.append(progress_pct)
-    
-    avg_kpi_progress_pct = sum(kpi_progresses) / len(kpi_progresses) if kpi_progresses else 0
-    
-    # 4. Composite Advisor Score (internal, normalized to 0-100)
     normalized_ontime = min(100, max(0, current_ontime_rate))
     normalized_tasks = min(100, max(0, important_task_completion_rate))
-    normalized_kpi = min(100, max(0, avg_kpi_progress_pct))
     
     advisor_score = (
-        0.35 * normalized_ontime +
-        0.35 * normalized_tasks +
-        0.30 * normalized_kpi
+        0.5 * normalized_ontime +
+        0.5 * normalized_tasks
     )
     
     return {
@@ -1552,9 +1484,9 @@ def compute_advisor_impact_scorecard(clerk_user_id: str, workspace_id: str, advi
                 'total_done': len(important_tasks_done_current),
             },
             'kpi_progress': {
-                'average_progress_pct': round(avg_kpi_progress_pct, 1),
-                'primary_kpis_count': len(primary_kpis),
-                'kpis_tracked': len(kpi_progresses),
+                'average_progress_pct': 0,
+                'primary_kpis_count': 0,
+                'kpis_tracked': 0,
             },
             'composite_score': round(advisor_score, 1),  # Internal use
         },

@@ -473,9 +473,6 @@ class ApprovalService:
         elif entity_type == 'FOUNDER_TITLE':
             new_title = proposed_data.get('title', 'Unknown')
             return f"{proposer_name} wants to change title to {new_title}"
-        elif entity_type == 'DECISION':
-            title = proposed_data.get('title', 'a decision')
-            return f"{proposer_name} added {title} (requires approval)"
         
         return f"{proposer_name} requested approval for {entity_type}"
     
@@ -587,14 +584,6 @@ class ApprovalService:
                 'title': proposed_data['title'],
                 'title_approval_status': 'APPROVED',
                 'title_approval_id': approval['id']
-            }).eq('id', entity_id).execute()
-            
-        elif entity_type == 'DECISION':
-            # Update decision
-            self.supabase.table('workspace_decisions').update({
-                **proposed_data,
-                'approval_status': 'APPROVED',
-                'approval_id': approval['id']
             }).eq('id', entity_id).execute()
     
     def get_pending_approvals(self, clerk_user_id: str, workspace_id: str) -> List[Dict]:

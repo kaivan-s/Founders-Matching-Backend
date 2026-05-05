@@ -214,22 +214,9 @@ def calculate_advisor_score(clerk_user_id: str, workspace_id: str, advisor_user_
         len(completed_important_tasks) / len(important_tasks) * 100
     ) if important_tasks else 0
     
-    # KPI progress (simplified - use status-based progress)
-    kpis = supabase.table('workspace_kpis').select(
-        'id, status, created_at'
-    ).eq('workspace_id', workspace_id).gte(
-        'created_at', period_start.isoformat()
-    ).lte('created_at', period_end.isoformat()).execute()
+    avg_kpi_progress = 0
     
-    kpi_statuses = {'not_started': 0, 'in_progress': 50, 'done': 100}
-    kpi_scores = [kpi_statuses.get(kpi.get('status', 'not_started'), 0) for kpi in (kpis.data or [])]
-    avg_kpi_progress = sum(kpi_scores) / len(kpi_scores) if kpi_scores else 0
-    
-    # Combined task and KPI impact score
-    impact_score = (
-        (task_completion_rate * 0.6) +  # 60% weight on tasks
-        (avg_kpi_progress * 0.4)         # 40% weight on KPIs
-    )  # 20% weight applied later
+    impact_score = task_completion_rate
     
     # ===== 5. FOUNDER RATINGS (15%) =====
     # Get quarterly reviews and any additional ratings

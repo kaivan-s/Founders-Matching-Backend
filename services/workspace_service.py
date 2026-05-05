@@ -317,12 +317,7 @@ def list_user_workspaces(clerk_user_id):
     return formatted_workspaces
 
 def get_workspace(clerk_user_id, workspace_id):
-    """Get workspace overview with participants, equity summary, and KPI summary
-    
-    Optimized to fetch only necessary fields. These queries cannot be combined into a single
-    query because participants, equity scenarios, and KPIs are separate tables with no direct
-    JOIN relationship - they're all related only via workspace_id.
-    """
+    """Get workspace overview with participants and equity summary."""
     founder_id = _verify_workspace_access(clerk_user_id, workspace_id)
     supabase = get_supabase()
     
@@ -333,10 +328,6 @@ def get_workspace(clerk_user_id, workspace_id):
     
     workspace_data = workspace.data[0]
     
-    # Fetch participants, equity, and KPIs
-    # Note: These are separate queries because they're different tables that can't be JOINed
-    # We optimize by fetching only the fields we need
-    
     # Get participants with user info (using JOIN to avoid N+1)
     # Include clerk_user_id so frontend can identify the current user
     participants = supabase.table('workspace_participants').select('*, user:founders!user_id(id, name, email, clerk_user_id)').eq('workspace_id', workspace_id).execute()
@@ -344,18 +335,6 @@ def get_workspace(clerk_user_id, workspace_id):
     # Get current equity scenario (only one, filtered by is_current)
     equity = supabase.table('workspace_equity_scenarios').select('*').eq('workspace_id', workspace_id).eq('is_current', True).limit(1).execute()
     current_equity = equity.data[0] if equity.data else None
-    
-    # Get KPI summary - optimized to fetch only status field (not full records)
-    kpis = supabase.table('workspace_kpis').select('status').eq('workspace_id', workspace_id).execute()
-    
-    # Calculate KPI summary from fetched data
-    kpi_data = kpis.data if kpis.data else []
-    kpi_summary = {
-        'total': len(kpi_data),
-        'not_started': len([k for k in kpi_data if k.get('status') == 'not_started']),
-        'in_progress': len([k for k in kpi_data if k.get('status') == 'in_progress']),
-        'done': len([k for k in kpi_data if k.get('status') == 'done'])
-    }
     
     return {
         'id': workspace_data['id'],
@@ -373,7 +352,6 @@ def get_workspace(clerk_user_id, workspace_id):
             'timezone': p.get('timezone')
         } for p in (participants.data or [])],
         'current_equity': current_equity,
-        'kpi_summary': kpi_summary
     }
 
 def update_workspace(clerk_user_id, workspace_id, data):
@@ -474,166 +452,6 @@ def update_participant(clerk_user_id, workspace_id, user_id, data):
         return updated_participant.data[0]
     else:
         raise ValueError("Failed to update participant")
-
-def get_decisions(clerk_user_id, workspace_id, tag=None, page=1, limit=20):
-    """Get decisions for a workspace, optionally filtered by tag"""
-    _verify_workspace_access(clerk_user_id, workspace_id)
-    supabase = get_supabase()
-    
-    query = supabase.table('workspace_decisions').select('*, creator:founders!created_by_user_id(id, name)').eq('workspace_id', workspace_id).eq('is_active', True)
-    
-    if tag:
-        if tag not in ['equity', 'roles', 'scope', 'timeline', 'money', 'other']:
-            raise ValueError("Invalid tag")
-        query = query.eq('tag', tag)
-    
-    # Pagination
-    from_index = (page - 1) * limit
-    to_index = from_index + limit - 1
-    
-    decisions = query.order('created_at', desc=True).range(from_index, to_index).execute()
-    
-    return [{
-        'id': d['id'],
-        'workspace_id': d['workspace_id'],
-        'created_by_user_id': d['created_by_user_id'],
-        'creator': d.get('creator', {}),
-        'tag': d['tag'],
-        'content': d['content'],
-        'is_active': d['is_active'],
-        'created_at': d['created_at'],
-        'updated_at': d['updated_at']
-    } for d in (decisions.data or [])]
-
-def create_decision(clerk_user_id, workspace_id, data):
-    """Create a new decision (partners can comment but not create)"""
-    founder_id = _can_edit_workspace(clerk_user_id, workspace_id)
-    supabase = get_supabase()
-    notification_service = NotificationService()
-    approval_service = ApprovalService()
-    
-    if 'tag' not in data or 'content' not in data:
-        raise ValueError("tag and content are required")
-    
-    if data['tag'] not in ['equity', 'roles', 'scope', 'timeline', 'money', 'other']:
-        raise ValueError("Invalid tag")
-    
-    if len(data['content']) > 1000:
-        raise ValueError("Content must be 1000 characters or less")
-    
-    # Check if decision requires approval
-    requires_approval = data.get('requires_approval', False)
-    
-    decision_data = {
-        'workspace_id': workspace_id,
-        'created_by_user_id': founder_id,
-        'tag': data['tag'],
-        'content': data['content'],
-        'is_active': True,
-        'requires_approval': requires_approval
-    }
-    
-    if requires_approval:
-        decision_data['approval_status'] = 'PENDING'
-    
-    decision = supabase.table('workspace_decisions').insert(decision_data).execute()
-    
-    if not decision.data:
-        raise ValueError("Failed to create decision")
-    
-    decision_id = decision.data[0]['id']
-    
-    # Fetch the created decision with creator relationship
-    decision_with_creator = supabase.table('workspace_decisions').select('*, creator:founders!created_by_user_id(id, name)').eq('id', decision_id).execute()
-    
-    _log_audit(workspace_id, founder_id, 'create_decision', 'workspace_decision', decision_id, {'tag': data['tag']})
-    
-    # If requires approval, create approval request
-    if requires_approval:
-        approval_id = approval_service.create_approval(
-            clerk_user_id=clerk_user_id,
-            workspace_id=workspace_id,
-            entity_type='DECISION',
-            entity_id=decision_id,
-            proposed_data=decision_data
-        )
-        
-        # Update decision with approval ID
-        supabase.table('workspace_decisions').update({
-            'approval_id': approval_id
-        }).eq('id', decision_id).execute()
-    else:
-        # Send regular notification for non-approval decisions
-        participants = supabase.table('workspace_participants').select('user_id, founders!workspace_participants_user_id_fkey(name)').eq('workspace_id', workspace_id).execute()
-        creator = next((p['founders']['name'] for p in participants.data if p['user_id'] == founder_id), 'Someone')
-        
-        for participant in participants.data or []:
-            if participant['user_id'] != founder_id:
-                notification_service.create_notification(
-                    workspace_id=workspace_id,
-                    recipient_id=participant['user_id'],
-                    actor_id=founder_id,
-                    event_type='DECISION_CREATED',
-                    title=f"{creator} added decision: {data['tag']}",
-                    entity_type='workspace_decision',
-                    entity_id=decision_id,
-                    metadata={'tag': data['tag'], 'content': data['content'][:100]}
-                )
-    
-    return {
-        'id': decision_with_creator.data[0]['id'],
-        'workspace_id': decision_with_creator.data[0]['workspace_id'],
-        'created_by_user_id': decision_with_creator.data[0]['created_by_user_id'],
-        'creator': decision_with_creator.data[0].get('creator', {}),
-        'tag': decision_with_creator.data[0]['tag'],
-        'content': decision_with_creator.data[0]['content'],
-        'is_active': decision_with_creator.data[0]['is_active'],
-        'created_at': decision_with_creator.data[0]['created_at'],
-        'updated_at': decision_with_creator.data[0]['updated_at']
-    }
-
-def update_decision(clerk_user_id, decision_id, data):
-    """Update a decision (with short edit window - 5 minutes)"""
-    supabase = get_supabase()
-    
-    # Get decision to verify access
-    decision = supabase.table('workspace_decisions').select('*, workspace:workspaces!workspace_id(id)').eq('id', decision_id).execute()
-    if not decision.data:
-        raise ValueError("Decision not found")
-    
-    decision_data = decision.data[0]
-    workspace_id = decision_data['workspace']['id']
-    founder_id = _verify_workspace_access(clerk_user_id, workspace_id)
-    
-    # Check edit window (5 minutes)
-    from datetime import datetime, timezone
-    created_at = datetime.fromisoformat(decision_data['created_at'].replace('Z', '+00:00'))
-    now = datetime.now(timezone.utc)
-    if (now - created_at).total_seconds() > 300:  # 5 minutes
-        raise ValueError("Edit window has expired (5 minutes)")
-    
-    # Only creator can edit
-    if decision_data['created_by_user_id'] != founder_id:
-        raise ValueError("Only the creator can edit this decision")
-    
-    update_data = {}
-    if 'content' in data:
-        if len(data['content']) > 1000:
-            raise ValueError("Content must be 1000 characters or less")
-        update_data['content'] = data['content']
-    if 'tag' in data:
-        if data['tag'] not in ['equity', 'roles', 'scope', 'timeline', 'money', 'other']:
-            raise ValueError("Invalid tag")
-        update_data['tag'] = data['tag']
-    
-    if not update_data:
-        raise ValueError("No valid fields to update")
-    
-    updated = supabase.table('workspace_decisions').update(update_data).eq('id', decision_id).execute()
-    
-    _log_audit(workspace_id, founder_id, 'update_decision', 'workspace_decision', decision_id, update_data)
-    
-    return updated.data[0]
 
 def get_equity_scenarios(clerk_user_id, workspace_id):
     """Get all equity scenarios and current scenario"""
@@ -984,160 +802,6 @@ def upsert_role(clerk_user_id, workspace_id, user_id, data):
     _log_audit(workspace_id, founder_id, 'upsert_role', 'workspace_role', role.data[0]['id'], {'user_id': user_id, 'role_title': data['role_title']})
     
     return role.data[0]
-
-def get_kpis(clerk_user_id, workspace_id):
-    """Get all KPIs for a workspace"""
-    _verify_workspace_access(clerk_user_id, workspace_id)
-    supabase = get_supabase()
-    
-    kpis = supabase.table('workspace_kpis').select('*, owner:founders!owner_user_id(id, name)').eq('workspace_id', workspace_id).order('created_at', desc=True).execute()
-    
-    return [{
-        'id': k['id'],
-        'workspace_id': k['workspace_id'],
-        'label': k['label'],
-        'target_value': k.get('target_value'),
-        'target_date': k.get('target_date'),
-        'owner_user_id': k['owner_user_id'],
-        'owner': k.get('owner', {}),
-        'status': k.get('status', 'not_started'),
-        'created_at': k['created_at'],
-        'updated_at': k['updated_at']
-    } for k in (kpis.data or [])]
-
-def create_kpi(clerk_user_id, workspace_id, data):
-    """Create a new KPI - partners can view but not create"""
-    founder_id = _can_edit_workspace(clerk_user_id, workspace_id)
-    supabase = get_supabase()
-    notification_service = NotificationService()
-    
-    if 'label' not in data:
-        raise ValueError("label is required")
-    
-    kpi_data = {
-        'workspace_id': workspace_id,
-        'label': data['label'],
-        'target_value': data.get('target_value'),
-        'target_date': data.get('target_date'),
-        'owner_user_id': data.get('owner_user_id', founder_id),  # Default to creator
-        'status': data.get('status', 'not_started')
-    }
-    
-    if kpi_data['status'] not in ['not_started', 'in_progress', 'done']:
-        raise ValueError("Invalid status")
-    
-    kpi = supabase.table('workspace_kpis').insert(kpi_data).execute()
-    
-    if not kpi.data:
-        raise ValueError("Failed to create KPI")
-    
-    kpi_id = kpi.data[0]['id']
-    
-    # Fetch the created KPI with owner relationship
-    kpi_with_owner = supabase.table('workspace_kpis').select('*, owner:founders!owner_user_id(id, name)').eq('id', kpi_id).execute()
-    
-    _log_audit(workspace_id, founder_id, 'create_kpi', 'workspace_kpi', kpi_id, {'label': data['label']})
-    
-    # Send notification to other participants
-    participants = supabase.table('workspace_participants').select('user_id, founders!workspace_participants_user_id_fkey(name)').eq('workspace_id', workspace_id).execute()
-    creator = next((p['founders']['name'] for p in participants.data if p['user_id'] == founder_id), 'Someone')
-    
-    for participant in participants.data or []:
-        if participant['user_id'] != founder_id:
-            notification_service.create_notification(
-                workspace_id=workspace_id,
-                recipient_id=participant['user_id'],
-                actor_id=founder_id,
-                event_type='KPI_CREATED',
-                title=f"{creator} created KPI: {data['label']}",
-                entity_type='workspace_kpi',
-                entity_id=kpi_id,
-                metadata={'label': data['label']}
-            )
-    
-    return {
-        'id': kpi_with_owner.data[0]['id'],
-        'workspace_id': kpi_with_owner.data[0]['workspace_id'],
-        'label': kpi_with_owner.data[0]['label'],
-        'target_value': kpi_with_owner.data[0].get('target_value'),
-        'target_date': kpi_with_owner.data[0].get('target_date'),
-        'owner_user_id': kpi_with_owner.data[0]['owner_user_id'],
-        'owner': kpi_with_owner.data[0].get('owner', {}),
-        'status': kpi_with_owner.data[0].get('status', 'not_started'),
-        'created_at': kpi_with_owner.data[0]['created_at'],
-        'updated_at': kpi_with_owner.data[0]['updated_at']
-    }
-
-def update_kpi(clerk_user_id, kpi_id, data):
-    """Update KPI status/target - partners can view but not edit"""
-    supabase = get_supabase()
-    notification_service = NotificationService()
-    
-    # Get KPI to verify access
-    kpi = supabase.table('workspace_kpis').select('*, workspace:workspaces!workspace_id(id)').eq('id', kpi_id).execute()
-    if not kpi.data:
-        raise ValueError("KPI not found")
-    
-    workspace_id = kpi.data[0]['workspace']['id']
-    _can_edit_workspace(clerk_user_id, workspace_id)
-    
-    update_data = {}
-    if 'status' in data:
-        if data['status'] not in ['not_started', 'in_progress', 'done']:
-            raise ValueError("Invalid status")
-        update_data['status'] = data['status']
-    if 'target_value' in data:
-        update_data['target_value'] = data['target_value']
-    if 'target_date' in data:
-        update_data['target_date'] = data['target_date']
-    if 'label' in data:
-        update_data['label'] = data['label']
-    if 'owner_user_id' in data:
-        update_data['owner_user_id'] = data['owner_user_id']
-    
-    if not update_data:
-        raise ValueError("No valid fields to update")
-    
-    updated = supabase.table('workspace_kpis').update(update_data).eq('id', kpi_id).execute()
-    
-    if not updated.data:
-        raise ValueError("Failed to update KPI")
-    
-    # Fetch the updated KPI with owner relationship
-    kpi_with_owner = supabase.table('workspace_kpis').select('*, owner:founders!owner_user_id(id, name)').eq('id', kpi_id).execute()
-    
-    founder_id = _get_founder_id(clerk_user_id)
-    _log_audit(workspace_id, founder_id, 'update_kpi', 'workspace_kpi', kpi_id, update_data)
-    
-    # Send notification to other participants
-    participants = supabase.table('workspace_participants').select('user_id, founders!workspace_participants_user_id_fkey(name)').eq('workspace_id', workspace_id).execute()
-    updater = next((p['founders']['name'] for p in participants.data if p['user_id'] == founder_id), 'Someone')
-    
-    for participant in participants.data or []:
-        if participant['user_id'] != founder_id:
-            notification_service.create_notification(
-                workspace_id=workspace_id,
-                recipient_id=participant['user_id'],
-                actor_id=founder_id,
-                event_type='KPI_UPDATED',
-                title=f"{updater} updated KPI: {kpi.data[0]['label']}",
-                entity_type='workspace_kpi',
-                entity_id=kpi_id,
-                metadata=update_data
-            )
-    
-    return {
-        'id': kpi_with_owner.data[0]['id'],
-        'workspace_id': kpi_with_owner.data[0]['workspace_id'],
-        'label': kpi_with_owner.data[0]['label'],
-        'target_value': kpi_with_owner.data[0].get('target_value'),
-        'target_date': kpi_with_owner.data[0].get('target_date'),
-        'owner_user_id': kpi_with_owner.data[0]['owner_user_id'],
-        'owner': kpi_with_owner.data[0].get('owner', {}),
-        'status': kpi_with_owner.data[0].get('status', 'not_started'),
-        'created_at': kpi_with_owner.data[0]['created_at'],
-        'updated_at': kpi_with_owner.data[0]['updated_at']
-    }
 
 def get_checkins(clerk_user_id, workspace_id, limit=3):
     """Get recent checkins for a workspace"""
@@ -1521,21 +1185,7 @@ def get_checkin_partner_reviews_for_founders(clerk_user_id, workspace_id, checki
 
 
 def get_workspace_context(clerk_user_id, workspace_id):
-    """Get combined workspace context data in a single API call.
-    
-    This endpoint consolidates multiple workspace data fetches to reduce
-    the number of API calls needed when loading workspace tabs.
-    
-    Returns:
-        - workspace: Basic workspace info
-        - participants: All participants with user info
-        - kpis: All KPIs with owner info
-        - decisions: Recent decisions (limited to 20)
-        - roles: All roles with user info
-        - checkins: Recent checkins (limited to 10)
-        - equity: Equity scenarios and current scenario
-        - current_founder_id: The founder ID of the current user
-    """
+    """Get combined workspace context data in a single API call."""
     founder_id = _verify_workspace_access(clerk_user_id, workspace_id)
     supabase = get_supabase()
     
@@ -1546,35 +1196,22 @@ def get_workspace_context(clerk_user_id, workspace_id):
     
     workspace_data = workspace.data[0]
     
-    # Fetch all related data in parallel-style queries
-    # These are still sequential at the DB level, but minimize round trips
-    
     # 1. Participants with user info (includes clerk_user_id for current user identification)
     participants = supabase.table('workspace_participants').select(
         '*, user:founders!user_id(id, name, email, clerk_user_id)'
     ).eq('workspace_id', workspace_id).execute()
     
-    # 2. KPIs with owner info
-    kpis = supabase.table('workspace_kpis').select(
-        '*, owner:founders!owner_user_id(id, name)'
-    ).eq('workspace_id', workspace_id).order('created_at', desc=True).execute()
-    
-    # 3. Recent decisions with creator info (limit 20 for overview)
-    decisions = supabase.table('workspace_decisions').select(
-        '*, creator:founders!created_by_user_id(id, name)'
-    ).eq('workspace_id', workspace_id).eq('is_active', True).order('created_at', desc=True).limit(20).execute()
-    
-    # 4. Roles with user info
+    # 2. Roles with user info
     roles = supabase.table('workspace_roles').select(
         '*, user:founders!user_id(id, name)'
     ).eq('workspace_id', workspace_id).execute()
     
-    # 5. Recent checkins with creator info (limit 10 for overview)
+    # 3. Recent checkins with creator info (limit 10 for overview)
     checkins = supabase.table('workspace_checkins').select(
         '*, creator:founders!created_by_user_id(id, name)'
     ).eq('workspace_id', workspace_id).order('week_start', desc=True).limit(10).execute()
     
-    # 6. Equity scenarios with creator info
+    # 4. Equity scenarios with creator info
     equity_scenarios = supabase.table('workspace_equity_scenarios').select(
         '*, creator:founders!created_by_user_id(id, name)'
     ).eq('workspace_id', workspace_id).order('created_at', desc=True).execute()
@@ -1614,33 +1251,6 @@ def get_workspace_context(clerk_user_id, workspace_id):
         'updated_at': p['updated_at']
     } for p in (participants.data or [])]
     
-    # Format KPIs
-    formatted_kpis = [{
-        'id': k['id'],
-        'workspace_id': k['workspace_id'],
-        'label': k['label'],
-        'target_value': k.get('target_value'),
-        'target_date': k.get('target_date'),
-        'owner_user_id': k['owner_user_id'],
-        'owner': k.get('owner', {}),
-        'status': k.get('status', 'not_started'),
-        'created_at': k['created_at'],
-        'updated_at': k['updated_at']
-    } for k in (kpis.data or [])]
-    
-    # Format decisions
-    formatted_decisions = [{
-        'id': d['id'],
-        'workspace_id': d['workspace_id'],
-        'created_by_user_id': d['created_by_user_id'],
-        'creator': d.get('creator', {}),
-        'tag': d['tag'],
-        'content': d['content'],
-        'is_active': d['is_active'],
-        'created_at': d['created_at'],
-        'updated_at': d['updated_at']
-    } for d in (decisions.data or [])]
-    
     # Format roles
     formatted_roles = [{
         'id': r['id'],
@@ -1676,8 +1286,6 @@ def get_workspace_context(clerk_user_id, workspace_id):
             'updated_at': workspace_data['updated_at'],
         },
         'participants': formatted_participants,
-        'kpis': formatted_kpis,
-        'decisions': formatted_decisions,
         'roles': formatted_roles,
         'checkins': formatted_checkins,
         'equity': {

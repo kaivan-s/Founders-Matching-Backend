@@ -1215,11 +1215,7 @@ def update_workspace(workspace_id):
 @app.route('/api/workspaces/<workspace_id>/context', methods=['GET'])
 @limiter.limit(RATE_LIMITS['standard'])
 def get_workspace_context(workspace_id):
-    """Get combined workspace context data in a single API call.
-    
-    This endpoint consolidates multiple data fetches (participants, KPIs, decisions,
-    roles, checkins, equity) to reduce the number of API calls when loading workspace tabs.
-    """
+    """Get combined workspace context data in a single API call."""
     try:
         clerk_user_id = get_clerk_user_id()
         if not clerk_user_id:
@@ -1258,77 +1254,6 @@ def update_workspace_participant(workspace_id, user_id):
         data = request.get_json()
         participant = workspace_service.update_participant(clerk_user_id, workspace_id, user_id, data)
         return jsonify(participant), 200
-    except ValueError as e:
-        return jsonify({"error": str(e)}), 400
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-@app.route('/api/workspaces/<workspace_id>/decisions', methods=['GET'])
-def get_workspace_decisions(workspace_id):
-    """Get workspace decisions (paginated)"""
-    try:
-        clerk_user_id = get_clerk_user_id()
-        if not clerk_user_id:
-            return jsonify({"error": "User ID required"}), 401
-        
-        tag = request.args.get('tag')
-        page = int(request.args.get('page', 1))
-        limit = int(request.args.get('limit', 20))
-        
-        decisions = workspace_service.get_decisions(clerk_user_id, workspace_id, tag, page, limit)
-        return jsonify(decisions), 200
-    except ValueError as e:
-        return jsonify({"error": str(e)}), 400
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-@app.route('/api/workspaces/<workspace_id>/decisions', methods=['POST'])
-def create_workspace_decision(workspace_id):
-    """Create a new decision"""
-    try:
-        clerk_user_id = get_clerk_user_id()
-        if not clerk_user_id:
-            return jsonify({"error": "User ID required"}), 401
-        
-        data = request.get_json()
-        if not isinstance(data, dict):
-            return jsonify({"error": "Invalid data format"}), 400
-        
-        # Basic validation
-        if 'content' in data:
-            if not isinstance(data['content'], str):
-                return jsonify({"error": "content must be a string"}), 400
-            if len(data['content']) > 10000:  # Reasonable limit
-                return jsonify({"error": "content too long (max 10000 characters)"}), 400
-        
-        decision = workspace_service.create_decision(clerk_user_id, workspace_id, data)
-        return jsonify(decision), 201
-    except ValueError as e:
-        return jsonify({"error": str(e)}), 400
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-@app.route('/api/workspaces/decisions/<decision_id>', methods=['PATCH'])
-def update_workspace_decision(decision_id):
-    """Update a decision (5 minute edit window)"""
-    try:
-        clerk_user_id = get_clerk_user_id()
-        if not clerk_user_id:
-            return jsonify({"error": "User ID required"}), 401
-        
-        data = request.get_json()
-        if not isinstance(data, dict):
-            return jsonify({"error": "Invalid data format"}), 400
-        
-        # Basic validation
-        if 'content' in data and data['content']:
-            if not isinstance(data['content'], str):
-                return jsonify({"error": "content must be a string"}), 400
-            if len(data['content']) > 10000:  # Reasonable limit
-                return jsonify({"error": "content too long (max 10000 characters)"}), 400
-        
-        decision = workspace_service.update_decision(clerk_user_id, decision_id, data)
-        return jsonify(decision), 200
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
     except Exception as e:
@@ -1448,53 +1373,6 @@ def upsert_workspace_role(workspace_id, user_id):
         data = request.get_json()
         role = workspace_service.upsert_role(clerk_user_id, workspace_id, user_id, data)
         return jsonify(role), 200
-    except ValueError as e:
-        return jsonify({"error": str(e)}), 400
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-@app.route('/api/workspaces/<workspace_id>/kpis', methods=['GET'])
-def get_workspace_kpis(workspace_id):
-    """Get workspace KPIs"""
-    try:
-        clerk_user_id = get_clerk_user_id()
-        if not clerk_user_id:
-            return jsonify({"error": "User ID required"}), 401
-        
-        kpis = workspace_service.get_kpis(clerk_user_id, workspace_id)
-        return jsonify(kpis), 200
-    except ValueError as e:
-        return jsonify({"error": str(e)}), 404
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-@app.route('/api/workspaces/<workspace_id>/kpis', methods=['POST'])
-def create_workspace_kpi(workspace_id):
-    """Create a new KPI"""
-    try:
-        clerk_user_id = get_clerk_user_id()
-        if not clerk_user_id:
-            return jsonify({"error": "User ID required"}), 401
-        
-        data = request.get_json()
-        kpi = workspace_service.create_kpi(clerk_user_id, workspace_id, data)
-        return jsonify(kpi), 201
-    except ValueError as e:
-        return jsonify({"error": str(e)}), 400
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-@app.route('/api/workspaces/kpis/<kpi_id>', methods=['PATCH'])
-def update_workspace_kpi(kpi_id):
-    """Update a KPI"""
-    try:
-        clerk_user_id = get_clerk_user_id()
-        if not clerk_user_id:
-            return jsonify({"error": "User ID required"}), 401
-        
-        data = request.get_json()
-        kpi = workspace_service.update_kpi(clerk_user_id, kpi_id, data)
-        return jsonify(kpi), 200
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
     except Exception as e:
