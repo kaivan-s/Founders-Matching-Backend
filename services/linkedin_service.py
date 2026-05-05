@@ -319,8 +319,11 @@ def verify_advisor_linkedin(clerk_user_id: str, code: str) -> Dict[str, Any]:
     else:
         # Profile doesn't exist yet - create a minimal one with LinkedIn verification
         # The user will complete the rest during onboarding
+        # Include required fields with placeholder values
         result = supabase.table('advisor_profiles').insert({
             'user_id': founder_id,
+            'headline': '',  # Required field - will be filled during onboarding
+            'bio': '',  # Required field - will be filled during onboarding
             'linkedin_verified': True,
             'linkedin_verified_at': verification_time,
             'linkedin_data': linkedin_data,
