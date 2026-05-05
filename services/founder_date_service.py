@@ -132,8 +132,11 @@ def _public_cal_booking_url_from_username(cal_username: Optional[str]) -> Option
 
 
 def _scheduling_urls_for_call(call: Dict[str, Any]) -> Tuple[Optional[str], Optional[str]]:
-    """(scheduling_url, legacy room_url alias) from a call row."""
-    url = call.get('cal_booking_url') or call.get('daily_room_url')
+    """(scheduling_url, room_url alias) from a call row — Cal booking URL only."""
+    raw = call.get('cal_booking_url')
+    if raw is None:
+        return None, None
+    url = str(raw).strip() or None
     return url, url
 
 
@@ -323,7 +326,6 @@ def _compute_next_action(fd: Dict[str, Any], calls: List[Dict[str, Any]], viewer
             'scheduled_at': latest.get('scheduled_at'),
             'scheduling_url': scheduling_url,
             'room_url': room_url,
-            'daily_room_url': latest.get('daily_room_url'),
             'message': (
                 'Scheduling link is saved. Pick a time on Cal.com together, '
                 'then start your session here when ready.'
@@ -387,7 +389,6 @@ def _compute_next_action(fd: Dict[str, Any], calls: List[Dict[str, Any]], viewer
         'scheduled_at': latest.get('scheduled_at'),
         'scheduling_url': scheduling_url,
         'room_url': room_url,
-        'daily_room_url': latest.get('daily_room_url'),
         'message': (
             'Session in progress. Meet using whatever link you booked (Cal.com, Zoom, etc.).'
         ),
@@ -474,9 +475,6 @@ def schedule_call(
         'scheduled_at': scheduled_at,
         'cal_booking_id': cal_booking_id,
         'cal_booking_url': resolved_cal_url,
-        'daily_room_name': None,
-        'daily_room_url': None,
-        'daily_room_expires_at': None,
     }
     result = supabase.table('founder_date_calls').insert(new_call).execute()
     if not result.data:
@@ -506,7 +504,7 @@ def schedule_call(
 
 
 def start_call(clerk_user_id: str, call_id: str) -> Dict[str, Any]:
-    """Mark a call as IN_PROGRESS and return the room URL."""
+    """Mark a call as IN_PROGRESS and return the updated call row."""
     founder_id = _get_founder_id(clerk_user_id)
     supabase = get_supabase()
 

@@ -13,7 +13,7 @@ from config.database import get_supabase
 from services import founder_service, project_service, swipe_service, profile_service, match_service, waitlist_service, message_service, payment_service, workspace_service
 from services import plan_service, subscription_service, document_service, feedback_service, advanced_search_service, advisor_service, admin_service, feed_service, project_access_service
 from services import linkedin_service, github_service, verification_service
-from services import founder_date_service, video_service, activation_service
+from services import founder_date_service, activation_service
 from services import consultation_service
 from services.notification_service import NotificationService, ApprovalService
 
@@ -3156,7 +3156,7 @@ def confirm_consultation_payment(consultation_id):
     """Advisor confirms receipt of payment; locks in the consultation.
 
     Side effects:
-      - Clears any legacy Daily video-room fields; founders schedule via the advisor's Cal.com link.
+      - Clears any legacy consultation video-room placeholders; founders use the advisor's Cal scheduling link.
       - Starts the advisor's 30-day Pro Advisor trial if it's their first booking
     """
     try:
