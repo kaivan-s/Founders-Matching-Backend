@@ -296,25 +296,44 @@ def verify_advisor_linkedin(clerk_user_id: str, code: str) -> Dict[str, Any]:
     # Update advisor profile with verification
     supabase = get_supabase()
     
-    # First, get current verification_badges
-    current_profile = supabase.table('advisor_profiles').select('verification_badges').eq('user_id', founder_id).execute()
-    current_badges = []
-    if current_profile.data and current_profile.data[0].get('verification_badges'):
-        current_badges = current_profile.data[0]['verification_badges']
+    # Check if advisor profile exists
+    current_profile = supabase.table('advisor_profiles').select('id, verification_badges').eq('user_id', founder_id).execute()
     
-    # Add linkedin badge if not already present
-    if 'linkedin' not in current_badges:
-        current_badges.append('linkedin')
+    verification_time = datetime.now(timezone.utc).isoformat()
     
-    result = supabase.table('advisor_profiles').update({
-        'linkedin_verified': True,
-        'linkedin_verified_at': datetime.now(timezone.utc).isoformat(),
-        'linkedin_data': linkedin_data,
-        'verification_badges': current_badges,
-    }).eq('user_id', founder_id).execute()
-    
-    if not result.data:
-        raise ValueError("Failed to update advisor profile")
+    if current_profile.data:
+        # Profile exists - update it
+        current_badges = current_profile.data[0].get('verification_badges') or []
+        if 'linkedin' not in current_badges:
+            current_badges.append('linkedin')
+        
+        result = supabase.table('advisor_profiles').update({
+            'linkedin_verified': True,
+            'linkedin_verified_at': verification_time,
+            'linkedin_data': linkedin_data,
+            'verification_badges': current_badges,
+        }).eq('user_id', founder_id).execute()
+        
+        if not result.data:
+            raise ValueError("Failed to update advisor profile")
+    else:
+        # Profile doesn't exist yet - create a minimal one with LinkedIn verification
+        # The user will complete the rest during onboarding
+        result = supabase.table('advisor_profiles').insert({
+            'user_id': founder_id,
+            'linkedin_verified': True,
+            'linkedin_verified_at': verification_time,
+            'linkedin_data': linkedin_data,
+            'verification_badges': ['linkedin'],
+            'status': 'PENDING',  # Will be submitted when onboarding is complete
+            'is_discoverable': False,
+            'max_active_workspaces': 3,
+        }).execute()
+        
+        if not result.data:
+            raise ValueError("Failed to create advisor profile with LinkedIn verification")
+        
+        log_info(f"Created new advisor profile for {founder_id} with LinkedIn verification")
     
     log_info(f"Advisor {founder_id} LinkedIn verified successfully")
     
