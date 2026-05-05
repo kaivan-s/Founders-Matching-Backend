@@ -44,14 +44,19 @@ def generate_oauth_state(clerk_user_id: str, role: str = 'advisor') -> str:
     Generate a secure state token for OAuth flow.
     Stores the state in database for verification during callback.
     
+    The state token is prefixed with the role (e.g., 'advisor_xxx' or 'founder_xxx')
+    so that even if DB lookup fails, we can still determine the role.
+    
     Args:
         clerk_user_id: The Clerk user ID initiating the OAuth flow
         role: 'advisor' or 'founder' - determines which table the callback updates
         
     Returns:
-        The generated state token
+        The generated state token (format: {role}_{random_token})
     """
-    state = secrets.token_urlsafe(32)
+    random_part = secrets.token_urlsafe(32)
+    # Prefix state with role so we can extract it even if DB lookup fails
+    state = f"{role}_{random_part}"
     
     # Store state in database with expiry (15 minutes)
     supabase = get_supabase()
@@ -72,7 +77,7 @@ def generate_oauth_state(clerk_user_id: str, role: str = 'advisor') -> str:
         }).execute()
     except Exception as e:
         log_warning(f"Could not store OAuth state (table may not exist): {e}")
-        # Continue anyway - we'll verify via query param fallback
+        # Continue anyway - role is encoded in state token itself
     
     return state
 
@@ -103,17 +108,39 @@ def verify_oauth_state(state: str) -> Optional[str]:
     return None
 
 
+def extract_role_from_state(state: str) -> str:
+    """
+    Extract role from state token prefix.
+    State format is '{role}_{random_token}' (e.g., 'advisor_abc123' or 'founder_xyz789')
+    
+    Returns:
+        'advisor' or 'founder', defaults to 'advisor'
+    """
+    if state and '_' in state:
+        prefix = state.split('_')[0]
+        if prefix in ('advisor', 'founder'):
+            return prefix
+    return 'advisor'  # default
+
+
 def verify_oauth_state_with_role(state: str) -> Tuple[Optional[str], Optional[str]]:
     """
     Verify an OAuth state token and return both clerk_user_id and role.
     
+    The role can be determined from:
+    1. The database record (preferred, includes user verification)
+    2. The state prefix as fallback (role is encoded in state token)
+    
     Args:
-        state: The state token to verify
+        state: The state token to verify (format: {role}_{random_token})
         
     Returns:
-        Tuple of (clerk_user_id, role) if valid, (None, None) otherwise
+        Tuple of (clerk_user_id, role) if valid, (None, role_from_state) if DB lookup fails
         role will be 'advisor' or 'founder'
     """
+    # Extract role from state prefix (always available as fallback)
+    role_from_state = extract_role_from_state(state)
+    
     supabase = get_supabase()
     
     try:
@@ -134,7 +161,8 @@ def verify_oauth_state_with_role(state: str) -> Tuple[Optional[str], Optional[st
     except Exception as e:
         log_warning(f"Could not verify OAuth state with role: {e}")
     
-    return None, None
+    # DB lookup failed, but we can still return the role from state prefix
+    return None, role_from_state
 
 
 def get_linkedin_auth_url(clerk_user_id: str, role: str = 'advisor') -> Tuple[str, str]:

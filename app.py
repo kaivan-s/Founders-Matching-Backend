@@ -1908,28 +1908,41 @@ def linkedin_unified_callback():
     LinkedIn redirects here with ?code=...&state=...
     We determine the role from state and call the appropriate service.
     """
+    def get_redirect_url(role: str, success: bool = False) -> str:
+        """Get redirect URL based on role."""
+        if role == 'founder':
+            return f"{FRONTEND_URL}/profile"
+        else:
+            # Advisors go to onboarding - it will redirect to dashboard if profile is approved
+            return f"{FRONTEND_URL}/advisor/onboarding"
+    
+    # Extract role from state prefix for error redirects (state format: {role}_{random})
+    state = request.args.get('state', '')
+    role = linkedin_service.extract_role_from_state(state) if state else 'founder'
+    
     try:
         code = request.args.get('code')
-        state = request.args.get('state')
         error = request.args.get('error')
         
         # Handle OAuth errors from LinkedIn
         if error:
             error_desc = request.args.get('error_description', 'LinkedIn authorization failed')
             log_error(f"LinkedIn OAuth error: {error} - {error_desc}")
-            return redirect(f"{FRONTEND_URL}/profile")
+            return redirect(get_redirect_url(role))
         
         if not code:
-            return redirect(f"{FRONTEND_URL}/profile")
+            return redirect(get_redirect_url(role))
         
         if not state:
-            return redirect(f"{FRONTEND_URL}/profile")
+            return redirect(get_redirect_url(role))
         
-        # Verify state and get role
-        clerk_user_id, role = linkedin_service.verify_oauth_state_with_role(state)
+        # Verify state and get role (DB lookup for user, fallback to state prefix for role)
+        clerk_user_id, verified_role = linkedin_service.verify_oauth_state_with_role(state)
+        role = verified_role or role  # Use verified role if available
         
         if not clerk_user_id:
-            return redirect(f"{FRONTEND_URL}/profile")
+            log_warning(f"LinkedIn callback: Could not verify user from state, redirecting to {role} flow")
+            return redirect(get_redirect_url(role))
         
         # Call appropriate verification based on role
         if role == 'founder':
@@ -1937,14 +1950,14 @@ def linkedin_unified_callback():
             return redirect(f"{FRONTEND_URL}/profile")
         else:
             result = linkedin_service.verify_advisor_linkedin(clerk_user_id, code)
-            return redirect(f"{FRONTEND_URL}/advisor/dashboard")
+            return redirect(f"{FRONTEND_URL}/advisor/onboarding")
             
     except ValueError as e:
         log_error(f"LinkedIn callback ValueError: {e}")
-        return redirect(f"{FRONTEND_URL}/profile")
+        return redirect(get_redirect_url(role))
     except Exception as e:
         log_error("Error completing LinkedIn verification", error=e)
-        return redirect(f"{FRONTEND_URL}/profile")
+        return redirect(get_redirect_url(role))
 
 
 @app.route('/api/advisors/linkedin/callback', methods=['POST'])
