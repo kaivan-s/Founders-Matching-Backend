@@ -5,8 +5,9 @@ Lifecycle:
     pending_advisor_confirmation
         └── advisor accepts → pending_payment
             └── founder marks payment sent → pending_payment_confirmation
-                └── advisor confirms received → confirmed (Daily.co room created)
-                    └── call happens, both mark complete → completed
+                └── advisor confirms received → confirmed
+                    └── founders schedule on the advisor's Cal.com link;
+                        call happens off-platform → both mark complete → completed
 
 Money flow:
     Founder pays advisor DIRECTLY via UPI/PayPal/Razorpay link.
@@ -26,6 +27,7 @@ from typing import Dict, Any, List, Optional
 from config.database import get_supabase
 from utils.logger import log_info, log_error, log_warning
 from services import plan_service
+from services import calcom_service
 
 
 # Status constants — keep in sync with the CHECK constraint in
@@ -118,9 +120,43 @@ def _enrich_consultation(row: Dict[str, Any]) -> Dict[str, Any]:
         for p in (res.data or []):
             parties[p['id']] = p
 
+    advisor_cal_booking_url = None
+    advisor_payment_methods = {}
+    if advisor_id:
+        try:
+            ap_res = supabase.table('advisor_profiles').select(
+                'payment_methods, calcom_connected, calcom_booking_url, calcom_username'
+            ).eq('user_id', advisor_id).execute()
+            if ap_res.data:
+                ap = ap_res.data[0]
+                advisor_payment_methods = ap.get('payment_methods') or {}
+                if isinstance(advisor_payment_methods, dict):
+                    advisor_cal_booking_url = calcom_service.resolve_advisor_cal_booking_url(ap)
+        except Exception as e:
+            log_warning(f"Could not load advisor profile for consultation enrich: {e}")
+
+    advisor_party = parties.get(advisor_id)
+    if advisor_party is not None:
+        advisor = {
+            **advisor_party,
+            'payment_methods': advisor_payment_methods,
+            'calcom_booking_url': advisor_cal_booking_url,
+        }
+    elif advisor_id and (
+        advisor_payment_methods or advisor_cal_booking_url is not None
+    ):
+        advisor = {
+            'id': advisor_id,
+            'payment_methods': advisor_payment_methods,
+            'calcom_booking_url': advisor_cal_booking_url,
+        }
+    else:
+        advisor = advisor_party
+
     return {
         **row,
-        'advisor': parties.get(advisor_id),
+        'advisor_cal_booking_url': advisor_cal_booking_url,
+        'advisor': advisor,
         'founder': parties.get(founder_id),
     }
 
@@ -393,7 +429,7 @@ def confirm_payment_received(clerk_user_id: str, consultation_id: str) -> Dict[s
 
     On confirmation:
       - Status -> 'confirmed'
-      - Daily.co room is created (best-effort; failure does not block)
+      - Any legacy video-room fields cleared (consultations schedule on Cal.com)
       - If this is the advisor's FIRST confirmed booking, start the 30-day trial
         (sets advisor_profiles.first_booking_at + trial_ends_at).
     """
@@ -406,28 +442,9 @@ def confirm_payment_received(clerk_user_id: str, consultation_id: str) -> Dict[s
     update: Dict[str, Any] = {
         'status': STATUS_CONFIRMED,
         'payment_confirmed_at': _now_iso(),
+        'video_room_url': None,
+        'video_room_id': None,
     }
-
-    # Best-effort: create a Daily.co room for the call
-    try:
-        from services import video_service
-        if video_service.is_daily_configured():
-            duration = consultation.get('duration_min') or 30
-            # Reuse the founder-date room helper (it accepts arbitrary IDs/stages
-            # via room name; we just need a unique room URL)
-            import time
-            room_name = f"adv-{consultation_id[:8]}-{int(time.time())}"
-            room = video_service.create_founder_date_room(
-                founder_date_id=consultation_id,  # used only as part of name prefix
-                stage=1,
-                duration_minutes=duration,
-            )
-            update['video_room_url'] = room.get('url')
-            update['video_room_id'] = room.get('name')
-    except Exception as e:
-        # Don't block confirmation if video room creation fails — frontend can
-        # offer a "Generate video link" retry button.
-        log_warning(f"Daily.co room creation failed for consultation {consultation_id}: {e}")
 
     res = supabase.table('advisor_consultations').update(update).eq('id', consultation_id).execute()
     updated = res.data[0] if res.data else {**consultation, **update}
@@ -444,7 +461,7 @@ def confirm_payment_received(clerk_user_id: str, consultation_id: str) -> Dict[s
             actor_founder_id=consultation['advisor_id'],
             event_type='CONSULTATION_CONFIRMED',
             title='Consultation confirmed',
-            message='Your advisor confirmed receipt of payment. The call is locked in.',
+            message='Payment confirmed — use the advisor\'s Cal.com link on your consultations page to book a time.',
             consultation_id=consultation_id,
         )
     except Exception as e:

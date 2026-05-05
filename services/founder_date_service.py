@@ -8,13 +8,14 @@ The Founder Date is a structured 3-stage co-founder evaluation:
 
 Both founders must rate vibe_rating >= 4 to advance to the next stage.
 This module owns the stage definitions, the gating logic, and the workflow
-state transitions. Video room creation is delegated to video_service.
+state transitions. Founder Dates use Cal.com for scheduling sync (no embedded
+calls on-platform).
 """
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional, List, Tuple
 
 from config.database import get_supabase
-from services import video_service
+from services.calcom_service import normalize_cal_booking_url
 from utils.logger import log_info, log_error
 
 
@@ -117,6 +118,25 @@ def _is_participant(founder_id: str, fd_row: Dict[str, Any]) -> bool:
     return fd_row.get('founder_a_id') == founder_id or fd_row.get('founder_b_id') == founder_id
 
 
+def _public_cal_booking_url_from_username(cal_username: Optional[str]) -> Optional[str]:
+    """Map a founder's stored Cal username to a booking page URL."""
+    if not cal_username or not str(cal_username).strip():
+        return None
+    raw = str(cal_username).strip().lstrip('@')
+    if raw.startswith(('http://', 'https://')):
+        return raw.split('?', 1)[0].rstrip('/')
+    slug = raw.split('/')[0].lower()
+    if not slug:
+        return None
+    return f'https://cal.com/{slug}'
+
+
+def _scheduling_urls_for_call(call: Dict[str, Any]) -> Tuple[Optional[str], Optional[str]]:
+    """(scheduling_url, legacy room_url alias) from a call row."""
+    url = call.get('cal_booking_url') or call.get('daily_room_url')
+    return url, url
+
+
 # ============================================================
 # Founder Date lifecycle
 # ============================================================
@@ -174,7 +194,18 @@ def list_founder_dates(clerk_user_id: str) -> List[Dict[str, Any]]:
         'updated_at', desc=True
     ).execute()
 
-    return result.data or []
+    rows = result.data or []
+    for row in rows:
+        peer = row.get('founder_b') if row.get('founder_a_id') == founder_id else row.get('founder_a')
+        if isinstance(peer, dict):
+            row['other_founder'] = {
+                'name': peer.get('name'),
+                'avatar_url': peer.get('profile_picture_url'),
+            }
+        else:
+            row['other_founder'] = None
+
+    return rows
 
 
 def get_founder_date_detail(clerk_user_id: str, founder_date_id: str) -> Dict[str, Any]:
@@ -186,8 +217,8 @@ def get_founder_date_detail(clerk_user_id: str, founder_date_id: str) -> Dict[st
     supabase = get_supabase()
 
     fd_result = supabase.table('founder_dates').select(
-        '*, founder_a:founders!founder_a_id(id, name, profile_picture_url, cal_username, cal_event_type_id, timezone),'
-        ' founder_b:founders!founder_b_id(id, name, profile_picture_url, cal_username, cal_event_type_id, timezone)'
+        '*, founder_a:founders!founder_a_id(id, name, profile_picture_url, headline, location, cal_booking_url, cal_username, cal_event_type_id, timezone),'
+        ' founder_b:founders!founder_b_id(id, name, profile_picture_url, headline, location, cal_booking_url, cal_username, cal_event_type_id, timezone)'
     ).eq('id', founder_date_id).execute()
 
     if not fd_result.data:
@@ -234,6 +265,16 @@ def get_founder_date_detail(clerk_user_id: str, founder_date_id: str) -> Dict[st
     # Determine next action for the current user
     next_action = _compute_next_action(fd, enriched_calls, founder_id)
 
+    peer_nested = fd['founder_b'] if fd['founder_a_id'] == founder_id else fd['founder_a']
+    other_founder_out = None
+    if isinstance(peer_nested, dict):
+        other_founder_out = {
+            'name': peer_nested.get('name'),
+            'avatar_url': peer_nested.get('profile_picture_url'),
+            'headline': peer_nested.get('headline'),
+            'location': peer_nested.get('location'),
+        }
+
     return {
         **fd,
         'calls': enriched_calls,
@@ -241,6 +282,7 @@ def get_founder_date_detail(clerk_user_id: str, founder_date_id: str) -> Dict[st
         'all_stages': get_stage_definitions(),
         'next_action': next_action,
         'viewer_founder_id': founder_id,
+        'other_founder': other_founder_out,
     }
 
 
@@ -274,12 +316,18 @@ def _compute_next_action(fd: Dict[str, Any], calls: List[Dict[str, Any]], viewer
     latest = max(stage_calls, key=lambda c: c.get('created_at') or '')
 
     if latest['status'] == 'SCHEDULED':
+        scheduling_url, room_url = _scheduling_urls_for_call(latest)
         return {
             'action': 'JOIN_CALL',
             'call_id': latest['id'],
             'scheduled_at': latest.get('scheduled_at'),
-            'room_url': latest.get('daily_room_url'),
-            'message': 'Your call is scheduled. Join when ready.',
+            'scheduling_url': scheduling_url,
+            'room_url': room_url,
+            'daily_room_url': latest.get('daily_room_url'),
+            'message': (
+                'Scheduling link is saved. Pick a time on Cal.com together, '
+                'then start your session here when ready.'
+            ),
         }
 
     if latest['status'] in ('CANCELLED', 'NO_SHOW'):
@@ -332,7 +380,18 @@ def _compute_next_action(fd: Dict[str, Any], calls: List[Dict[str, Any]], viewer
             'message': 'One or both founders chose not to continue.',
         }
 
-    return {'action': 'JOIN_CALL', 'call_id': latest['id'], 'message': 'Call in progress.'}
+    scheduling_url, room_url = _scheduling_urls_for_call(latest)
+    return {
+        'action': 'JOIN_CALL',
+        'call_id': latest['id'],
+        'scheduled_at': latest.get('scheduled_at'),
+        'scheduling_url': scheduling_url,
+        'room_url': room_url,
+        'daily_room_url': latest.get('daily_room_url'),
+        'message': (
+            'Session in progress. Meet using whatever link you booked (Cal.com, Zoom, etc.).'
+        ),
+    }
 
 
 # ============================================================
@@ -346,15 +405,22 @@ def schedule_call(
     cal_booking_url: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
-    Schedule a call for the current stage. Creates a Daily.co room.
+    Schedule a founder-date milestone for the current stage.
 
-    `scheduled_at` is the ISO timestamp the call is scheduled for. It can be
-    set manually or come from a Cal.com booking webhook.
+    Stores an optional agreed time (`scheduled_at`) and a Cal.com scheduling URL
+    so both founders can sync. No on-platform video rooms.
+
+    Prefer a full booking URL from the request body, then from each founder's
+    saved `cal_booking_url`. Legacy `cal_username` is used only as last resort
+    to build `https://cal.com/<slug>`.
     """
     founder_id = _get_founder_id(clerk_user_id)
     supabase = get_supabase()
 
-    fd_result = supabase.table('founder_dates').select('*').eq('id', founder_date_id).execute()
+    fd_result = supabase.table('founder_dates').select(
+        '*, founder_a:founders!founder_a_id(id, cal_booking_url, cal_username),'
+        ' founder_b:founders!founder_b_id(id, cal_booking_url, cal_username)'
+    ).eq('id', founder_date_id).execute()
     if not fd_result.data:
         raise ValueError("Founder date not found")
     fd = fd_result.data[0]
@@ -364,7 +430,6 @@ def schedule_call(
         raise ValueError(f"Founder date is {fd['overall_status']}; cannot schedule new calls")
 
     current_stage = fd['current_stage']
-    stage_def = FOUNDER_DATE_STAGES[current_stage]
 
     # Cancel any prior unfinished call for this stage
     prior = supabase.table('founder_date_calls').select('id, status').eq(
@@ -374,18 +439,33 @@ def schedule_call(
         for p in prior.data:
             supabase.table('founder_date_calls').update({'status': 'CANCELLED'}).eq('id', p['id']).execute()
 
-    # Create the Daily.co room (or skip if not configured — call still saved)
-    room: Dict[str, Any] = {}
-    if video_service.is_daily_configured():
-        try:
-            room = video_service.create_founder_date_room(
-                founder_date_id=founder_date_id,
-                stage=current_stage,
-                duration_minutes=stage_def['duration_minutes'],
-            )
-        except Exception as e:
-            log_error(f"Failed to create video room for founder date {founder_date_id}: {e}")
-            # Not fatal — call can still be scheduled; the user can join via Cal.com link
+    resolved_cal_url = (cal_booking_url or '').strip() or None
+    if resolved_cal_url and not resolved_cal_url.startswith(('http://', 'https://')):
+        resolved_cal_url = f'https://{resolved_cal_url.lstrip("/")}'
+    try:
+        resolved_cal_url = normalize_cal_booking_url(resolved_cal_url)
+    except ValueError:
+        raise ValueError('Invalid cal_booking_url; use a valid https link')
+
+    if not resolved_cal_url:
+        fa_row = fd.get('founder_a') or {}
+        fb_row = fd.get('founder_b') or {}
+        if founder_id == fd['founder_a_id']:
+            primary, fallback = fa_row, fb_row
+        else:
+            primary, fallback = fb_row, fa_row
+
+        for row in (primary, fallback):
+            try:
+                resolved_cal_url = normalize_cal_booking_url(row.get('cal_booking_url'))
+            except ValueError:
+                resolved_cal_url = None
+            if resolved_cal_url:
+                break
+        if not resolved_cal_url:
+            resolved_cal_url = _public_cal_booking_url_from_username(primary.get('cal_username'))
+        if not resolved_cal_url:
+            resolved_cal_url = _public_cal_booking_url_from_username(fallback.get('cal_username'))
 
     new_call = {
         'founder_date_id': founder_date_id,
@@ -393,10 +473,10 @@ def schedule_call(
         'status': 'SCHEDULED',
         'scheduled_at': scheduled_at,
         'cal_booking_id': cal_booking_id,
-        'cal_booking_url': cal_booking_url,
-        'daily_room_name': room.get('name'),
-        'daily_room_url': room.get('url'),
-        'daily_room_expires_at': room.get('expires_at_iso'),
+        'cal_booking_url': resolved_cal_url,
+        'daily_room_name': None,
+        'daily_room_url': None,
+        'daily_room_expires_at': None,
     }
     result = supabase.table('founder_date_calls').insert(new_call).execute()
     if not result.data:
@@ -494,10 +574,6 @@ def complete_call(clerk_user_id: str, call_id: str) -> Dict[str, Any]:
         )
     except Exception:
         pass
-
-    # Best-effort cleanup of the Daily.co room (saves bandwidth)
-    if call.get('daily_room_name'):
-        video_service.delete_room(call['daily_room_name'])
 
     return {**call, **update}
 
@@ -659,15 +735,25 @@ def abandon_founder_date(clerk_user_id: str, founder_date_id: str) -> Dict[str, 
 # ============================================================
 def update_cal_settings(
     clerk_user_id: str,
+    cal_booking_url: Optional[str] = None,
     cal_username: Optional[str] = None,
     cal_event_type_id: Optional[int] = None,
     timezone_str: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Update the founder's Cal.com username + event type for embedding."""
+    """Update the founder's Cal.com booking link (paste) and optional legacy fields."""
     founder_id = _get_founder_id(clerk_user_id)
     supabase = get_supabase()
 
     update_data: Dict[str, Any] = {}
+    if cal_booking_url is not None:
+        url = cal_booking_url.strip() or None
+        if url:
+            try:
+                update_data['cal_booking_url'] = normalize_cal_booking_url(url)
+            except ValueError as e:
+                raise ValueError(str(e))
+        else:
+            update_data['cal_booking_url'] = None
     if cal_username is not None:
         update_data['cal_username'] = cal_username.strip().lower() or None
     if cal_event_type_id is not None:

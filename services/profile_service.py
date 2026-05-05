@@ -69,6 +69,7 @@ def get_profile(clerk_user_id: str) -> Dict[str, Any]:
         headline, bio, interests, expertise_details, past_projects,
         work_preferences, looking_for_description,
         linkedin_url, linkedin_verified, twitter_url, portfolio_url, github_url,
+        cal_booking_url,
         profile_picture_url, purpose, plan, created_at, onboarding_completed
     ''').eq('clerk_user_id', clerk_user_id).execute()
     
@@ -90,6 +91,7 @@ def get_profile(clerk_user_id: str) -> Dict[str, Any]:
         'twitter_url': founder.get('twitter_url') or '',
         'portfolio_url': founder.get('portfolio_url') or '',
         'github_url': founder.get('github_url') or '',
+        'cal_booking_url': founder.get('cal_booking_url') or '',
     }
 
 
@@ -276,6 +278,17 @@ def update_profile(clerk_user_id: str, data: Dict[str, Any]) -> Dict[str, Any]:
         url = data.get('github_url') or ''
         update_data['github_url'] = url.strip()[:500] if url else None
     
+    if 'cal_booking_url' in data:
+        from services.calcom_service import normalize_cal_booking_url
+        raw_cal = data.get('cal_booking_url')
+        if raw_cal is None or (isinstance(raw_cal, str) and not raw_cal.strip()):
+            update_data['cal_booking_url'] = None
+        else:
+            try:
+                update_data['cal_booking_url'] = normalize_cal_booking_url(raw_cal)
+            except ValueError as e:
+                raise ValueError(str(e))
+
     if not update_data:
         raise ValueError("No valid fields to update")
     

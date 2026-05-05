@@ -268,10 +268,21 @@ def verify_advisor_linkedin(clerk_user_id: str, code: str) -> Dict[str, Any]:
     # Update advisor profile with verification
     supabase = get_supabase()
     
+    # First, get current verification_badges
+    current_profile = supabase.table('advisor_profiles').select('verification_badges').eq('user_id', founder_id).execute()
+    current_badges = []
+    if current_profile.data and current_profile.data[0].get('verification_badges'):
+        current_badges = current_profile.data[0]['verification_badges']
+    
+    # Add linkedin badge if not already present
+    if 'linkedin' not in current_badges:
+        current_badges.append('linkedin')
+    
     result = supabase.table('advisor_profiles').update({
         'linkedin_verified': True,
         'linkedin_verified_at': datetime.now(timezone.utc).isoformat(),
         'linkedin_data': linkedin_data,
+        'verification_badges': current_badges,
     }).eq('user_id', founder_id).execute()
     
     if not result.data:
@@ -338,10 +349,17 @@ def revoke_linkedin_verification(clerk_user_id: str) -> Dict[str, Any]:
     
     supabase = get_supabase()
     
+    # Get current badges and remove 'linkedin' if present
+    current_profile = supabase.table('advisor_profiles').select('verification_badges').eq('user_id', founder_id).execute()
+    current_badges = []
+    if current_profile.data and current_profile.data[0].get('verification_badges'):
+        current_badges = [b for b in current_profile.data[0]['verification_badges'] if b != 'linkedin']
+    
     result = supabase.table('advisor_profiles').update({
         'linkedin_verified': False,
         'linkedin_verified_at': None,
         'linkedin_data': None,
+        'verification_badges': current_badges,
     }).eq('user_id', founder_id).execute()
     
     if not result.data:

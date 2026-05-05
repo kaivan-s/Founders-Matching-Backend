@@ -142,6 +142,107 @@ def _get_or_create_founder_id(clerk_user_id, user_name=None, user_email=None):
         traceback.print_exc()
         raise ValueError(error_msg)
 
+
+def _calculate_profile_completion_score(data: dict) -> int:
+    """Calculate profile completion score (0-100) based on filled fields."""
+    score = 0
+    max_score = 100
+    
+    # Basic info (20 points)
+    if data.get('headline') and len(data.get('headline', '')) >= 10:
+        score += 5
+    if data.get('bio') and len(data.get('bio', '')) >= 100:
+        score += 10
+    linkedin_url = data.get('linkedin_url', '').strip()
+    if linkedin_url and 'linkedin.com' in linkedin_url:
+        score += 5
+    
+    # Professional background (30 points)
+    bg = data.get('professional_background', {})
+    if isinstance(bg, dict):
+        if bg.get('years_experience'):
+            score += 5
+        current_role = bg.get('current_role', {})
+        if isinstance(current_role, dict) and current_role.get('title') and current_role.get('company'):
+            score += 10
+        previous_roles = bg.get('previous_roles', [])
+        if isinstance(previous_roles, list) and len(previous_roles) > 0:
+            score += 5
+        if bg.get('startups_advised_count'):
+            score += 5
+        if bg.get('notable_achievements', '').strip():
+            score += 5
+    
+    # Expertise (15 points)
+    if data.get('advisory_types') and len(data.get('advisory_types', [])) > 0:
+        score += 5
+    if data.get('preferred_stages') and len(data.get('preferred_stages', [])) > 0:
+        score += 5
+    if data.get('domains') and len(data.get('domains', [])) > 0:
+        score += 5
+    
+    # Portfolio (20 points)
+    portfolio = data.get('portfolio', {})
+    if isinstance(portfolio, dict):
+        if portfolio.get('personal_website', '').strip():
+            score += 5
+        if portfolio.get('crunchbase_url', '').strip() or portfolio.get('angellist_url', '').strip():
+            score += 5
+        if portfolio.get('medium_url', '').strip() or portfolio.get('youtube_url', '').strip():
+            score += 5
+        other_links = portfolio.get('other_links', [])
+        if isinstance(other_links, list) and len(other_links) > 0:
+            score += 5
+    
+    # Consultation setup (15 points)
+    if data.get('availability_hours_per_week'):
+        score += 5
+    rate_30 = data.get('consultation_rate_30min_usd')
+    rate_60 = data.get('consultation_rate_60min_usd')
+    if rate_30 or rate_60:
+        score += 5
+    payment_methods = data.get('payment_methods', {})
+    if isinstance(payment_methods, dict) and any(v and str(v).strip() for v in payment_methods.values()):
+        score += 5
+    
+    return min(score, max_score)
+
+
+def _calculate_verification_badges(data: dict) -> list:
+    """Calculate which verification badges the advisor has earned."""
+    badges = []
+    
+    # LinkedIn badge
+    linkedin_url = data.get('linkedin_url', '').strip()
+    if linkedin_url and 'linkedin.com' in linkedin_url:
+        badges.append('linkedin')
+    
+    # Veteran badge (10+ years experience)
+    bg = data.get('professional_background', {})
+    if isinstance(bg, dict):
+        years = bg.get('years_experience', '')
+        if years in ['10-15', '15-20', '20+']:
+            badges.append('veteran')
+        
+        # Experienced badge (2+ previous roles)
+        previous_roles = bg.get('previous_roles', [])
+        if isinstance(previous_roles, list) and len(previous_roles) >= 2:
+            badges.append('experienced')
+    
+    # Portfolio badge
+    portfolio = data.get('portfolio', {})
+    if isinstance(portfolio, dict):
+        if portfolio.get('personal_website', '').strip() or portfolio.get('crunchbase_url', '').strip():
+            badges.append('portfolio')
+    
+    # Profile complete badge (80%+ completion)
+    score = _calculate_profile_completion_score(data)
+    if score >= 80:
+        badges.append('profile_complete')
+    
+    return badges
+
+
 def create_advisor_profile(clerk_user_id, data, user_name=None, user_email=None):
     """Create or update advisor profile"""
     
@@ -192,14 +293,13 @@ def create_advisor_profile(clerk_user_id, data, user_name=None, user_email=None)
             raise
         raise ValueError(f"max_active_workspaces must be a number between 1 and 10. Received: {max_workspaces}")
     
-    # Validate LinkedIn URL (required)
+    # Validate LinkedIn URL (optional - can be set via OAuth)
     linkedin_url = data.get('linkedin_url', '').strip()
-    if not linkedin_url:
-        raise ValueError("LinkedIn URL is required")
-    if not linkedin_url.startswith('https://'):
-        raise ValueError("LinkedIn URL must start with https://")
-    if 'linkedin.com' not in linkedin_url and 'linked.in' not in linkedin_url:
-        raise ValueError("LinkedIn URL must be a valid LinkedIn profile URL")
+    if linkedin_url:
+        if not linkedin_url.startswith('https://'):
+            raise ValueError("LinkedIn URL must start with https://")
+        if 'linkedin.com' not in linkedin_url and 'linked.in' not in linkedin_url:
+            raise ValueError("LinkedIn URL must be a valid LinkedIn profile URL")
     
     # Validate Twitter/X URL if provided
     twitter_url = data.get('twitter_url', '').strip()
@@ -232,6 +332,22 @@ def create_advisor_profile(clerk_user_id, data, user_name=None, user_email=None)
     if payment_methods is not None and not isinstance(payment_methods, dict):
         raise ValueError("payment_methods must be an object")
 
+    # Professional background (structured)
+    professional_background = data.get('professional_background')
+    if professional_background is not None and not isinstance(professional_background, dict):
+        raise ValueError("professional_background must be an object")
+    
+    # Portfolio links
+    portfolio = data.get('portfolio')
+    if portfolio is not None and not isinstance(portfolio, dict):
+        raise ValueError("portfolio must be an object")
+    
+    # Calculate profile completion score
+    completion_score = _calculate_profile_completion_score(data)
+    
+    # Calculate badges earned
+    badges_earned = _calculate_verification_badges(data)
+    
     profile_data = {
         'user_id': founder_id,
         'headline': data['headline'],
@@ -239,12 +355,12 @@ def create_advisor_profile(clerk_user_id, data, user_name=None, user_email=None)
         'timezone': data.get('timezone', 'UTC'),
         'languages': data.get('languages', []),
         'expertise_stages': data.get('expertise_stages', []),
-        'preferred_stages': data.get('preferred_stages', []),  # Stages they prefer to advise
-        'advisory_types': data.get('advisory_types', []),  # Types of advisory they provide
+        'preferred_stages': data.get('preferred_stages', []),
+        'advisory_types': data.get('advisory_types', []),
         'domains': data.get('domains', []),
         'max_active_workspaces': max_workspaces,
         'preferred_cadence': data.get('preferred_cadence', 'weekly'),
-        'availability_hours_per_week': data.get('availability_hours_per_week'),  # Structured hours selection
+        'availability_hours_per_week': data.get('availability_hours_per_week'),
         'contact_email': data.get('contact_email'),
         'contact_note': data.get('contact_note'),
         'linkedin_url': linkedin_url,
@@ -253,8 +369,21 @@ def create_advisor_profile(clerk_user_id, data, user_name=None, user_email=None)
         'consultation_rate_30min_usd': rate_30,
         'consultation_rate_60min_usd': rate_60,
         'payment_methods': payment_methods if payment_methods is not None else {},
+        # New verification fields
+        'professional_background': professional_background if professional_background is not None else {},
+        'portfolio': portfolio if portfolio is not None else {},
+        'profile_completion_score': completion_score,
+        'verification_badges': badges_earned,
     }
-    
+
+    # Cal.com scheduling URL (paste). Optional; does not require OAuth.
+    if 'calcom_booking_url' in data:
+        from services.calcom_service import normalize_cal_booking_url
+        try:
+            profile_data['calcom_booking_url'] = normalize_cal_booking_url(data.get('calcom_booking_url'))
+        except ValueError as e:
+            raise ValueError(str(e))
+
     # Handle questionnaire_data separately (JSONB field)
     questionnaire_data = data.get('questionnaire_data', {})
     if questionnaire_data and isinstance(questionnaire_data, dict) and len(questionnaire_data) > 0:
@@ -349,6 +478,35 @@ def update_advisor_contact_info(clerk_user_id, contact_info):
         return result.data[0] if result.data else None
     
     return None
+
+
+def update_advisor_cal_booking_link(clerk_user_id: str, booking_url: Optional[str]) -> Dict[str, Any]:
+    """Save or clear the advisor's public Cal.com scheduling link (paste-only, no OAuth required)."""
+    from services.calcom_service import normalize_cal_booking_url
+
+    founder_id = _get_founder_id(clerk_user_id)
+    supabase = get_supabase()
+
+    existing = supabase.table('advisor_profiles').select('id').eq('user_id', founder_id).execute()
+    if not existing.data:
+        raise ValueError("Advisor profile not found")
+
+    if booking_url is None or (isinstance(booking_url, str) and not booking_url.strip()):
+        normalized = None
+    else:
+        try:
+            normalized = normalize_cal_booking_url(booking_url)
+        except ValueError as e:
+            raise ValueError(str(e))
+
+    supabase.table('advisor_profiles').update({
+        'calcom_booking_url': normalized,
+    }).eq('id', existing.data[0]['id']).execute()
+
+    out = get_advisor_profile(clerk_user_id)
+    if not out:
+        raise ValueError("Advisor profile not found")
+    return out
 
 def get_advisor_profile(clerk_user_id):
     """Get advisor profile for current user

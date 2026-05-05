@@ -19,8 +19,12 @@ def list_pending_advisors():
     supabase = get_supabase()
     result = supabase.table('advisor_profiles').select(
         'id, user_id, headline, bio, status, is_discoverable, expertise_stages, domains, '
-        'max_active_workspaces, preferred_cadence, timezone, created_at, updated_at, '
-        'contact_email, meeting_link, contact_note, linkedin_url, twitter_url, questionnaire_data'
+        'preferred_stages, advisory_types, max_active_workspaces, preferred_cadence, timezone, '
+        'created_at, updated_at, contact_email, meeting_link, contact_note, linkedin_url, twitter_url, '
+        'questionnaire_data, professional_background, portfolio, verification_badges, '
+        'profile_completion_score, linkedin_verified, linkedin_verified_at, '
+        'consultation_rate_30min_usd, consultation_rate_60min_usd, availability_hours_per_week, '
+        'profile_image_url'
     ).eq('status', 'PENDING').order('created_at', desc=True).execute()
 
     profiles = result.data or []

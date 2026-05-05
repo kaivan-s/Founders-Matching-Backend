@@ -3,6 +3,7 @@ from flask import Flask, jsonify, request, redirect
 from flask_cors import CORS
 import os
 import traceback
+from urllib.parse import quote
 
 from utils.auth import get_clerk_user_id
 from utils.validation import sanitize_string, validate_integer, sanitize_list, validate_enum
@@ -1925,6 +1926,60 @@ def advisor_profile():
         }), 500
 
 
+# Advisor profile image upload
+from services import image_upload_service
+
+@app.route('/api/advisors/profile/image', methods=['POST', 'DELETE'])
+@limiter.limit(RATE_LIMITS['moderate'])
+def advisor_profile_image():
+    """Upload or delete advisor profile image"""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        # Get advisor profile ID
+        supabase = get_supabase()
+        founder = supabase.table('founders').select('id').eq('clerk_user_id', clerk_user_id).execute()
+        if not founder.data:
+            return jsonify({"error": "User not found"}), 404
+        
+        founder_id = founder.data[0]['id']
+        advisor = supabase.table('advisor_profiles').select('id').eq('user_id', founder_id).execute()
+        if not advisor.data:
+            return jsonify({"error": "Advisor profile not found"}), 404
+        
+        advisor_profile_id = advisor.data[0]['id']
+        
+        if request.method == 'DELETE':
+            result = image_upload_service.delete_advisor_profile_image(advisor_profile_id)
+            return jsonify(result), 200
+        
+        # POST - Upload image
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "Request body required"}), 400
+        
+        base64_data = data.get('image')
+        content_type = data.get('content_type', 'image/jpeg')
+        
+        if not base64_data:
+            return jsonify({"error": "Image data required"}), 400
+        
+        result = image_upload_service.upload_advisor_profile_image_base64(
+            advisor_profile_id,
+            base64_data,
+            content_type
+        )
+        return jsonify(result), 200
+        
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        log_error("Error with advisor profile image", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
 # LinkedIn OAuth endpoints for advisor verification
 from services import linkedin_service
 
@@ -2058,6 +2113,61 @@ def linkedin_revoke():
         return jsonify({"error": str(e)}), 400
     except Exception as e:
         log_error("Error revoking LinkedIn verification", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
+# Cal.com advisor scheduling (pasted booking URL only; no OAuth)
+from services import calcom_service
+
+@app.route('/api/advisors/cal-booking-link', methods=['PUT'])
+@limiter.limit(RATE_LIMITS['moderate'])
+def save_advisor_cal_booking_link():
+    """Save advisor's Cal.com scheduling URL (paste). Empty string clears the link."""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+
+        data = request.get_json() or {}
+        profile = advisor_service.update_advisor_cal_booking_link(
+            clerk_user_id,
+            data.get('calcom_booking_url'),
+        )
+        return jsonify(profile), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        log_error("Error saving Cal.com booking link", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/advisors/<advisor_user_id>/availability', methods=['GET'])
+def get_advisor_availability(advisor_user_id):
+    """Lightweight helper: exposes booking_link; slot grid lives on Cal.com."""
+    try:
+        start_date = request.args.get('start_date')
+        end_date = request.args.get('end_date')
+        duration = request.args.get('duration', 30, type=int)
+        availability = calcom_service.get_advisor_availability(
+            advisor_user_id, start_date or '', end_date or '', duration
+        )
+        return jsonify(availability), 200
+    except Exception as e:
+        log_error("Error getting advisor availability", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/advisors/<advisor_user_id>/booking-link', methods=['GET'])
+def get_advisor_booking_link(advisor_user_id):
+    """Get advisor's cal.com booking link (public)"""
+    try:
+        link = calcom_service.get_advisor_booking_link(advisor_user_id)
+        return jsonify({
+            "has_calcom": link is not None,
+            "booking_url": link
+        }), 200
+    except Exception as e:
+        log_error("Error getting booking link", error=e)
         return jsonify({"error": str(e)}), 500
 
 
@@ -2414,7 +2524,7 @@ def abandon_founder_date_route(founder_date_id):
 
 @app.route('/api/founder-dates/calls/<call_id>/start', methods=['POST'])
 def start_founder_date_call(call_id):
-    """Mark a call as IN_PROGRESS and return the room URL."""
+    """Mark a call as IN_PROGRESS and return updated call payload (includes Cal scheduling URL when set)."""
     try:
         clerk_user_id = get_clerk_user_id()
         if not clerk_user_id:
@@ -2480,7 +2590,7 @@ def evaluate_founder_date_call(call_id):
 
 @app.route('/api/founders/cal-settings', methods=['PUT'])
 def update_cal_settings():
-    """Update the founder's Cal.com username, event type, and timezone."""
+    """Update the founder's Cal.com booking link (paste) and optional legacy fields."""
     try:
         clerk_user_id = get_clerk_user_id()
         if not clerk_user_id:
@@ -2489,6 +2599,7 @@ def update_cal_settings():
         data = request.get_json() or {}
         result = founder_date_service.update_cal_settings(
             clerk_user_id,
+            cal_booking_url=data.get('cal_booking_url'),
             cal_username=data.get('cal_username'),
             cal_event_type_id=data.get('cal_event_type_id'),
             timezone_str=data.get('timezone'),
@@ -3045,7 +3156,7 @@ def confirm_consultation_payment(consultation_id):
     """Advisor confirms receipt of payment; locks in the consultation.
 
     Side effects:
-      - Creates a Daily.co video room (best-effort)
+      - Clears any legacy Daily video-room fields; founders schedule via the advisor's Cal.com link.
       - Starts the advisor's 30-day Pro Advisor trial if it's their first booking
     """
     try:
