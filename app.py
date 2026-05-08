@@ -5550,15 +5550,17 @@ def send_weekly_projects_digest():
         return jsonify({"error": str(e)}), 500
 
 
-@app.route('/api/cron/discovery-daily-digest', methods=['POST'])
+@app.route('/api/cron/discovery-daily-digest', methods=['GET', 'POST'])
 def cron_discovery_daily_digest():
     """
     Builds or refreshes today's curated discovery batch for every founder who has
     saved discovery questionnaire answers, then sends at most one digest email per
     founder per UTC day (tracked on seeker_discovery_daily_feed.digest_email_sent).
 
-    Configure an external scheduler (e.g. daily 09:00 UTC) with header:
-    X-Cron-Secret: CRON_SECRET
+    Auth: header X-Cron-Secret must match env CRON_SECRET.
+
+    Supports GET and POST (some schedulers, e.g. cron-job.org default, use GET —
+    prefer POST when the UI allows it).
     """
     cron_secret = request.headers.get('X-Cron-Secret')
     expected_secret = os.getenv('CRON_SECRET')
