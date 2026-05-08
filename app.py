@@ -10,11 +10,12 @@ from utils.validation import sanitize_string, validate_integer, sanitize_list, v
 from utils.logger import log_error, log_warning, log_info
 from utils.rate_limit import init_rate_limiter, RATE_LIMITS
 from config.database import get_supabase
-from services import founder_service, project_service, swipe_service, profile_service, match_service, waitlist_service, message_service, payment_service, workspace_service
+from services import founder_service, project_service, profile_service, match_service, waitlist_service, message_service, payment_service, workspace_service
 from services import plan_service, subscription_service, document_service, feedback_service, advanced_search_service, advisor_service, admin_service, feed_service, project_access_service
 from services import linkedin_service, github_service, verification_service
 from services import founder_date_service, activation_service
 from services import consultation_service
+from services import seeker_service, application_service
 from services.notification_service import NotificationService, ApprovalService
 
 app = Flask(__name__)
@@ -80,38 +81,297 @@ def health_check():
 
 @app.route('/api/discovery/filter-options', methods=['GET'])
 def discovery_filter_options():
-    """Return available values for each discovery filter (for picker UIs)."""
-    try:
-        from services import discovery_filter_service
-        return jsonify(discovery_filter_service.get_filter_options()), 200
-    except Exception as e:
-        log_error("Error getting discovery filter options", error=e)
-        return jsonify({"error": str(e)}), 500
+    """
+    DEPRECATED: Use GET /api/seeker/questionnaire-options instead.
+    
+    Returns the new questionnaire options for backward compatibility.
+    """
+    return jsonify({
+        "deprecated": True,
+        "message": "Use GET /api/seeker/questionnaire-options for the new discovery system",
+        "roles": seeker_service.ROLE_OPTIONS,
+        "stages": seeker_service.STAGE_OPTIONS,
+        "industries": seeker_service.INDUSTRY_OPTIONS,
+    }), 200
 
 
-@app.route('/api/founders', methods=['GET'])
-def get_founders():
-    """Get founders for swiping (excludes current user and already swiped)"""
+# ============================================
+# SEEKER FLOW - "I want to join a project"
+# New intent-based discovery system
+# ============================================
+
+@app.route('/api/seeker/search', methods=['POST'])
+@limiter.limit(RATE_LIMITS['moderate'])
+def seeker_search():
+    """
+    Search for projects based on questionnaire answers.
+    Returns top 2-3 curated matches.
+    
+    Request body:
+    {
+        "role": "technical|business|product|generalist",
+        "stage": "idea|mvp|early_revenue|scaling|any",
+        "industries": ["fintech", "ai_ml"],  // up to 3
+        "availability": "full_time|part_time_to_full|part_time_only|exploring",
+        "priorities": ["equity_upside", "learning"],  // up to 2
+        "dealbreakers": ["remote_friendly", "founder_verified"]  // optional
+    }
+    """
     try:
         clerk_user_id = get_clerk_user_id()
         if not clerk_user_id:
-            return jsonify({"error": "User ID required", "received_headers": [k for k, v in request.headers]}), 401
+            return jsonify({"error": "User ID required"}), 401
+        
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "Questionnaire data required"}), 400
+        
+        from services import seeker_service
+        
+        payload = seeker_service.search_projects_for_seeker(
+            clerk_user_id,
+            questionnaire=data,
+            limit=data.get('limit', 3),
+        )
 
-        # Parse + validate filters via the centralized helper. Supports new
-        # multi-value filters (stages, genres, interests), verification tier,
-        # time/location preferences, and compatibility-answer matching.
-        from services import discovery_filter_service
-        filters = discovery_filter_service.parse_discovery_filters(request.args)
+        matches = payload.get('matches') or []
+        discovery = payload.get('discovery')
 
-        # Validate mode parameter
-        mode = validate_enum(request.args.get('mode', 'projects'), ['projects', 'founders'], case_sensitive=False) or 'projects'
+        resp = {"matches": matches, "count": len(matches)}
+        if discovery is not None:
+            resp["discovery"] = discovery
+        return jsonify(resp), 200
+        
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        error_trace = traceback.format_exc()
+        log_error("Error in seeker search", error=e, traceback_str=error_trace)
+        return jsonify({"error": str(e)}), 500
 
-        founders = founder_service.get_available_founders(clerk_user_id, filters, mode=mode)
-        return jsonify(founders)
+
+@app.route('/api/seeker/apply/<project_id>', methods=['POST'])
+@limiter.limit(RATE_LIMITS['moderate'])
+def seeker_apply(project_id):
+    """
+    Apply to join a project.
+    
+    Request body:
+    {
+        "interest_reason": "Why I'm interested...",
+        "value_proposition": "What I bring...",
+        "question_answers": {"q1": "answer1"},  // answers to custom questions
+        "video_intro_url": "optional url",
+        "voice_intro_url": "optional url"
+    }
+    """
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        data = request.get_json() or {}
+        
+        from services import seeker_service
+        
+        result = seeker_service.apply_to_project(
+            clerk_user_id,
+            project_id,
+            application_data=data
+        )
+        
+        return jsonify(result), 201
+        
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        error_trace = traceback.format_exc()
+        log_error("Error in seeker apply", error=e, traceback_str=error_trace)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/seeker/applications', methods=['GET'])
+def seeker_my_applications():
+    """Get all applications submitted by the current user."""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        from services import seeker_service
+        
+        applications = seeker_service.get_my_applications(clerk_user_id)
+        return jsonify(applications), 200
+        
     except ValueError as e:
         return jsonify({"error": str(e)}), 404
     except Exception as e:
+        log_error("Error getting seeker applications", error=e)
         return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/seeker/applications/<application_id>/withdraw', methods=['POST'])
+def seeker_withdraw_application(application_id):
+    """Withdraw a pending application."""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        from services import seeker_service
+        
+        result = seeker_service.withdraw_application(clerk_user_id, application_id)
+        return jsonify(result), 200
+        
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        log_error("Error withdrawing application", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
+# ============================================
+# OWNER FLOW - "I have a project"
+# Application management for project owners
+# ============================================
+
+@app.route('/api/owner/applications', methods=['GET'])
+def owner_get_applications():
+    """Get all applications for the owner's projects."""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        from services import application_service
+        
+        result = application_service.get_applications_for_owner(clerk_user_id)
+        return jsonify(result), 200
+        
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 404
+    except Exception as e:
+        log_error("Error getting owner applications", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/owner/applications/<application_id>', methods=['GET'])
+def owner_get_application_detail(application_id):
+    """Get detailed view of a single application."""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        from services import application_service
+        
+        result = application_service.get_application_detail(clerk_user_id, application_id)
+        return jsonify(result), 200
+        
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 404
+    except Exception as e:
+        log_error("Error getting application detail", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/owner/applications/<application_id>/respond', methods=['POST'])
+@limiter.limit(RATE_LIMITS['moderate'])
+def owner_respond_to_application(application_id):
+    """
+    Accept or reject an application.
+    
+    Request body:
+    {
+        "response": "accept|reject",
+        "rejection_reason": "optional feedback"
+    }
+    """
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        data = request.get_json()
+        if not data or 'response' not in data:
+            return jsonify({"error": "response is required"}), 400
+        
+        from services import application_service
+        
+        result = application_service.respond_to_application(
+            clerk_user_id,
+            application_id,
+            response=data['response'],
+            rejection_reason=data.get('rejection_reason')
+        )
+        
+        return jsonify(result), 200
+        
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        error_trace = traceback.format_exc()
+        log_error("Error responding to application", error=e, traceback_str=error_trace)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/owner/applications/stats', methods=['GET'])
+def owner_application_stats():
+    """Get application statistics for project owner dashboard."""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        from services import application_service
+        
+        stats = application_service.get_application_stats(clerk_user_id)
+        return jsonify(stats), 200
+        
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 404
+    except Exception as e:
+        log_error("Error getting application stats", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/seeker/questionnaire-options', methods=['GET'])
+def seeker_questionnaire_options():
+    """Get available options for the seeker questionnaire."""
+    from services import seeker_service
+    
+    return jsonify({
+        "roles": seeker_service.ROLE_OPTIONS,
+        "stages": seeker_service.STAGE_OPTIONS,
+        "industries": seeker_service.INDUSTRY_OPTIONS,
+        "availability": seeker_service.AVAILABILITY_OPTIONS,
+        "priorities": seeker_service.PRIORITY_OPTIONS,
+        "dealbreakers": seeker_service.DEALBREAKER_OPTIONS,
+    }), 200
+
+
+# ============================================
+# LEGACY DISCOVERY (DEPRECATED)
+# These endpoints are deprecated. Use the new seeker/owner flows instead.
+# ============================================
+
+@app.route('/api/founders', methods=['GET'])
+def get_founders():
+    """
+    DEPRECATED: Use POST /api/seeker/search instead.
+    
+    This endpoint is maintained for backward compatibility only.
+    New clients should use the intent-based seeker flow.
+    """
+    return jsonify({
+        "error": "This endpoint is deprecated",
+        "message": "Please use POST /api/seeker/search for project discovery",
+        "migration_guide": {
+            "new_endpoint": "POST /api/seeker/search",
+            "description": "Fill out a questionnaire to get curated project matches",
+            "docs_url": "/api/seeker/questionnaire-options"
+        }
+    }), 410  # 410 Gone
 
 @app.route('/api/founders/onboarding', methods=['POST'])
 @limiter.limit(RATE_LIMITS['moderate'])
@@ -420,25 +680,28 @@ def create_founder():
 
 @app.route('/api/projects', methods=['GET'])
 def get_projects():
-    """Get projects - user's own projects by default, or discoverable projects if discover=true"""
+    """Get user's own projects.
+    
+    For project discovery, use POST /api/seeker/search instead.
+    """
     try:
         clerk_user_id = get_clerk_user_id()
         if not clerk_user_id:
             return jsonify({"error": "User ID required"}), 401
         
-        # Check if this is a discovery request
+        # Check if this is a legacy discovery request
         discover = request.args.get('discover', '').lower() == 'true'
         
         if discover:
-            # Discoverable projects with the same rich filter set as /api/founders
-            from services import discovery_filter_service
-            filters = discovery_filter_service.parse_discovery_filters(request.args)
-            projects = founder_service.get_available_founders(clerk_user_id, filters, mode='projects')
-            return jsonify(projects)
-        else:
-            # Return user's own projects (default behavior)
-            projects = project_service.get_user_projects(clerk_user_id)
-            return jsonify(projects), 200
+            # Redirect to new seeker flow
+            return jsonify({
+                "error": "Discovery via this endpoint is deprecated",
+                "message": "Please use POST /api/seeker/search for project discovery",
+            }), 410
+        
+        # Return user's own projects
+        projects = project_service.get_user_projects(clerk_user_id)
+        return jsonify(projects), 200
     except ValueError as e:
         return jsonify({"error": str(e)}), 404
     except Exception as e:
@@ -697,21 +960,19 @@ def respond_to_access_request(request_id):
 
 @app.route('/api/swipes', methods=['POST'])
 def create_swipe():
-    """Record a swipe action - uses plan-based discovery limits"""
-    try:
-        clerk_user_id = get_clerk_user_id()
-        if not clerk_user_id:
-            return jsonify({"error": "User ID required"}), 401
-        
-        data = request.get_json()
-        swipe = swipe_service.create_swipe(clerk_user_id, data)
-        return jsonify(swipe), 201
-    except ValueError as e:
-        return jsonify({"error": str(e)}), 400
-    except Exception as e:
-        error_trace = traceback.format_exc()
-        log_error("Error in create_swipe", error=e, traceback_str=error_trace)
-        return jsonify({"error": str(e)}), 500
+    """
+    DEPRECATED: Use POST /api/seeker/apply/<project_id> instead.
+    
+    The swipe-based discovery has been replaced with intent-based applications.
+    """
+    return jsonify({
+        "error": "This endpoint is deprecated",
+        "message": "Please use POST /api/seeker/apply/<project_id> to apply to projects",
+        "migration_guide": {
+            "new_endpoint": "POST /api/seeker/apply/<project_id>",
+            "description": "Apply to a specific project with your application details"
+        }
+    }), 410  # 410 Gone
 
 @app.route('/api/profile/check', methods=['GET'])
 def check_profile():
@@ -898,37 +1159,37 @@ def delete_match(match_id):
 
 @app.route('/api/likes', methods=['GET'])
 def get_likes():
-    """Get people who liked you (swiped right on you) but you haven't swiped on them yet"""
-    try:
-        clerk_user_id = get_clerk_user_id()
-        if not clerk_user_id:
-            return jsonify({"error": "User ID required"}), 401
-        
-        likes = match_service.get_likes(clerk_user_id)
-        return jsonify(likes)
-    except ValueError as e:
-        return jsonify({"error": str(e)}), 404
-    except Exception as e:
-        error_trace = traceback.format_exc()
-        log_error("Error in get_likes", error=e, traceback_str=error_trace)
-        return jsonify({"error": str(e)}), 500
+    """
+    DEPRECATED: Use GET /api/owner/applications instead.
+    
+    The "likes" (swipes) system has been replaced with applications.
+    Project owners now receive applications from seekers.
+    """
+    return jsonify({
+        "error": "This endpoint is deprecated",
+        "message": "Please use GET /api/owner/applications to view applications to your projects",
+        "migration_guide": {
+            "new_endpoint": "GET /api/owner/applications",
+            "description": "Get all applications for your projects"
+        }
+    }), 410  # 410 Gone
+
 
 @app.route('/api/notifications/counts', methods=['GET'])
 def get_notification_counts():
-    """Get notification counts for different tabs (interests, workspaces, etc.)"""
+    """Get notification counts for different tabs (applications, workspaces, etc.)"""
     try:
         clerk_user_id = get_clerk_user_id()
         if not clerk_user_id:
             return jsonify({"error": "User ID required"}), 401
         
-        # Count interests (unresponded likes)
-        interests_count = 0
+        # Count pending applications (for project owners)
+        applications_count = 0
         try:
-            likes = match_service.get_likes(clerk_user_id)
-            interests_count = len(likes) if likes else 0
+            stats = application_service.get_application_stats(clerk_user_id)
+            applications_count = stats.get('pending', 0)
         except Exception:
-            # If there's an error, just return 0
-            interests_count = 0
+            applications_count = 0
         
         # Count workspaces (all workspaces the user is part of)
         workspaces_count = 0
@@ -936,11 +1197,11 @@ def get_notification_counts():
             workspaces = workspace_service.list_user_workspaces(clerk_user_id)
             workspaces_count = len(workspaces) if workspaces else 0
         except Exception:
-            # If there's an error, just return 0
             workspaces_count = 0
         
         return jsonify({
-            "interests": interests_count,
+            "applications": applications_count,
+            "interests": applications_count,  # Backward compat alias
             "workspaces": workspaces_count
         }), 200
     except Exception as e:
@@ -948,28 +1209,22 @@ def get_notification_counts():
         log_error("Error in get_notification_counts", error=e, traceback_str=error_trace)
         return jsonify({"error": str(e)}), 500
 
+
 @app.route('/api/likes/<swipe_id>/respond', methods=['POST'])
 def respond_to_like(swipe_id):
-    """Respond to a like - accept (creates match) or reject"""
-    try:
-        clerk_user_id = get_clerk_user_id()
-        if not clerk_user_id:
-            return jsonify({"error": "User ID required"}), 401
-        
-        data = request.get_json()
-        response_type = data.get('response')
-        
-        if not response_type:
-            return jsonify({"error": "response is required"}), 400
-        
-        result = match_service.respond_to_like(clerk_user_id, swipe_id, response_type)
-        return jsonify(result), 200
-    except ValueError as e:
-        return jsonify({"error": str(e)}), 400
-    except Exception as e:
-        error_trace = traceback.format_exc()
-        log_error("Error in respond_to_like", error=e, traceback_str=error_trace)
-        return jsonify({"error": str(e)}), 500
+    """
+    DEPRECATED: Use POST /api/owner/applications/<id>/respond instead.
+    
+    The "likes" (swipes) system has been replaced with applications.
+    """
+    return jsonify({
+        "error": "This endpoint is deprecated",
+        "message": "Please use POST /api/owner/applications/<id>/respond to respond to applications",
+        "migration_guide": {
+            "new_endpoint": "POST /api/owner/applications/<application_id>/respond",
+            "description": "Accept or reject an application"
+        }
+    }), 410  # 410 Gone
 
 @app.route('/api/waitlist', methods=['POST'])
 def join_waitlist():
@@ -5292,6 +5547,32 @@ def send_weekly_projects_digest():
         
     except Exception as e:
         log_error("Error sending weekly projects digest", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/cron/discovery-daily-digest', methods=['POST'])
+def cron_discovery_daily_digest():
+    """
+    Builds or refreshes today's curated discovery batch for every founder who has
+    saved discovery questionnaire answers, then sends at most one digest email per
+    founder per UTC day (tracked on seeker_discovery_daily_feed.digest_email_sent).
+
+    Configure an external scheduler (e.g. daily 09:00 UTC) with header:
+    X-Cron-Secret: CRON_SECRET
+    """
+    cron_secret = request.headers.get('X-Cron-Secret')
+    expected_secret = os.getenv('CRON_SECRET')
+
+    if not expected_secret or cron_secret != expected_secret:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    try:
+        from services import seeker_service
+        result = seeker_service.run_discovery_daily_digest_cron()
+        http_code = 200 if result.get('ok') else 500
+        return jsonify(result), http_code
+    except Exception as e:
+        log_error("Cron discovery_daily_digest failed", error=e)
         return jsonify({"error": str(e)}), 500
 
 

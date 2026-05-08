@@ -518,3 +518,31 @@ def send_new_projects_digest_email(
         subject=f"🚀 {total_new_projects} new project{'s' if total_new_projects != 1 else ''} to explore this week",
         html_body=_base_template(content, f"{total_new_projects} new projects added on Guild Space")
     )
+
+
+def send_discovery_daily_matches_ready_email(to_email: str, user_name: str) -> bool:
+    """Let a seeker know their next curated discovery batch is available (typically next calendar day)."""
+    content = f'''
+        <h1 style="margin: 0 0 16px; font-size: 24px; font-weight: 600; color: #0f172a;">
+            New matches are ready for you
+        </h1>
+        <p style="margin: 0 0 24px; font-size: 16px; color: #475569; line-height: 1.6;">
+            Hey {user_name}, your next set of curated project matches is live on Discover.
+            We show up to three at a time so you can focus — check them out when you have a minute.
+        </p>
+        <table role="presentation" cellspacing="0" cellpadding="0" border="0">
+            <tr>
+                <td style="border-radius: 8px; background-color: #0d9488;">
+                    <a href="{FRONTEND_URL}/discover"
+                       style="display: inline-block; padding: 14px 28px; font-size: 16px; font-weight: 600; color: #ffffff; text-decoration: none;">
+                        Open Discover →
+                    </a>
+                </td>
+            </tr>
+        </table>
+    '''
+    return send_email(
+        to_email=to_email,
+        subject="Your new discovery matches are ready ✨",
+        html_body=_base_template(content, "New curated matches on Guild Space"),
+    )
