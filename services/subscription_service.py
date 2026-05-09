@@ -627,6 +627,33 @@ def handle_payment_succeeded(webhook_data: Dict[str, Any]) -> Dict[str, Any]:
             log_info(f"Advisor Pro ({billing_cycle}) activated for {clerk_user_id}")
             return {"status": "success", "message": f"Advisor Pro {billing_cycle} activated"}
 
+        # Handle credit pack purchases
+        purchase_type = metadata.get('purchase_type')
+        if purchase_type == 'credit_pack':
+            from services import credit_service
+            
+            pack_key = metadata.get('pack_key')
+            credits_str = metadata.get('credits')
+            
+            if not pack_key or not credits_str:
+                return {"status": "error", "message": "Missing pack_key or credits in metadata"}
+            
+            credits_amount = int(credits_str)
+            
+            # Add credits to user's balance
+            credit_service.add_credits(
+                clerk_user_id=clerk_user_id,
+                amount=credits_amount,
+                transaction_type='purchase',
+                description=f"Purchased {pack_key} credit pack",
+                related_entity_id=payment_id,
+                related_entity_type='payment',
+            )
+            
+            _log_webhook_success(supabase, payment_id, 'payment.succeeded')
+            log_info(f"Credit pack {pack_key} ({credits_amount} credits) added for {clerk_user_id}")
+            return {"status": "success", "message": f"Added {credits_amount} credits"}
+
         return {"status": "ignored", "message": f"Unknown subscription type: {subscription_type}"}
         
     except Exception as e:

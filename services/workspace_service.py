@@ -388,7 +388,7 @@ def get_participants(clerk_user_id, workspace_id):
     supabase = get_supabase()
     
     # Include clerk_user_id so frontend can identify the current user
-    participants = supabase.table('workspace_participants').select('*, user:founders!user_id(id, name, email, clerk_user_id)').eq('workspace_id', workspace_id).execute()
+    participants = supabase.table('workspace_participants').select('*, user:founders!user_id(id, name, email, clerk_user_id, profile_photo_url)').eq('workspace_id', workspace_id).execute()
     
     return [{
         'id': p['id'],
@@ -398,9 +398,93 @@ def get_participants(clerk_user_id, workspace_id):
         'role_label': p.get('role_label'),
         'weekly_commitment_hours': p.get('weekly_commitment_hours'),
         'timezone': p.get('timezone'),
+        'communication_preference': p.get('communication_preference'),
+        'onboarding_completed_at': p.get('onboarding_completed_at'),
+        'onboarding_step': p.get('onboarding_step', 0),
         'created_at': p['created_at'],
         'updated_at': p['updated_at']
     } for p in (participants.data or [])]
+
+
+def get_onboarding_status(clerk_user_id, workspace_id):
+    """Get onboarding status for current user in workspace"""
+    founder_id = _verify_workspace_access(clerk_user_id, workspace_id)
+    supabase = get_supabase()
+    
+    # Get current user's participant record
+    participant = supabase.table('workspace_participants').select(
+        'onboarding_completed_at, onboarding_step, commitment_hours, timezone, communication_preference'
+    ).eq('workspace_id', workspace_id).eq('user_id', founder_id).execute()
+    
+    if not participant.data:
+        raise ValueError("Participant not found")
+    
+    p = participant.data[0]
+    
+    # Get partner's onboarding status
+    partner = supabase.table('workspace_participants').select(
+        'onboarding_completed_at, user:founders!user_id(name)'
+    ).eq('workspace_id', workspace_id).neq('user_id', founder_id).neq('role', 'ADVISOR').execute()
+    
+    partner_completed = False
+    partner_name = 'Partner'
+    if partner.data:
+        partner_completed = partner.data[0].get('onboarding_completed_at') is not None
+        partner_name = partner.data[0].get('user', {}).get('name', 'Partner')
+    
+    # Check workspace setup completeness
+    equity_setup = supabase.table('workspace_equity_scenarios').select('id').eq(
+        'workspace_id', workspace_id
+    ).eq('status', 'approved').execute()
+    
+    return {
+        'completed': p.get('onboarding_completed_at') is not None,
+        'completed_at': p.get('onboarding_completed_at'),
+        'current_step': p.get('onboarding_step', 0),
+        'commitment_hours': p.get('commitment_hours'),
+        'timezone': p.get('timezone'),
+        'communication_preference': p.get('communication_preference'),
+        'partner_completed': partner_completed,
+        'partner_name': partner_name,
+        'equity_setup_done': len(equity_setup.data or []) > 0,
+    }
+
+
+def update_onboarding_progress(clerk_user_id, workspace_id, data):
+    """Update onboarding progress for current user"""
+    from datetime import datetime, timezone
+    
+    founder_id = _verify_workspace_access(clerk_user_id, workspace_id)
+    supabase = get_supabase()
+    
+    update_data = {'updated_at': datetime.now(timezone.utc).isoformat()}
+    
+    if 'step' in data:
+        update_data['onboarding_step'] = data['step']
+    if 'commitment_hours' in data:
+        update_data['commitment_hours'] = data['commitment_hours']
+        update_data['weekly_commitment_hours'] = data['commitment_hours']  # Also update the display field
+    if 'timezone' in data:
+        update_data['timezone'] = data['timezone']
+    if 'communication_preference' in data:
+        update_data['communication_preference'] = data['communication_preference']
+    if data.get('complete'):
+        update_data['onboarding_completed_at'] = datetime.now(timezone.utc).isoformat()
+    
+    result = supabase.table('workspace_participants').update(update_data).eq(
+        'workspace_id', workspace_id
+    ).eq('user_id', founder_id).execute()
+    
+    if not result.data:
+        raise ValueError("Failed to update onboarding progress")
+    
+    _log_audit(workspace_id, founder_id, 'update_onboarding', 'workspace_participant', result.data[0]['id'], update_data)
+    
+    return {
+        'success': True,
+        'step': result.data[0].get('onboarding_step', 0),
+        'completed': result.data[0].get('onboarding_completed_at') is not None,
+    }
 
 def update_participant(clerk_user_id, workspace_id, user_id, data):
     """Update participant role_label, weekly_commitment_hours"""

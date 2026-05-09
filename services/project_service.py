@@ -19,13 +19,18 @@ def get_user_projects(clerk_user_id):
     return projects.data if projects.data else []
 
 def create_project(clerk_user_id, data):
-    """Create a new project for a founder - limited by plan"""
+    """Create a new project for a founder"""
     from services import plan_service
     
-    # Check project limit
+    # Check project limit based on subscription tier
     can_create, current_count, max_allowed = plan_service.check_project_limit(clerk_user_id)
     if not can_create:
-        raise ValueError(f"Project limit reached ({current_count}/{max_allowed}). Upgrade your plan to create more projects.")
+        plan = plan_service.get_founder_plan(clerk_user_id)
+        plan_name = plan.get('id', 'FREE')
+        if plan_name == 'FREE':
+            raise ValueError(f"Free plan allows 1 project. Upgrade to Pro to create up to 3 projects.")
+        else:
+            raise ValueError(f"Project limit reached ({current_count}/{max_allowed}). You've used all your project slots.")
     
     supabase = get_supabase()
     
@@ -80,13 +85,18 @@ def create_project(clerk_user_id, data):
             ]
     
     response = supabase.table('projects').insert(project_data).execute()
+    
+    if not response.data:
+        raise ValueError("Failed to create project")
+    
+    project_id = response.data[0].get('id')
 
     # Activation: FIRST_PROJECT_CREATED (idempotent)
     try:
         from services import activation_service
         activation_service.record_milestone(
             founder_id, activation_service.Milestone.FIRST_PROJECT_CREATED,
-            {'project_id': response.data[0].get('id') if response.data else None},
+            {'project_id': project_id},
         )
     except Exception:
         pass

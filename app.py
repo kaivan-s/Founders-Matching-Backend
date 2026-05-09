@@ -1514,6 +1514,42 @@ def update_workspace_participant(workspace_id, user_id):
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+
+@app.route('/api/workspaces/<workspace_id>/onboarding', methods=['GET'])
+def get_workspace_onboarding(workspace_id):
+    """Get onboarding status for current user in workspace"""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        status = workspace_service.get_onboarding_status(clerk_user_id, workspace_id)
+        return jsonify(status), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 404
+    except Exception as e:
+        log_error("Error getting workspace onboarding status", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/workspaces/<workspace_id>/onboarding', methods=['POST'])
+def update_workspace_onboarding(workspace_id):
+    """Update onboarding progress for current user"""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        data = request.get_json() or {}
+        result = workspace_service.update_onboarding_progress(clerk_user_id, workspace_id, data)
+        return jsonify(result), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        log_error("Error updating workspace onboarding", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route('/api/workspaces/<workspace_id>/equity', methods=['GET'])
 def get_workspace_equity(workspace_id):
     """Get equity scenarios"""
@@ -2986,11 +3022,22 @@ def get_participants_with_roles(workspace_id):
 
 @app.route('/api/workspaces/<workspace_id>/advisors/marketplace', methods=['GET'])
 def get_advisor_marketplace(workspace_id):
-    """Get available advisors for marketplace"""
+    """Get available advisors for marketplace.
+    
+    Requires Pro or Pro+ subscription to browse the advisor marketplace.
+    """
     try:
         clerk_user_id = get_clerk_user_id()
         if not clerk_user_id:
             return jsonify({"error": "User ID required"}), 401
+        
+        # Check if user can browse advisor marketplace (Pro/Pro+ only)
+        if not plan_service.check_feature_access(clerk_user_id, 'accountability.canBrowseMarketplace'):
+            return jsonify({
+                "error": "Advisor marketplace requires a Pro subscription",
+                "upgrade_required": True,
+                "required_plan": "PRO",
+            }), 403
         
         filters = {
             'domain': request.args.get('domain')
@@ -3017,20 +3064,20 @@ def get_advisor_marketplace(workspace_id):
 def book_advisor_consultation(advisor_user_id):
     """Founder books a consultation with an advisor.
 
-    Requires Pro+ subscription on the founder side (the platform fee for
-    discovering & booking advisors).
+    Requires Pro or Pro+ subscription on the founder side.
+    Founders pay advisors directly (UPI/PayPal) - no platform cut.
     """
     try:
         clerk_user_id = get_clerk_user_id()
         if not clerk_user_id:
             return jsonify({"error": "User ID required"}), 401
 
-        # Founder-side gate: booking requires Pro+
+        # Founder-side gate: booking requires Pro or Pro+
         if not plan_service.check_feature_access(clerk_user_id, 'accountability.canBookAdvisor'):
             return jsonify({
-                "error": "Booking an advisor requires a Pro+ subscription",
+                "error": "Booking an advisor requires a Pro subscription",
                 "upgrade_required": True,
-                "required_plan": "PRO_PLUS",
+                "required_plan": "PRO",
             }), 403
 
         data = request.get_json() or {}
@@ -4168,6 +4215,265 @@ def cancel_advisor_subscription():
         return jsonify({"error": str(e)}), 400
     except Exception as e:
         log_error("Error cancelling advisor subscription", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
+# =====================
+# Credits Routes
+# =====================
+from services import credit_service
+
+@app.route('/api/credits', methods=['GET'])
+def get_credits():
+    """Get current user's credit balance"""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        credits = credit_service.get_user_credits(clerk_user_id)
+        return jsonify(credits), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        log_error("Error getting credits", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/credits/transactions', methods=['GET'])
+def get_credit_transactions():
+    """Get user's credit transaction history"""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        limit = request.args.get('limit', 50, type=int)
+        offset = request.args.get('offset', 0, type=int)
+        
+        transactions = credit_service.get_credit_transactions(
+            clerk_user_id, limit=min(limit, 100), offset=offset
+        )
+        return jsonify({"transactions": transactions}), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        log_error("Error getting credit transactions", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/credits/check', methods=['GET'])
+def check_credits():
+    """Check if user has enough credits for a service"""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        service_name = request.args.get('service')
+        if not service_name:
+            return jsonify({"error": "service parameter required"}), 400
+        
+        has_credits, balance, required = credit_service.check_service_credits(
+            clerk_user_id, service_name
+        )
+        return jsonify({
+            "has_credits": has_credits,
+            "balance": balance,
+            "required": required,
+            "service": service_name,
+        }), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        log_error("Error checking credits", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/credits/service-costs', methods=['GET'])
+def get_service_costs():
+    """Get all service costs as a flat array for display"""
+    try:
+        costs = credit_service.get_service_costs()
+        
+        # Transform to flat array for frontend
+        services = []
+        for key, value in costs.get('individual', {}).items():
+            services.append({
+                'key': key,
+                'name': value['display_name'],
+                'credits': value['credits'],
+                'workspace_level': False,
+                'description': _get_service_description(key),
+            })
+        for key, value in costs.get('workspace', {}).items():
+            services.append({
+                'key': key,
+                'name': value['display_name'],
+                'credits': value['credits'],
+                'workspace_level': True,
+                'description': _get_service_description(key),
+            })
+        
+        return jsonify({"services": services, **costs}), 200
+    except Exception as e:
+        log_error("Error getting service costs", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
+def _get_service_description(key):
+    """Get human-readable description for a service"""
+    descriptions = {
+        'create_project': 'Create a new project listing',
+        'apply_to_project': 'Submit an application to join a project',
+        'advisor_session_30': '30-minute advisor consultation (split with co-founder)',
+        'advisor_session_60': '60-minute advisor consultation (split with co-founder)',
+        'equity_calculator': 'Run advanced equity calculator (split with co-founder)',
+        'equity_agreement': 'Generate partnership agreement (split with co-founder)',
+        'post_match_support_30': '30 days of guided support (split with co-founder)',
+    }
+    return descriptions.get(key, '')
+
+
+@app.route('/api/credits/packs', methods=['GET'])
+def get_credit_packs():
+    """Get available credit packs for purchase"""
+    try:
+        packs = credit_service.get_credit_packs()
+        return jsonify({"packs": packs}), 200
+    except Exception as e:
+        log_error("Error getting credit packs", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/credits/purchase', methods=['POST'])
+@limiter.limit(RATE_LIMITS['moderate'])
+def purchase_credits():
+    """Initiate credit pack purchase via Dodo Payments"""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No data provided"}), 400
+        
+        pack_key = data.get('pack_key') or data.get('pack_id')
+        if not pack_key:
+            return jsonify({"error": "pack_key required"}), 400
+        
+        # Get pack details
+        packs = credit_service.CREDIT_PACKS
+        if pack_key not in packs:
+            return jsonify({"error": "Invalid pack_key"}), 400
+        
+        pack = packs[pack_key]
+        
+        # Map pack to Dodo product ID (reusing existing products)
+        DODO_PRODUCT_PRO_ID = os.getenv('DODO_PRODUCT_PRO_ID')
+        DODO_PRODUCT_PRO_PLUS_ID = os.getenv('DODO_PRODUCT_PRO_PLUS_ID')
+        DODO_PRODUCT_ADVISOR_PROJECT_ID = os.getenv('DODO_PRODUCT_ADVISOR_PROJECT_ID')
+        
+        product_id_map = {
+            'starter': DODO_PRODUCT_PRO_ID,
+            'growth': DODO_PRODUCT_PRO_PLUS_ID,
+            'pro': DODO_PRODUCT_ADVISOR_PROJECT_ID,
+        }
+        
+        product_id = product_id_map.get(pack_key)
+        if not product_id:
+            return jsonify({"error": f"Dodo product not configured for {pack_key}"}), 400
+        
+        # Get user's email
+        supabase = get_supabase()
+        profile = supabase.table('founders').select('email, name').eq('clerk_user_id', clerk_user_id).execute()
+        
+        user_email = None
+        user_name = ''
+        
+        if profile.data:
+            user_email = profile.data[0].get('email')
+            user_name = profile.data[0].get('name', '')
+        
+        if not user_email or '@' not in user_email:
+            from utils.auth import get_clerk_user_email
+            user_email = get_clerk_user_email(clerk_user_id)
+        
+        if not user_email or '@' not in user_email:
+            return jsonify({"error": "User email not found. Please complete your profile."}), 400
+        
+        # Create Dodo checkout session
+        from services.subscription_service import _get_dodo_client, DODO_ENVIRONMENT
+        FRONTEND_URL = os.getenv('FRONTEND_URL', 'http://localhost:3000').rstrip('/')
+        
+        client = _get_dodo_client()
+        
+        payment = client.payments.create(
+            billing={
+                "city": "San Francisco",
+                "country": "US",
+                "state": "CA",
+                "street": "123 Market St",
+                "zipcode": "94105",
+            },
+            customer={
+                "email": user_email,
+                "name": user_name or user_email.split('@')[0],
+            },
+            product_cart=[{
+                "product_id": product_id,
+                "quantity": 1,
+            }],
+            payment_link=True,
+            return_url=f"{FRONTEND_URL}/credits?purchase=success&pack={pack_key}",
+            metadata={
+                "clerk_user_id": clerk_user_id,
+                "purchase_type": "credit_pack",
+                "pack_key": pack_key,
+                "credits": str(pack['credits']),
+            },
+        )
+        
+        checkout_url = payment.payment_link
+        
+        return jsonify({
+            "checkout_url": checkout_url,
+            "pack": {
+                "id": pack_key,
+                "name": pack['name'],
+                "credits": pack['credits'],
+            },
+        }), 200
+        
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        log_error("Error initiating credit purchase", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/workspaces/<workspace_id>/check-service-credits', methods=['GET'])
+def check_workspace_service_credits(workspace_id):
+    """Check if all workspace members have enough credits for a workspace service"""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        # Verify user has access to workspace
+        workspace_service._verify_workspace_access(clerk_user_id, workspace_id)
+        
+        service_name = request.args.get('service')
+        if not service_name:
+            return jsonify({"error": "service parameter required"}), 400
+        
+        result = credit_service.check_workspace_service_credits(workspace_id, service_name)
+        return jsonify(result), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        log_error("Error checking workspace service credits", error=e)
         return jsonify({"error": str(e)}), 500
 
 

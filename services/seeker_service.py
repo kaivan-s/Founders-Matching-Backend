@@ -57,13 +57,20 @@ def _rank_discovery_candidates(
     seeker_skills: set,
     validated: Dict[str, Any],
     extra_exclude_ids: Optional[set] = None,
+    visible_tiers: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
-    """Return scored project rows [{project, score, match_reasons}, ...] descending by score."""
+    """Return scored project rows [{project, score, match_reasons}, ...] descending by score.
+    
+    Args:
+        visible_tiers: List of plan tiers the seeker can see (e.g., ['FREE', 'PRO']).
+                      If None, shows all tiers (no filtering).
+    """
     extra_exclude_ids = extra_exclude_ids or set()
     
+    # Include founder's plan for tier filtering
     query = supabase.table('projects').select(
         '*, founder:founders!founder_id(id, name, profile_picture_url, location, '
-        'linkedin_verified, github_verified, linkedin_url, skills, headline)'
+        'linkedin_verified, github_verified, linkedin_url, skills, headline, plan)'
     ).eq('is_active', True).eq('seeking_cofounder', True).neq('founder_id', seeker_id)
     
     result = query.order('created_at', desc=True).limit(240).execute()
@@ -86,6 +93,14 @@ def _rank_discovery_candidates(
             continue
         if project_id in extra_exclude_ids:
             continue
+        
+        # Tier filtering: only show projects from founders whose tier the seeker can see
+        if visible_tiers:
+            founder = project.get('founder') or {}
+            founder_plan = founder.get('plan', 'FREE')
+            if founder_plan not in visible_tiers:
+                continue
+        
         if not _passes_dealbreakers(project, validated['dealbreakers']):
             continue
         score, match_reasons = _calculate_match_score(project, validated, seeker_skills)
@@ -237,8 +252,16 @@ def search_projects_for_seeker(
     Find matching projects for seeker. Uses a daily feed of up to
     DAILY_DISCOVERY_BATCH_SIZE curated projects per UTC day when
     `seeker_discovery_daily_feed` exists; otherwise falls back to a single ranking.
+    
+    Tier-based filtering (Option A - downward visibility):
+    - FREE users can only see FREE founders' projects
+    - PRO users can see FREE + PRO founders' projects  
+    - PRO_PLUS users can see all tiers
+    
     Returns { "matches": [...], "discovery": meta }.
     """
+    from services import plan_service
+    
     supabase = get_supabase()
     
     seeker = supabase.table('founders').select('id, skills, email, name').eq(
@@ -251,6 +274,9 @@ def search_projects_for_seeker(
     seeker_rec = seeker.data[0]
     seeker_id = seeker_rec['id']
     seeker_skills = set(seeker_rec.get('skills') or [])
+    
+    # Get visible tiers based on seeker's subscription plan
+    visible_tiers = plan_service.get_visible_tiers(clerk_user_id)
     
     validated = _validate_questionnaire(questionnaire)
     pref_key = _preference_key(validated)
@@ -270,6 +296,7 @@ def search_projects_for_seeker(
         'next_batch_at_utc': _next_utc_midnight().isoformat(),
         'persistent_feed': False,
         'today_utc': _utc_today(),
+        'visible_tiers': visible_tiers,  # Include for frontend to show upgrade prompts
     }
 
     def _ids_from_ranked(ranked_rows: List[Dict[str, Any]], cap: int) -> List[str]:
@@ -279,6 +306,7 @@ def search_projects_for_seeker(
         return _rank_discovery_candidates(
             supabase, seeker_id, seeker_skills, validated,
             extra_exclude_ids=extra_exclude,
+            visible_tiers=visible_tiers,
         )
 
     today = discovery_meta['today_utc']
@@ -526,6 +554,22 @@ def apply_to_project(
     Returns:
         The created application record
     """
+    from services import plan_service
+    
+    # Check daily connect limit based on subscription tier
+    can_connect, current_count, max_allowed = plan_service.check_connect_limit(clerk_user_id)
+    if not can_connect:
+        plan = plan_service.get_founder_plan(clerk_user_id)
+        plan_name = plan.get('id', 'FREE')
+        if plan_name == 'FREE':
+            raise ValueError(
+                "Free plan allows 1 application per day. Upgrade to Pro for unlimited applications."
+            )
+        else:
+            raise ValueError(
+                f"Daily application limit reached ({current_count}/{max_allowed})."
+            )
+    
     supabase = get_supabase()
     
     # Get applicant's founder profile
@@ -589,6 +633,8 @@ def apply_to_project(
     if not result.data:
         raise ValueError("Failed to submit application")
     
+    application_id = result.data[0]['id']
+    
     # Send notification to project owner
     try:
         owner_info = project_data.get('founders', {})
@@ -598,7 +644,7 @@ def apply_to_project(
             owner_name=owner_info.get('name'),
             applicant_name=applicant_name,
             project_title=project_data.get('title'),
-            application_id=result.data[0]['id']
+            application_id=application_id
         )
     except Exception as e:
         log_error(f"Failed to send application notification", error=e)

@@ -611,62 +611,79 @@ def get_advisor_profile(clerk_user_id):
     return profile_data
 
 def get_available_advisors(workspace_id, filters=None, clerk_user_id=None):
-    """Get available partners for marketplace, filtered by workspace attributes"""
+    """Get available partners for marketplace, filtered by workspace attributes.
+
+    When strict filters (notably expertise_stages vs workspace stage) yield only a
+    small set, we automatically broaden to all approved discoverable advisors
+    (same domain filter if applied) so sparse markets still show options.
+    Results are sorted with best stage match first.
+    """
+    from datetime import datetime, timezone
+    from utils.logger import log_info
+
+    MIN_BEFORE_BROADEN = 5
+    DEFAULT_MAX_ACTIVE = 3
+
     supabase = get_supabase()
-    
+    filters = filters or {}
+
     # Get workspace info for filtering (only select stage, domain column may not exist)
     try:
         workspace = supabase.table('workspaces').select('stage, domain').eq('id', workspace_id).execute()
     except Exception:
-        # Fallback if domain column doesn't exist
         workspace = supabase.table('workspaces').select('stage').eq('id', workspace_id).execute()
-    
+
     workspace_data = workspace.data[0] if workspace.data else {}
-    workspace_stage = workspace_data.get('stage', 'idea')
+    workspace_stage = workspace_data.get('stage') or 'idea'
     workspace_domain = workspace_data.get('domain', '')
-    
-    # Build query for available partners - only APPROVED and discoverable
-    query = supabase.table('advisor_profiles').select(
-        '*, user:founders!user_id(id, name, email)'
-    ).eq('status', 'APPROVED').eq('is_discoverable', True)
-    
-    # Filter by expertise stages if workspace stage matches
-    if workspace_stage:
-        # Map workspace stages to partner expertise stages
-        stage_mapping = {
-            'idea': 'idea',
-            'mvp': 'pre-seed',
-            'revenue': 'seed',
-            'other': 'idea'  # Default
-        }
-        mapped_stage = stage_mapping.get(workspace_stage, 'idea')
-        query = query.contains('expertise_stages', [mapped_stage])
-    
-    # Filter by domains if workspace has domain and filter is requested
-    if workspace_domain and filters and filters.get('domain'):
-        query = query.contains('domains', [workspace_domain])
-    
-    try:
-        profiles = query.execute()
-    except Exception as e:
-        error_msg = str(e)
-        if 'PGRST205' in error_msg or 'Could not find the table' in error_msg:
-            raise ValueError(
-                "The advisor_profiles table does not exist. "
-                "Please run the database migration: backend/migrations/001_create_accountability_partner_tables.sql"
-            ) from e
-        raise
-    except Exception as e:
-        # Table or columns don't exist yet - return empty list
-        return []
-    
+
+    stage_mapping = {
+        'idea': 'idea',
+        'mvp': 'pre-seed',
+        'revenue': 'seed',
+        'other': 'idea',
+    }
+    mapped_stage = stage_mapping.get(workspace_stage, 'idea')
+
+    def _norm_expertise_stages(profile):
+        es = profile.get('expertise_stages') or []
+        if not isinstance(es, list):
+            return []
+        return [str(x).strip().lower() for x in es]
+
+    def _profile_matches_mapped_stage(profile):
+        return mapped_stage.lower() in _norm_expertise_stages(profile)
+
+    def _base_query():
+        q = supabase.table('advisor_profiles').select(
+            '*, user:founders!user_id(id, name, email)'
+        ).eq('status', 'APPROVED').eq('is_discoverable', True)
+        if workspace_domain and filters.get('domain'):
+            q = q.contains('domains', [workspace_domain])
+        return q
+
+    def _execute_advisor_query(q):
+        try:
+            return q.execute()
+        except Exception as e:
+            error_msg = str(e)
+            if 'PGRST205' in error_msg or 'Could not find the table' in error_msg:
+                raise ValueError(
+                    "The advisor_profiles table does not exist. "
+                    "Please run the database migration: backend/migrations/001_create_accountability_partner_tables.sql"
+                ) from e
+            raise
+
+    strict_query = _base_query().contains('expertise_stages', [mapped_stage])
+    profiles_result = _execute_advisor_query(strict_query)
+    profile_rows = profiles_result.data or []
+
     # Get founder_id to check for existing requests
     try:
         founder_id = _get_founder_id(clerk_user_id)
     except ValueError:
         founder_id = None
-    
-    # Get existing requests for this workspace
+
     existing_requests = {}
     if founder_id:
         try:
@@ -677,10 +694,7 @@ def get_available_advisors(workspace_id, filters=None, clerk_user_id=None):
                 for req in requests.data:
                     existing_requests[req['advisor_user_id']] = req['status']
         except Exception:
-            pass  # If table doesn't exist, continue without request status
-    
-    # Filter by capacity + subscription status; format results
-    from datetime import datetime, timezone
+            pass
 
     def _can_accept_bookings(p):
         """Mirror of consultation_service._advisor_can_accept_bookings, inlined
@@ -713,54 +727,87 @@ def get_available_advisors(workspace_id, filters=None, clerk_user_id=None):
                 return False
         return False
 
-    available_partners = []
-    for profile in (profiles.data or []):
-        user_id = profile['user_id']
-
-        # Soft cutoff: advisor must have a non-lapsed subscription state to
-        # appear in the marketplace. Listed advisors with lapsed subs are
-        # hidden until they resubscribe.
-        if not _can_accept_bookings(profile):
-            continue
-        
-        # Check if this partner is already a founder/co-founder in this workspace
-        # Advisors cannot be advisors for their own projects
-        workspace_participant = supabase.table('workspace_participants').select('id, role').eq(
-            'workspace_id', workspace_id
-        ).eq('user_id', user_id).execute()
-        
-        if workspace_participant.data:
-            participant_role = workspace_participant.data[0].get('role')
-            # Skip if user is already a founder/co-founder (role is NULL or not ADVISOR)
-            if participant_role != 'ADVISOR':
-                continue  # Skip this partner - they're already a founder in this workspace
-        
-        # Count current active workspaces
-        # Try to filter by role, but handle case where column might not exist
+    def _effective_max_active(profile):
+        raw = profile.get('max_active_workspaces')
+        if raw is None or raw < 1:
+            return DEFAULT_MAX_ACTIVE
         try:
-            active_count = supabase.table('workspace_participants').select('workspace_id').eq(
-                'user_id', user_id
-            ).eq('role', 'ADVISOR').execute()
-        except Exception:
-            # Fallback if role column doesn't exist yet
-            active_count = supabase.table('workspace_participants').select('workspace_id').eq(
-                'user_id', user_id
-            ).execute()
-        
-        current_active = len(active_count.data) if active_count.data else 0
-        max_active = profile.get('max_active_workspaces', 0)
-        
-        # Only include if has capacity
-        if current_active < max_active:
-            request_status = existing_requests.get(user_id)
-            available_partners.append({
+            return min(10, int(raw))
+        except (TypeError, ValueError):
+            return DEFAULT_MAX_ACTIVE
+
+    def _build_available_partners(rows, marketplace_broadened: bool):
+        out = []
+        for profile in rows:
+            user_id = profile['user_id']
+
+            if not _can_accept_bookings(profile):
+                continue
+
+            workspace_participant = supabase.table('workspace_participants').select('id, role').eq(
+                'workspace_id', workspace_id
+            ).eq('user_id', user_id).execute()
+
+            if workspace_participant.data:
+                participant_role = workspace_participant.data[0].get('role')
+                if participant_role != 'ADVISOR':
+                    continue
+
+            try:
+                active_count = supabase.table('workspace_participants').select('workspace_id').eq(
+                    'user_id', user_id
+                ).eq('role', 'ADVISOR').execute()
+            except Exception:
+                active_count = supabase.table('workspace_participants').select('workspace_id').eq(
+                    'user_id', user_id
+                ).execute()
+
+            current_active = len(active_count.data) if active_count.data else 0
+            max_active = _effective_max_active(profile)
+
+            if current_active >= max_active:
+                continue
+
+            stage_match = _profile_matches_mapped_stage(profile)
+            name_sort = (profile.get('user') or {}).get('name') or ''
+
+            out.append({
                 **profile,
                 'current_active_workspaces': current_active,
                 'available_slots': max_active - current_active,
-                'request_status': request_status  # 'PENDING', 'ACCEPTED', 'DECLINED', or None
+                'request_status': existing_requests.get(user_id),
+                'marketplace_stage_match': stage_match,
+                'marketplace_broadened': marketplace_broadened,
+                '_sort_name': name_sort,
             })
 
-    # Batch-fetch rating stats for all advisors
+        out.sort(
+            key=lambda p: (
+                0 if p.get('marketplace_stage_match') else 1,
+                p.get('_sort_name', ''),
+            )
+        )
+        for p in out:
+            p.pop('_sort_name', None)
+        return out
+
+    available_partners = _build_available_partners(profile_rows, marketplace_broadened=False)
+
+    if len(available_partners) >= MIN_BEFORE_BROADEN:
+        pass
+    else:
+        broad_query = _base_query()
+        broad_result = _execute_advisor_query(broad_query)
+        broad_rows = broad_result.data or []
+        broad_partners = _build_available_partners(broad_rows, marketplace_broadened=True)
+        strict_n = len(available_partners)
+        if len(broad_partners) > strict_n:
+            log_info(
+                f"Workspace advisor marketplace broadened: workspace_id={workspace_id} "
+                f"strict_count={strict_n} broad_count={len(broad_partners)} mapped_stage={mapped_stage}"
+            )
+        available_partners = broad_partners
+
     if available_partners:
         advisor_ids = [p['user_id'] for p in available_partners]
         rating_stats = _batch_get_advisor_ratings(supabase, advisor_ids)

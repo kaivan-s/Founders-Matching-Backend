@@ -14,44 +14,14 @@ FOUNDER_PLANS: Dict[FounderPlan, Dict[str, Any]] = {
         "yearlyPriceUSD": 0,
         "maxWorkspacesCreated": 1,  # Can create 1 workspace
         "maxWorkspacesJoined": "UNLIMITED",  # Can join unlimited (for virality)
-        "maxProjects": 2,
+        "maxProjects": 1,  # 1 project lifetime
         "discovery": {
-            "maxSwipesPerDay": 25,  # Daily limit, more generous
-            "maxAccessRequestsPerMonth": 10,
+            "maxSwipesPerDay": "UNLIMITED",  # Browsing is unlimited
+            "maxConnectsPerDay": 1,  # 1 application per day
+            "visibleTiers": ["FREE"],  # Can only see Free founders' projects
         },
         "workspaceFeatures": {
-            "equityFull": False,
-            "kpiFull": True,
-            "decisionsFull": True,
-            "weeklyCheckins": True,
-            "notifications": True,
-            "slackIntegration": True,  # Keep for virality
-            "notionIntegration": False,
-            "summaryDashboard": False,
-        },
-        "accountability": {
-            "canBrowseMarketplace": True,   # Can browse advisors (free preview)
-            "canBookAdvisor": False,        # Booking gated to PRO_PLUS
-        },
-        "investorFeatures": {
-            # Placeholder - to be built
-            "investorProfile": False,
-            "advancedCompatAnalytics": False,
-        },
-    },
-    "PRO": {
-        "id": "PRO",
-        "monthlyPriceUSD": 12,
-        "yearlyPriceUSD": 99,  # ~17% discount
-        "maxWorkspacesCreated": 3,
-        "maxWorkspacesJoined": "UNLIMITED",
-        "maxProjects": 10,
-        "discovery": {
-            "maxSwipesPerDay": "UNLIMITED",
-            "maxAccessRequestsPerMonth": "UNLIMITED",
-        },
-        "workspaceFeatures": {
-            "equityFull": False,  # Equity only in PRO_PLUS
+            "equityFull": True,  # All workspace features included
             "kpiFull": True,
             "decisionsFull": True,
             "weeklyCheckins": True,
@@ -61,14 +31,38 @@ FOUNDER_PLANS: Dict[FounderPlan, Dict[str, Any]] = {
             "summaryDashboard": True,
         },
         "accountability": {
-            "canBrowseMarketplace": True,
-            "canBookAdvisor": False,        # Booking still gated to PRO_PLUS
+            "canBrowseMarketplace": False,  # No advisor access for Free
+            "canBookAdvisor": False,
         },
-        "investorFeatures": {
-            # Placeholder - to be built
-            "investorProfile": False,
-            "advancedCompatAnalytics": False,
+        "postMatchSupport": False,
+    },
+    "PRO": {
+        "id": "PRO",
+        "monthlyPriceUSD": 12,
+        "yearlyPriceUSD": 99,  # ~17% discount
+        "maxWorkspacesCreated": "UNLIMITED",
+        "maxWorkspacesJoined": "UNLIMITED",
+        "maxProjects": 3,  # 3 projects lifetime
+        "discovery": {
+            "maxSwipesPerDay": "UNLIMITED",
+            "maxConnectsPerDay": "UNLIMITED",  # Unlimited applications
+            "visibleTiers": ["FREE", "PRO"],  # Can see Free + Pro founders' projects
         },
+        "workspaceFeatures": {
+            "equityFull": True,
+            "kpiFull": True,
+            "decisionsFull": True,
+            "weeklyCheckins": True,
+            "notifications": True,
+            "slackIntegration": True,
+            "notionIntegration": True,
+            "summaryDashboard": True,
+        },
+        "accountability": {
+            "canBrowseMarketplace": True,  # Can browse and book advisors
+            "canBookAdvisor": True,        # Pay-per-session directly to advisor
+        },
+        "postMatchSupport": False,
     },
     "PRO_PLUS": {
         "id": "PRO_PLUS",
@@ -76,13 +70,14 @@ FOUNDER_PLANS: Dict[FounderPlan, Dict[str, Any]] = {
         "yearlyPriceUSD": 249,  # ~28% discount
         "maxWorkspacesCreated": "UNLIMITED",
         "maxWorkspacesJoined": "UNLIMITED",
-        "maxProjects": "UNLIMITED",
+        "maxProjects": 3,  # Same as Pro
         "discovery": {
             "maxSwipesPerDay": "UNLIMITED",
-            "maxAccessRequestsPerMonth": "UNLIMITED",
+            "maxConnectsPerDay": "UNLIMITED",
+            "visibleTiers": ["FREE", "PRO", "PRO_PLUS"],  # Can see all tiers
         },
         "workspaceFeatures": {
-            "equityFull": True,  # Equity only in PRO_PLUS
+            "equityFull": True,
             "kpiFull": True,
             "decisionsFull": True,
             "weeklyCheckins": True,
@@ -93,13 +88,9 @@ FOUNDER_PLANS: Dict[FounderPlan, Dict[str, Any]] = {
         },
         "accountability": {
             "canBrowseMarketplace": True,
-            "canBookAdvisor": True,         # PRO_PLUS unlocks advisor bookings
+            "canBookAdvisor": True,
         },
-        "investorFeatures": {
-            # Placeholder - to be built (PRO_PLUS will get all investor features when built)
-            "investorProfile": True,
-            "advancedCompatAnalytics": True,
-        },
+        "postMatchSupport": True,  # 30 days of moderated support
     },
 }
 
@@ -471,31 +462,53 @@ def check_discovery_limit(clerk_user_id: str) -> tuple[bool, int, int]:
 
 def check_access_request_limit(clerk_user_id: str) -> tuple[bool, int, int]:
     """
-    Check if user can send more access requests using 30-day rolling window.
+    Check if user can send more access requests (legacy - use check_connect_limit instead).
     Returns: (can_request, current_count, max_allowed)
+    """
+    return check_connect_limit(clerk_user_id)
+
+
+def check_connect_limit(clerk_user_id: str) -> tuple[bool, int, int]:
+    """
+    Check if user can send more project applications today.
+    FREE tier: 1 connect per day
+    PRO/PRO_PLUS: Unlimited
+    Returns: (can_connect, current_count_today, max_allowed)
     """
     founder_id = _get_founder_id(clerk_user_id)
     supabase = get_supabase()
     
     plan_config = get_founder_plan(clerk_user_id)
-    max_requests = plan_config.get('discovery', {}).get('maxAccessRequestsPerMonth', 3)
+    max_connects = plan_config.get('discovery', {}).get('maxConnectsPerDay', 1)
     
-    if max_requests == "UNLIMITED":
+    if max_connects == "UNLIMITED":
         return (True, 0, -1)  # -1 means unlimited
     
-    # Use 30-day rolling window
+    # Use daily window
     now = datetime.now(timezone.utc)
-    thirty_days_ago = now - timedelta(days=30)
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     
-    # Count access requests sent in the last 30 days
-    request_count_result = supabase.table('project_access_requests').select(
+    # Count applications sent today
+    # Check seeker_applications table
+    app_count_result = supabase.table('seeker_applications').select(
         'id', count='exact'
-    ).eq('requester_id', founder_id).gte('created_at', thirty_days_ago.isoformat()).execute()
+    ).eq('seeker_id', founder_id).gte('created_at', today_start.isoformat()).execute()
     
-    current_count = request_count_result.count if request_count_result.count is not None else 0
-    can_request = current_count < max_requests
+    current_count = app_count_result.count if app_count_result.count is not None else 0
+    can_connect = current_count < max_connects
     
-    return (can_request, current_count, max_requests)
+    return (can_connect, current_count, max_connects)
+
+
+def get_visible_tiers(clerk_user_id: str) -> list[str]:
+    """
+    Get which plan tiers this user can see in discovery.
+    FREE: Can only see FREE projects
+    PRO: Can see FREE + PRO projects
+    PRO_PLUS: Can see all tiers
+    """
+    plan_config = get_founder_plan(clerk_user_id)
+    return plan_config.get('discovery', {}).get('visibleTiers', ['FREE'])
 
 def increment_discovery_usage(clerk_user_id: str) -> None:
     """Increment discovery swipe count - now uses 30-day rolling window via swipe_history"""
