@@ -230,6 +230,26 @@ def seeker_withdraw_application(application_id):
         return jsonify({"error": str(e)}), 500
 
 
+@app.route('/api/seeker/skip/<project_id>', methods=['POST'])
+def seeker_skip_project(project_id):
+    """Skip a project in discovery (left swipe). The project will not appear again."""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        from services import seeker_service
+        
+        result = seeker_service.skip_project(clerk_user_id, project_id)
+        return jsonify(result), 200
+        
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        log_error("Error skipping project", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
 # ============================================
 # OWNER FLOW - "I have a project"
 # Application management for project owners

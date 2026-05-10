@@ -85,11 +85,19 @@ def _rank_discovery_candidates(
     matched_projects = supabase.table('matches').select('project_id').execute()
     matched_project_ids = {m['project_id'] for m in (matched_projects.data or []) if m.get('project_id')}
     
+    # Get skipped projects (left swipes)
+    skipped_projects = supabase.table('swipes').select('project_id').eq(
+        'swiper_id', seeker_id
+    ).eq('swipe_type', 'left').execute()
+    skipped_project_ids = {s['project_id'] for s in (skipped_projects.data or []) if s.get('project_id')}
+    
     scored_projects: List[Dict[str, Any]] = []
     
     for project in result.data:
         project_id = project['id']
         if project_id in applied_project_ids or project_id in matched_project_ids:
+            continue
+        if project_id in skipped_project_ids:
             continue
         if project_id in extra_exclude_ids:
             continue
@@ -751,6 +759,49 @@ def withdraw_application(clerk_user_id: str, application_id: str) -> Dict[str, s
     }).eq('id', application_id).execute()
     
     return {"message": "Application withdrawn successfully"}
+
+
+def skip_project(clerk_user_id: str, project_id: str) -> Dict[str, str]:
+    """
+    Skip a project in discovery (left swipe).
+    The project will not appear in future discovery results.
+    """
+    supabase = get_supabase()
+    
+    # Get seeker's founder ID
+    founder = supabase.table('founders').select('id').eq(
+        'clerk_user_id', clerk_user_id
+    ).execute()
+    
+    if not founder.data:
+        raise ValueError("Profile not found")
+    
+    seeker_id = founder.data[0]['id']
+    
+    # Verify project exists and get its founder_id
+    project = supabase.table('projects').select('id, founder_id').eq('id', project_id).execute()
+    if not project.data:
+        raise ValueError("Project not found")
+    
+    project_founder_id = project.data[0].get('founder_id')
+    
+    # Check if already skipped
+    existing = supabase.table('swipes').select('id').eq(
+        'swiper_id', seeker_id
+    ).eq('project_id', project_id).eq('swipe_type', 'left').execute()
+    
+    if existing.data:
+        return {"message": "Already skipped"}
+    
+    # Record the skip (left swipe)
+    supabase.table('swipes').insert({
+        'swiper_id': seeker_id,
+        'swiped_id': project_founder_id,
+        'project_id': project_id,
+        'swipe_type': 'left',
+    }).execute()
+    
+    return {"message": "Project skipped"}
 
 
 # ============================================
