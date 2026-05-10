@@ -7,7 +7,7 @@ from urllib.parse import quote
 
 from utils.auth import get_clerk_user_id
 from utils.validation import sanitize_string, validate_integer, sanitize_list, validate_enum
-from utils.logger import log_error, log_warning, log_info
+from utils.logger import log_error, log_warning, log_info, sanitize_error_for_user
 from utils.rate_limit import init_rate_limiter, RATE_LIMITS
 from config.database import get_supabase
 from services import founder_service, project_service, profile_service, match_service, waitlist_service, message_service, payment_service, workspace_service
@@ -147,7 +147,7 @@ def seeker_search():
     except Exception as e:
         error_trace = traceback.format_exc()
         log_error("Error in seeker search", error=e, traceback_str=error_trace)
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": sanitize_error_for_user(e)}), 500
 
 
 @app.route('/api/seeker/apply/<project_id>', methods=['POST'])
@@ -187,7 +187,7 @@ def seeker_apply(project_id):
     except Exception as e:
         error_trace = traceback.format_exc()
         log_error("Error in seeker apply", error=e, traceback_str=error_trace)
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": sanitize_error_for_user(e)}), 500
 
 
 @app.route('/api/seeker/applications', methods=['GET'])
@@ -247,7 +247,7 @@ def seeker_skip_project(project_id):
         return jsonify({"error": str(e)}), 400
     except Exception as e:
         log_error("Error skipping project", error=e)
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": sanitize_error_for_user(e)}), 500
 
 
 # ============================================
@@ -815,7 +815,7 @@ def update_project(project_id):
     except ValueError as e:
         return jsonify({"error": str(e)}), 404
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": sanitize_error_for_user(e)}), 500
 
 @app.route('/api/projects/<project_id>', methods=['DELETE'])
 def delete_project(project_id):
@@ -830,7 +830,7 @@ def delete_project(project_id):
     except ValueError as e:
         return jsonify({"error": str(e)}), 404
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": sanitize_error_for_user(e)}), 500
 
 # ==================== Project Access & Visibility Routes ====================
 

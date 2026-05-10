@@ -27,36 +27,33 @@ def auto_reject_swipes_for_project(project_id: str, founder_id: str = None) -> i
     
     rejected_count = 0
     
-    # Create notifications for users whose swipes were auto-rejected
-    from services.notification_service import NotificationService
-    notification_service = NotificationService()
-    
     for swipe in pending_swipes.data:
         try:
             swiper_id = swipe['swiper_id']
             
-            # Create notification for swiper
-            notification_service.create_notification(
-                workspace_id=None,
-                recipient_id=swiper_id,
-                actor_id=project_owner_id,
-                event_type='SWIPE_REJECTED',
-                title=f"Project '{project_title}' is no longer seeking co-founders",
-                entity_type='project',
-                entity_id=project_id,
-                metadata={
+            # Create a simple notification directly (without workspace_audit_log trigger)
+            # Since this is not workspace-related, we use the general notifications table
+            supabase.table('notifications').insert({
+                'user_id': swiper_id,
+                'actor_user_id': project_owner_id,
+                'type': 'PROJECT_UNAVAILABLE',
+                'title': f"Project '{project_title}' is no longer available",
+                'message': 'The project owner has closed applications.',
+                'entity_type': 'project',
+                'entity_id': project_id,
+                'metadata': {
                     'project_id': project_id,
                     'project_title': project_title,
                     'reason': 'project_stopped_seeking',
-                    'swipe_id': swipe['id']
                 }
-            )
+            }).execute()
             
             rejected_count += 1
-            log_info(f"Auto-rejected swipe {swipe['id']} for project {project_id}")
+            log_info(f"Notified swiper about closed project {project_id}")
             
         except Exception as e:
-            log_error(f"Failed to notify swiper {swipe.get('swiper_id')} about auto-rejected swipe", error=e)
+            # Don't fail the whole operation if notification fails
+            log_error(f"Failed to notify swiper {swipe.get('swiper_id')} about closed project", error=e)
     
     return rejected_count
 
