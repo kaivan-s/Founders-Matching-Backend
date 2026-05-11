@@ -489,10 +489,9 @@ def check_connect_limit(clerk_user_id: str) -> tuple[bool, int, int]:
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     
     # Count applications sent today
-    # Check seeker_applications table
-    app_count_result = supabase.table('seeker_applications').select(
+    app_count_result = supabase.table('applications').select(
         'id', count='exact'
-    ).eq('seeker_id', founder_id).gte('created_at', today_start.isoformat()).execute()
+    ).eq('applicant_id', founder_id).gte('created_at', today_start.isoformat()).execute()
     
     current_count = app_count_result.count if app_count_result.count is not None else 0
     can_connect = current_count < max_connects
