@@ -4116,56 +4116,56 @@ def subscribe_plan():
 @app.route('/api/billing/founder/cancel', methods=['POST'])
 @limiter.limit(RATE_LIMITS['moderate'])
 def cancel_subscription():
-    """Cancel subscription and downgrade to FREE plan"""
+    """Cancel subscription - stops renewal but keeps access until period ends"""
     try:
         clerk_user_id = get_clerk_user_id()
         if not clerk_user_id:
             return jsonify({"error": "User ID required"}), 401
         
-        data = request.get_json() or {}
-        workspace_to_keep = data.get('workspace_to_keep')  # Optional: user can specify which workspace to keep
-        
-        # Check if user has multiple workspaces that would exceed FREE plan limit
-        can_create, current_count, max_allowed = plan_service.check_workspace_limit(clerk_user_id)
         current_plan = plan_service.get_founder_plan(clerk_user_id)
         
-        # If downgrading from paid plan and would exceed FREE limit (1 workspace)
-        if current_plan.get('id') != 'FREE' and current_count > 1:
-            # If user didn't specify which workspace to keep, return list for selection
-            if not workspace_to_keep:
-                # Get list of user's workspaces
-                from services import workspace_service
-                workspaces = workspace_service.get_workspaces(clerk_user_id)
-                return jsonify({
-                    "error": "workspace_selection_required",
-                    "message": f"You have {current_count} workspaces. FREE plan allows only 1 workspace. Please select which workspace to keep.",
-                    "workspaces": workspaces,
-                    "current_count": current_count,
-                    "max_allowed": 1
-                }), 400
+        if current_plan.get('id') == 'FREE':
+            return jsonify({"error": "No active subscription to cancel"}), 400
         
-        # STEP 1: Cancel subscription in Dodo FIRST (to stop billing)
+        # Cancel subscription in Dodo (stops future billing)
         from services import subscription_service
         try:
             cancel_result = subscription_service.cancel_subscription(clerk_user_id)
             log_info(f"Subscription cancellation result for {clerk_user_id}: {cancel_result}")
         except Exception as cancel_error:
-            # Log but don't fail - we still want to downgrade the user in our DB
-            # This handles edge cases where subscription doesn't exist but user is on paid plan
-            log_error(f"Failed to cancel subscription for {clerk_user_id}: {cancel_error}")
+            log_error(f"Failed to cancel subscription in Dodo for {clerk_user_id}: {cancel_error}")
         
-        # STEP 2: Downgrade to FREE in our database
-        # Update subscription_status to 'canceled' when downgrading
-        updated_plan = plan_service.update_founder_plan(
-            clerk_user_id, 
-            'FREE', 
-            workspace_to_keep=workspace_to_keep,
-            subscription_status='canceled'
-        )
+        # Update subscription_status to 'canceled' but KEEP the current plan
+        # User retains access until subscription_current_period_end
+        supabase = get_supabase()
+        founder_id = plan_service._get_founder_id(clerk_user_id)
+        
+        # Get current period end for the response message
+        founder = supabase.table('founders').select('subscription_current_period_end').eq('id', founder_id).execute()
+        period_end = founder.data[0].get('subscription_current_period_end') if founder.data else None
+        
+        # Only update the status, not the plan
+        supabase.table('founders').update({
+            'subscription_status': 'canceled'
+        }).eq('id', founder_id).execute()
+        
+        # Format the period end for display
+        period_end_display = None
+        if period_end:
+            try:
+                from datetime import datetime
+                period_dt = datetime.fromisoformat(period_end.replace('Z', '+00:00'))
+                period_end_display = period_dt.strftime('%B %d, %Y')
+            except:
+                period_end_display = period_end
+        
+        # Return updated plan info
+        updated_plan = plan_service.get_founder_plan(clerk_user_id)
         
         return jsonify({
             **updated_plan,
-            "message": "Subscription cancelled successfully. You have been downgraded to the Free plan."
+            "message": f"Subscription cancelled. You'll retain {current_plan.get('id')} access until {period_end_display or 'the end of your billing period'}.",
+            "access_until": period_end
         }), 200
     except ValueError as e:
         return jsonify({"error": str(e)}), 400

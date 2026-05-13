@@ -193,24 +193,34 @@ def get_founder_plan(clerk_user_id: str) -> Dict[str, Any]:
     subscription_status = founder.data[0].get('subscription_status')
     subscription_current_period_end = founder.data[0].get('subscription_current_period_end')
     
-    # Check if subscription has expired
-    if plan_id != 'FREE' and subscription_current_period_end:
-        try:
-            period_end = datetime.fromisoformat(subscription_current_period_end.replace('Z', '+00:00'))
-            if period_end.tzinfo is None:
-                period_end = period_end.replace(tzinfo=timezone.utc)
-            
-            now = datetime.now(timezone.utc)
-            if period_end < now:
-                # Subscription has expired - downgrade to FREE
-                plan_id = 'FREE'
-        except (ValueError, AttributeError):
-            # Invalid date format - treat as expired
+    # Check if subscription has expired or is in a bad state
+    if plan_id != 'FREE':
+        period_end = None
+        period_ended = False
+        
+        # Parse the period end date
+        if subscription_current_period_end:
+            try:
+                period_end = datetime.fromisoformat(subscription_current_period_end.replace('Z', '+00:00'))
+                if period_end.tzinfo is None:
+                    period_end = period_end.replace(tzinfo=timezone.utc)
+                
+                now = datetime.now(timezone.utc)
+                period_ended = period_end < now
+            except (ValueError, AttributeError):
+                # Invalid date format - treat as expired
+                period_ended = True
+        
+        # Determine if user should be downgraded to FREE
+        # - If status is 'expired', 'past_due', 'unpaid' -> immediate downgrade
+        # - If status is 'canceled' -> only downgrade if period has ended
+        # - If period has ended (regardless of status) -> downgrade
+        if subscription_status in ['expired', 'past_due', 'unpaid']:
             plan_id = 'FREE'
-    
-    # Also check subscription status
-    if plan_id != 'FREE' and subscription_status in ['canceled', 'expired', 'past_due', 'unpaid']:
-        plan_id = 'FREE'
+        elif subscription_status == 'canceled' and period_ended:
+            plan_id = 'FREE'
+        elif period_ended and subscription_status != 'active':
+            plan_id = 'FREE'
     
     plan_config = FOUNDER_PLANS.get(plan_id, FOUNDER_PLANS['FREE']).copy()
     

@@ -788,24 +788,57 @@ def handle_subscription_updated(webhook_data: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def handle_subscription_canceled(webhook_data: Dict[str, Any]) -> Dict[str, Any]:
-    """Handle subscription.cancelled webhook"""
+    """Handle subscription.cancelled webhook
+    
+    Note: This webhook may be sent when:
+    1. User cancels and period ends (subscription terminates)
+    2. Subscription is forcibly canceled by Dodo
+    
+    We only downgrade to FREE if the period has actually ended.
+    Otherwise, just mark as 'canceled' and let get_founder_plan() handle
+    the downgrade when period_end passes.
+    """
     from utils.logger import log_info
 
     try:
         data = webhook_data.get('data', {})
         subscription_id = data.get('subscription_id') or data.get('id')
 
-        log_info(f"Subscription canceled: {subscription_id}")
+        log_info(f"Subscription canceled webhook: {subscription_id}")
 
         supabase = get_supabase()
 
-        # Founder side: downgrade to FREE if matched
-        founder = supabase.table('founders').select('clerk_user_id').eq('subscription_id', subscription_id).execute()
+        # Founder side: mark as canceled, only downgrade if period ended
+        founder = supabase.table('founders').select(
+            'clerk_user_id, subscription_current_period_end'
+        ).eq('subscription_id', subscription_id).execute()
+        
         if founder.data:
+            clerk_user_id = founder.data[0]['clerk_user_id']
+            period_end = founder.data[0].get('subscription_current_period_end')
+            
+            # Update status to canceled
             supabase.table('founders').update({
                 'subscription_status': 'canceled'
             }).eq('subscription_id', subscription_id).execute()
-            plan_service.update_founder_plan(founder.data[0]['clerk_user_id'], 'FREE')
+            
+            # Only downgrade to FREE if period has ended
+            should_downgrade = True
+            if period_end:
+                try:
+                    end_dt = datetime.fromisoformat(str(period_end).replace('Z', '+00:00'))
+                    if end_dt.tzinfo is None:
+                        end_dt = end_dt.replace(tzinfo=timezone.utc)
+                    if end_dt > datetime.now(timezone.utc):
+                        # Period hasn't ended yet - don't downgrade
+                        should_downgrade = False
+                        log_info(f"Subscription {subscription_id} canceled but period ends {end_dt}, not downgrading yet")
+                except Exception as e:
+                    log_info(f"Error parsing period_end: {e}")
+            
+            if should_downgrade:
+                plan_service.update_founder_plan(clerk_user_id, 'FREE')
+                log_info(f"Downgraded {clerk_user_id} to FREE (period ended)")
 
         # Advisor side: mark cancelled (soft cutoff applies via the can_accept_bookings helper)
         advisor = supabase.table('advisor_profiles').select('id').eq('subscription_id', subscription_id).execute()
