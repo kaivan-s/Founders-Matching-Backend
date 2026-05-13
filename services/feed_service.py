@@ -485,9 +485,9 @@ def _create_feed_notification(workspace_id: str, author_id: str, post: Dict) -> 
                     'post_type': post_type,
                 }
             }).execute()
-        except Exception:
+        except Exception as e:
             # Don't fail if notification creation fails
-            pass
+            print(f"[NOTIFY] Feed post notification insert failed: {e}")
 
 
 # ============================================

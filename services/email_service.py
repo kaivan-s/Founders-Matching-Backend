@@ -29,16 +29,21 @@ def send_email(
     Send an email via Resend
     Returns True if successful, False otherwise
     """
+    print(f"[EMAIL] send_email called: to={to_email}, subject={subject[:50]}...")
+    
     if not to_email:
+        print("[EMAIL] SKIP: No email address provided")
         logger.warning("No email address provided")
         return False
     
     # Skip in development if Resend not configured
     if not RESEND_API_KEY:
+        print(f"[EMAIL] DEV MODE: Would send to {to_email}: {subject}")
         logger.info(f"[DEV] Would send email to {to_email}: {subject}")
         return True
     
     try:
+        print(f"[EMAIL] Sending via Resend to {to_email}...")
         response = resend.Emails.send({
             "from": f"{EMAIL_FROM_NAME} <{EMAIL_FROM_ADDRESS}>",
             "to": [to_email],
@@ -46,10 +51,12 @@ def send_email(
             "html": html_body,
         })
         
+        print(f"[EMAIL] SUCCESS: Sent to {to_email}, id={response.get('id')}")
         logger.info(f"Email sent to {to_email}: {response.get('id')}")
         return True
         
     except Exception as e:
+        print(f"[EMAIL] FAILED: {to_email} - {str(e)}")
         logger.error(f"Failed to send email to {to_email}: {str(e)}")
         return False
 

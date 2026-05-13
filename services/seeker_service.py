@@ -1022,19 +1022,23 @@ def _notify_application_received(
     """Send notification to project owner about new application."""
     supabase = get_supabase()
     
-    # Create in-app notification
-    supabase.table('notifications').insert({
-        'user_id': owner_id,
-        'type': 'application_received',
-        'title': f"New application for {project_title}",
-        'message': f"{applicant_name} wants to join your project",
-        'data': {
-            'application_id': application_id,
-            'project_title': project_title,
-        }
-    }).execute()
+    # Create in-app notification (wrapped in try/catch so email still sends if this fails)
+    try:
+        supabase.table('notifications').insert({
+            'user_id': owner_id,
+            'type': 'application_received',
+            'title': f"New application for {project_title}",
+            'message': f"{applicant_name} wants to join your project",
+            'data': {
+                'application_id': application_id,
+                'project_title': project_title,
+            }
+        }).execute()
+    except Exception as e:
+        print(f"[NOTIFY] In-app notification insert failed: {e}")
     
     # Send email notification
+    print(f"[NOTIFY] _notify_application_received: owner_email={owner_email}")
     if owner_email:
         try:
             from services import email_service
@@ -1045,4 +1049,7 @@ def _notify_application_received(
                 project_name=project_title
             )
         except Exception as e:
+            print(f"[NOTIFY] EXCEPTION in send_interest_received_email: {e}")
             log_error("Failed to send application email", error=e)
+    else:
+        print("[NOTIFY] SKIP: No owner_email provided")

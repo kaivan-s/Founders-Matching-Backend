@@ -231,15 +231,21 @@ def request_project_access(clerk_user_id: str, project_id: str, message: str = N
         requester = supabase.table('founders').select('name').eq('id', requester_id).execute()
         owner = supabase.table('founders').select('name, email').eq('id', owner_id).execute()
         
+        owner_email = owner.data[0].get('email') if owner.data else None
+        print(f"[NOTIFY] request_project_access: owner_email={owner_email}")
+        
         if requester.data and owner.data:
             email_service.send_access_request_email(
-                to_email=owner.data[0].get('email'),
+                to_email=owner_email,
                 user_name=owner.data[0].get('name', 'there'),
                 requester_name=requester.data[0].get('name', 'Someone'),
                 project_name=project_data.get('title', 'your project'),
                 request_message=message
             )
+        else:
+            print(f"[NOTIFY] SKIP: requester.data={bool(requester.data)}, owner.data={bool(owner.data)}")
     except Exception as e:
+        print(f"[NOTIFY] EXCEPTION in send_access_request_email: {e}")
         log_error(f"Failed to send access request notification email", error=e)
     
     return {
@@ -347,14 +353,20 @@ def respond_to_access_request(clerk_user_id: str, request_id: str,
             owner = supabase.table('founders').select('name').eq('id', owner_founder_id).execute()
             project = supabase.table('projects').select('title').eq('id', request_data['project_id']).execute()
             
+            requester_email = requester.data[0].get('email') if requester.data else None
+            print(f"[NOTIFY] respond_to_access_request (approve): requester_email={requester_email}")
+            
             if requester.data and owner.data and project.data:
                 email_service.send_access_granted_email(
-                    to_email=requester.data[0].get('email'),
+                    to_email=requester_email,
                     user_name=requester.data[0].get('name', 'there'),
                     project_name=project.data[0].get('title', 'the project'),
                     owner_name=owner.data[0].get('name', 'The project owner')
                 )
+            else:
+                print(f"[NOTIFY] SKIP: requester.data={bool(requester.data)}, owner.data={bool(owner.data)}, project.data={bool(project.data)}")
         except Exception as e:
+            print(f"[NOTIFY] EXCEPTION in send_access_granted_email: {e}")
             log_error(f"Failed to send access granted notification email", error=e)
     
     return {

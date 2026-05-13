@@ -414,19 +414,23 @@ def _notify_application_accepted(
     """Notify applicant their application was accepted."""
     supabase = get_supabase()
     
-    # In-app notification
-    supabase.table('notifications').insert({
-        'user_id': applicant_id,
-        'type': 'application_accepted',
-        'title': f"You're in! 🎉",
-        'message': f"{owner_name} accepted your application to join {project_title}",
-        'data': {
-            'workspace_id': workspace_id,
-            'project_title': project_title,
-        }
-    }).execute()
+    # In-app notification (wrapped in try/catch so email still sends if this fails)
+    try:
+        supabase.table('notifications').insert({
+            'user_id': applicant_id,
+            'type': 'application_accepted',
+            'title': f"You're in! 🎉",
+            'message': f"{owner_name} accepted your application to join {project_title}",
+            'data': {
+                'workspace_id': workspace_id,
+                'project_title': project_title,
+            }
+        }).execute()
+    except Exception as e:
+        print(f"[NOTIFY] In-app notification insert failed: {e}")
     
     # Email notification
+    print(f"[NOTIFY] _notify_application_accepted: applicant_email={applicant_email}")
     if applicant_email:
         try:
             from services import email_service
@@ -438,7 +442,10 @@ def _notify_application_accepted(
                 workspace_id=workspace_id,
             )
         except Exception as e:
+            print(f"[NOTIFY] EXCEPTION in send_new_match_email: {e}")
             log_error("Failed to send acceptance email", error=e)
+    else:
+        print("[NOTIFY] SKIP: No applicant_email provided")
 
 
 def _notify_application_rejected(
@@ -450,13 +457,16 @@ def _notify_application_rejected(
     """Notify applicant their application was not accepted."""
     supabase = get_supabase()
     
-    # In-app notification
-    supabase.table('notifications').insert({
-        'user_id': applicant_id,
-        'type': 'application_rejected',
-        'title': f"Application update",
-        'message': f"Your application to {project_title} wasn't selected this time",
-        'data': {
-            'project_title': project_title,
-        }
-    }).execute()
+    # In-app notification (wrapped in try/catch)
+    try:
+        supabase.table('notifications').insert({
+            'user_id': applicant_id,
+            'type': 'application_rejected',
+            'title': f"Application update",
+            'message': f"Your application to {project_title} wasn't selected this time",
+            'data': {
+                'project_title': project_title,
+            }
+        }).execute()
+    except Exception as e:
+        print(f"[NOTIFY] In-app notification insert failed: {e}")
