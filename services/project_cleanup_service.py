@@ -41,7 +41,7 @@ def auto_reject_swipes_for_project(project_id: str, founder_id: str = None) -> i
                 'message': 'The project owner has closed applications.',
                 'entity_type': 'project',
                 'entity_id': project_id,
-                'metadata': {
+                'data': {
                     'project_id': project_id,
                     'project_title': project_title,
                     'reason': 'project_stopped_seeking',

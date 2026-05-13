@@ -969,29 +969,32 @@ def create_checkin(clerk_user_id, workspace_id, data):
     
     for participant in participants.data or []:
         if participant['user_id'] != founder_id:
-            # Different notification for partners (only if role column exists)
-            if participant.get('role') == 'ADVISOR':
-                notification_service.create_notification(
-                    workspace_id=workspace_id,
-                    recipient_id=participant['user_id'],
-                    actor_id=founder_id,
-                    event_type='CHECKIN_CREATED_FOR_REVIEW',
-                    title=f"New check-in to review for {workspace_title}",
-                    entity_type='workspace_checkin',
-                    entity_id=new_checkin.data['id'],
-                    metadata={'status': data['status'], 'progress': progress_percent, 'workspace_title': workspace_title}
-                )
-            else:
-                notification_service.create_notification(
-                    workspace_id=workspace_id,
-                    recipient_id=participant['user_id'],
-                    actor_id=founder_id,
-                    event_type='CHECKIN_CREATED',
-                    title=f"{creator} posted weekly check-in: {data['status'].replace('_', ' ').title()}",
-                    entity_type='workspace_checkin',
-                    entity_id=new_checkin.data['id'],
-                    metadata={'status': data['status'], 'progress': progress_percent}
-                )
+            try:
+                # Different notification for partners (only if role column exists)
+                if participant.get('role') == 'ADVISOR':
+                    notification_service.create_notification(
+                        workspace_id=workspace_id,
+                        recipient_id=participant['user_id'],
+                        actor_id=founder_id,
+                        event_type='CHECKIN_CREATED_FOR_REVIEW',
+                        title=f"New check-in to review for {workspace_title}",
+                        entity_type='workspace_checkin',
+                        entity_id=new_checkin.data['id'],
+                        metadata={'status': data['status'], 'progress': progress_percent, 'workspace_title': workspace_title}
+                    )
+                else:
+                    notification_service.create_notification(
+                        workspace_id=workspace_id,
+                        recipient_id=participant['user_id'],
+                        actor_id=founder_id,
+                        event_type='CHECKIN_CREATED',
+                        title=f"{creator} posted weekly check-in: {data['status'].replace('_', ' ').title()}",
+                        entity_type='workspace_checkin',
+                        entity_id=new_checkin.data['id'],
+                        metadata={'status': data['status'], 'progress': progress_percent}
+                    )
+            except Exception as e:
+                print(f"[NOTIFY] Failed to create checkin notification: {e}")
     
     return new_checkin.data
 
@@ -1093,16 +1096,19 @@ def set_checkin_verdict(clerk_user_id, checkin_id, verdict):
     partner_name_str = partner_name.data[0]['name'] if partner_name.data else 'Partner'
     
     for participant in (participants.data or []):
-        notification_service.create_notification(
-            workspace_id=workspace_id,
-            recipient_id=participant['user_id'],
-            actor_id=founder_id,
-            event_type='CHECKIN_VERDICT_SET',
-            title=f"{partner_name_str} set verdict: {verdict.replace('_', ' ').title()}",
-            entity_type='workspace_checkin_verdict',
-            entity_id=verdict_result.data[0]['id'],
-            metadata={'checkin_id': checkin_id, 'verdict': verdict}
-        )
+        try:
+            notification_service.create_notification(
+                workspace_id=workspace_id,
+                recipient_id=participant['user_id'],
+                actor_id=founder_id,
+                event_type='CHECKIN_VERDICT_SET',
+                title=f"{partner_name_str} set verdict: {verdict.replace('_', ' ').title()}",
+                entity_type='workspace_checkin_verdict',
+                entity_id=verdict_result.data[0]['id'],
+                metadata={'checkin_id': checkin_id, 'verdict': verdict}
+            )
+        except Exception as e:
+            print(f"[NOTIFY] Failed to create verdict notification: {e}")
     
     _log_audit(workspace_id, founder_id, 'set_checkin_verdict', 'workspace_checkin_verdict', verdict_result.data[0]['id'], {'verdict': verdict})
     
@@ -1231,16 +1237,19 @@ def upsert_checkin_partner_review(clerk_user_id, workspace_id, checkin_id, verdi
     }.get(verdict, verdict)
     
     for participant in (participants.data or []):
-        notification_service.create_notification(
-            workspace_id=workspace_id,
-            recipient_id=participant['user_id'],
-            actor_id=founder_id,
-            event_type='CHECKIN_CREATED',  # Using existing event type
-            title=f"{partner_name_str} reviewed this week's check-in: {verdict_display}",
-            entity_type='workspace_checkin_partner_review',
-            entity_id=review_result.data[0]['id'],
-            metadata={'checkin_id': checkin_id, 'verdict': verdict, 'is_new': is_new}
-        )
+        try:
+            notification_service.create_notification(
+                workspace_id=workspace_id,
+                recipient_id=participant['user_id'],
+                actor_id=founder_id,
+                event_type='CHECKIN_CREATED',  # Using existing event type
+                title=f"{partner_name_str} reviewed this week's check-in: {verdict_display}",
+                entity_type='workspace_checkin_partner_review',
+                entity_id=review_result.data[0]['id'],
+                metadata={'checkin_id': checkin_id, 'verdict': verdict, 'is_new': is_new}
+            )
+        except Exception as e:
+            print(f"[NOTIFY] Failed to create partner review notification: {e}")
     
     _log_audit(workspace_id, founder_id, 'upsert_checkin_partner_review', 'workspace_checkin_partner_review', review_result.data[0]['id'], {'verdict': verdict, 'is_new': is_new})
     

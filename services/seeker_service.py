@@ -1026,7 +1026,7 @@ def _notify_application_received(
     try:
         supabase.table('notifications').insert({
             'user_id': owner_id,
-            'type': 'application_received',
+            'type': 'APPLICATION_RECEIVED',
             'title': f"New application for {project_title}",
             'message': f"{applicant_name} wants to join your project",
             'data': {

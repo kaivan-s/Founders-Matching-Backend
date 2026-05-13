@@ -418,7 +418,7 @@ def _notify_application_accepted(
     try:
         supabase.table('notifications').insert({
             'user_id': applicant_id,
-            'type': 'application_accepted',
+            'type': 'APPLICATION_ACCEPTED',
             'title': f"You're in! 🎉",
             'message': f"{owner_name} accepted your application to join {project_title}",
             'data': {
@@ -461,7 +461,7 @@ def _notify_application_rejected(
     try:
         supabase.table('notifications').insert({
             'user_id': applicant_id,
-            'type': 'application_rejected',
+            'type': 'APPLICATION_REJECTED',
             'title': f"Application update",
             'message': f"Your application to {project_title} wasn't selected this time",
             'data': {

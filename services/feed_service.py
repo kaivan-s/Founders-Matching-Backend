@@ -476,7 +476,7 @@ def _create_feed_notification(workspace_id: str, author_id: str, post: Dict) -> 
         try:
             supabase.table('notifications').insert({
                 'user_id': p['user_id'],
-                'type': 'feed_post',
+                'type': 'FEED_POST',
                 'title': title,
                 'message': post.get('content', '')[:100] + ('...' if len(post.get('content', '')) > 100 else ''),
                 'data': {

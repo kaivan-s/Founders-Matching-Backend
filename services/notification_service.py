@@ -114,7 +114,7 @@ class NotificationService:
             'entity_type': entity_type,
             'entity_id': entity_id,
             'approval_id': approval_id,
-            'metadata': metadata or {}
+            'data': metadata or {}
         }
         
         result = self.supabase.table('notifications').insert(notification_data).execute()
@@ -450,18 +450,21 @@ class ApprovalService:
         # Create notification for approver
         title = self._get_approval_title(entity_type, proposed_data, proposer_name)
         
-        self.notification_service.create_notification(
-            workspace_id=workspace_id,
-            recipient_id=approver['id'],
-            actor_id=proposer_id,
-            event_type='APPROVAL_REQUESTED',
-            title=title,
-            message=f"{proposer_name} has requested your approval",
-            entity_type=entity_type,
-            entity_id=entity_id,
-            approval_id=approval_id,
-            metadata={'proposed_data': proposed_data}
-        )
+        try:
+            self.notification_service.create_notification(
+                workspace_id=workspace_id,
+                recipient_id=approver['id'],
+                actor_id=proposer_id,
+                event_type='APPROVAL_REQUESTED',
+                title=title,
+                message=f"{proposer_name} has requested your approval",
+                entity_type=entity_type,
+                entity_id=entity_id,
+                approval_id=approval_id,
+                metadata={'proposed_data': proposed_data}
+            )
+        except Exception as e:
+            print(f"[NOTIFY] Failed to create approval request notification: {e}")
         
         return approval_id
     
@@ -525,18 +528,21 @@ class ApprovalService:
             self._apply_approved_changes(approval_data)
         
         # Notify proposer
-        self.notification_service.create_notification(
-            workspace_id=approval_data['workspace_id'],
-            recipient_id=approval_data['proposed_by_user_id'],
-            actor_id=approver_id,
-            event_type='APPROVAL_COMPLETED',
-            title=f"{approver_name} {decision}d your proposal",
-            message=comment,
-            entity_type=approval_data['entity_type'],
-            entity_id=approval_data['entity_id'],
-            approval_id=approval_id,
-            metadata={'status': status}
-        )
+        try:
+            self.notification_service.create_notification(
+                workspace_id=approval_data['workspace_id'],
+                recipient_id=approval_data['proposed_by_user_id'],
+                actor_id=approver_id,
+                event_type='APPROVAL_COMPLETED',
+                title=f"{approver_name} {decision}d your proposal",
+                message=comment,
+                entity_type=approval_data['entity_type'],
+                entity_id=approval_data['entity_id'],
+                approval_id=approval_id,
+                metadata={'status': status}
+            )
+        except Exception as e:
+            print(f"[NOTIFY] Failed to create approval completed notification: {e}")
         
         return True
     
