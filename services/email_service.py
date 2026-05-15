@@ -376,6 +376,104 @@ def send_partner_checkin_submitted_email(
     )
 
 
+def send_advisor_approved_email(
+    to_email: str,
+    advisor_name: str
+) -> bool:
+    """Send email when an advisor's profile is approved"""
+    content = f'''
+        <h1 style="margin: 0 0 16px; font-size: 24px; font-weight: 600; color: #0f172a;">
+            You're Approved! 🎉
+        </h1>
+        <p style="margin: 0 0 24px; font-size: 16px; color: #475569; line-height: 1.6;">
+            Hey {advisor_name}, great news! Your advisor profile has been reviewed and approved.
+        </p>
+        <p style="margin: 0 0 24px; font-size: 16px; color: #475569; line-height: 1.6;">
+            You're now visible in the Guild Space advisor marketplace. Founders can discover your profile 
+            and book consultations with you.
+        </p>
+        <div style="margin: 0 0 24px; padding: 16px; background-color: #f0fdf4; border-radius: 8px; border-left: 4px solid #10b981;">
+            <p style="margin: 0; font-size: 14px; color: #166534; font-weight: 500;">
+                What's next?
+            </p>
+            <ul style="margin: 8px 0 0; padding-left: 20px; color: #166534; font-size: 14px;">
+                <li>Make sure your calendar availability is up to date</li>
+                <li>Check your consultation rates are set correctly</li>
+                <li>Keep an eye out for booking requests!</li>
+            </ul>
+        </div>
+        <table role="presentation" cellspacing="0" cellpadding="0" border="0">
+            <tr>
+                <td style="border-radius: 8px; background-color: #0d9488;">
+                    <a href="{FRONTEND_URL}/advisor/dashboard" 
+                       style="display: inline-block; padding: 14px 28px; font-size: 16px; font-weight: 600; color: #ffffff; text-decoration: none;">
+                        Go to Dashboard →
+                    </a>
+                </td>
+            </tr>
+        </table>
+        <p style="margin: 24px 0 0; font-size: 14px; color: #94a3b8;">
+            Thank you for joining Guild Space as an advisor!
+        </p>
+    '''
+    
+    return send_email(
+        to_email=to_email,
+        subject=f"You're approved as a Guild Space Advisor! 🎉",
+        html_body=_base_template(content, "Your advisor profile is now live")
+    )
+
+
+def send_advisor_rejected_email(
+    to_email: str,
+    advisor_name: str,
+    reason: Optional[str] = None
+) -> bool:
+    """Send email when an advisor's profile is rejected"""
+    reason_html = ""
+    if reason:
+        reason_html = f'''
+        <div style="margin: 0 0 24px; padding: 16px; background-color: #fef2f2; border-radius: 8px; border-left: 4px solid #ef4444;">
+            <p style="margin: 0; font-size: 14px; color: #991b1b;">
+                <strong>Feedback:</strong> {reason}
+            </p>
+        </div>
+        '''
+    
+    content = f'''
+        <h1 style="margin: 0 0 16px; font-size: 24px; font-weight: 600; color: #0f172a;">
+            Profile Update Required
+        </h1>
+        <p style="margin: 0 0 24px; font-size: 16px; color: #475569; line-height: 1.6;">
+            Hey {advisor_name}, thank you for applying to be an advisor on Guild Space.
+        </p>
+        <p style="margin: 0 0 24px; font-size: 16px; color: #475569; line-height: 1.6;">
+            After reviewing your profile, we weren't able to approve it at this time. 
+            This could be due to incomplete information or other factors.
+        </p>
+        {reason_html}
+        <p style="margin: 0 0 24px; font-size: 16px; color: #475569; line-height: 1.6;">
+            You're welcome to update your profile and resubmit for review.
+        </p>
+        <table role="presentation" cellspacing="0" cellpadding="0" border="0">
+            <tr>
+                <td style="border-radius: 8px; background-color: #1e3a8a;">
+                    <a href="{FRONTEND_URL}/advisor/onboarding" 
+                       style="display: inline-block; padding: 14px 28px; font-size: 16px; font-weight: 600; color: #ffffff; text-decoration: none;">
+                        Update Profile →
+                    </a>
+                </td>
+            </tr>
+        </table>
+    '''
+    
+    return send_email(
+        to_email=to_email,
+        subject=f"Your Guild Space Advisor Application",
+        html_body=_base_template(content, "Advisor profile update required")
+    )
+
+
 def send_advisor_request_email(
     to_email: str,
     advisor_name: str,

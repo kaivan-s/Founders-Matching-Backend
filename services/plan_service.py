@@ -18,6 +18,7 @@ FOUNDER_PLANS: Dict[FounderPlan, Dict[str, Any]] = {
         "discovery": {
             "maxSwipesPerDay": "UNLIMITED",  # Browsing is unlimited
             "maxConnectsPerDay": 1,  # 1 application per day
+            "curatedProjectsPerDay": 5,  # 5 curated matches per day
             "visibleTiers": ["FREE"],  # Can only see Free founders' projects
         },
         "workspaceFeatures": {
@@ -46,6 +47,7 @@ FOUNDER_PLANS: Dict[FounderPlan, Dict[str, Any]] = {
         "discovery": {
             "maxSwipesPerDay": "UNLIMITED",
             "maxConnectsPerDay": "UNLIMITED",  # Unlimited applications
+            "curatedProjectsPerDay": 15,  # 15 curated matches per day
             "visibleTiers": ["FREE", "PRO"],  # Can see Free + Pro founders' projects
         },
         "workspaceFeatures": {
@@ -70,10 +72,11 @@ FOUNDER_PLANS: Dict[FounderPlan, Dict[str, Any]] = {
         "yearlyPriceUSD": 249,  # ~28% discount
         "maxWorkspacesCreated": "UNLIMITED",
         "maxWorkspacesJoined": "UNLIMITED",
-        "maxProjects": 3,  # Same as Pro
+        "maxProjects": 5,  # More projects than Pro
         "discovery": {
             "maxSwipesPerDay": "UNLIMITED",
             "maxConnectsPerDay": "UNLIMITED",
+            "curatedProjectsPerDay": "UNLIMITED",  # Unlimited curated matches
             "visibleTiers": ["FREE", "PRO", "PRO_PLUS"],  # Can see all tiers
         },
         "workspaceFeatures": {

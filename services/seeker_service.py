@@ -254,12 +254,13 @@ def _build_matches_from_ordered_ids(
 def search_projects_for_seeker(
     clerk_user_id: str,
     questionnaire: Dict[str, Any],
-    limit: int = 3,
+    limit: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
-    Find matching projects for seeker. Uses a daily feed of up to
-    DAILY_DISCOVERY_BATCH_SIZE curated projects per UTC day when
-    `seeker_discovery_daily_feed` exists; otherwise falls back to a single ranking.
+    Find matching projects for seeker. Uses a daily feed based on user's plan:
+    - FREE: 5 curated projects/day
+    - PRO: 15 curated projects/day
+    - PRO_PLUS: 50 curated projects/day (unlimited)
     
     Tier-based filtering (Option A - downward visibility):
     - FREE users can only see FREE founders' projects
@@ -286,9 +287,16 @@ def search_projects_for_seeker(
     # Get visible tiers based on seeker's subscription plan
     visible_tiers = plan_service.get_visible_tiers(clerk_user_id)
     
+    # Get plan-based curated projects limit
+    plan_config = plan_service.get_founder_plan(clerk_user_id)
+    curated_limit = plan_config.get('discovery', {}).get('curatedProjectsPerDay', DAILY_DISCOVERY_BATCH_SIZE)
+    if curated_limit == "UNLIMITED":
+        curated_limit = 50  # Cap at 50 for practical purposes
+    
     validated = _validate_questionnaire(questionnaire)
     pref_key = _preference_key(validated)
-    batch_cap = min(DAILY_DISCOVERY_BATCH_SIZE, max(1, min(int(limit or DAILY_DISCOVERY_BATCH_SIZE), DAILY_DISCOVERY_BATCH_SIZE)))
+    # Use plan-based limit, or explicit limit if provided (capped at plan limit)
+    batch_cap = curated_limit if limit is None else min(int(limit), curated_limit)
 
     existing_applications = supabase.table('applications').select('project_id').eq(
         'applicant_id', seeker_id
@@ -299,12 +307,13 @@ def search_projects_for_seeker(
     matched_project_ids = {m['project_id'] for m in (matched_projects.data or []) if m.get('project_id')}
     
     discovery_meta: Dict[str, Any] = {
-        'daily_limit': DAILY_DISCOVERY_BATCH_SIZE,
+        'daily_limit': curated_limit,
         'effective_limit': batch_cap,
         'next_batch_at_utc': _next_utc_midnight().isoformat(),
         'persistent_feed': False,
         'today_utc': _utc_today(),
         'visible_tiers': visible_tiers,  # Include for frontend to show upgrade prompts
+        'plan_id': plan_config.get('id', 'FREE'),
     }
 
     def _ids_from_ranked(ranked_rows: List[Dict[str, Any]], cap: int) -> List[str]:
@@ -358,8 +367,15 @@ def search_projects_for_seeker(
     )
     existing_row = row_res.data[0] if row_res.data else None
 
+    # Check if we need to regenerate the feed:
+    # 1. No existing feed for today
+    # 2. Preferences changed
+    # 3. Stored feed has fewer projects than current plan allows (plan upgraded)
+    stored_project_count = len(existing_row.get('project_ids') or []) if existing_row else 0
     needing_new_allocation = (
-        existing_row is None or existing_row.get('preference_key') != pref_key
+        existing_row is None 
+        or existing_row.get('preference_key') != pref_key
+        or stored_project_count < batch_cap  # Plan upgraded, need more projects
     )
 
     if needing_new_allocation:
@@ -496,10 +512,10 @@ def run_discovery_daily_digest_cron() -> Dict[str, Any]:
                 counts['skipped_already_sent'] += 1
                 continue
 
+            # limit is determined by user's plan inside search_projects_for_seeker
             search_projects_for_seeker(
                 clerk_user_id,
                 questionnaire,
-                limit=DAILY_DISCOVERY_BATCH_SIZE,
             )
 
             row_after = (

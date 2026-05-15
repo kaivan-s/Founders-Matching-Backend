@@ -3833,7 +3833,11 @@ def admin_reject_advisor(advisor_id):
         if not admin_service.is_admin(clerk_user_id):
             return jsonify({"error": "Admin access required"}), 403
 
-        profile = admin_service.reject_advisor(advisor_id)
+        # Optional rejection reason from request body
+        data = request.get_json() or {}
+        reason = data.get('reason')
+
+        profile = admin_service.reject_advisor(advisor_id, reason=reason)
         if not profile:
             return jsonify({"error": "Advisor not found or could not be updated"}), 404
         return jsonify(profile), 200

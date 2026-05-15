@@ -50,8 +50,18 @@ def get_advisor_by_id(advisor_id: str):
 
 
 def approve_advisor(advisor_id: str):
-    """Set advisor status to APPROVED and is_discoverable to True"""
+    """Set advisor status to APPROVED and is_discoverable to True, and send email"""
     supabase = get_supabase()
+    
+    # Get advisor profile with user info for email
+    advisor = supabase.table('advisor_profiles').select(
+        'id, user_id, contact_email'
+    ).eq('id', advisor_id).execute()
+    
+    if not advisor.data:
+        return None
+    
+    # Update status
     result = supabase.table('advisor_profiles').update({
         'status': 'APPROVED',
         'is_discoverable': True,
@@ -59,16 +69,60 @@ def approve_advisor(advisor_id: str):
 
     if not result.data:
         return None
+    
+    # Get user's name and email for notification
+    try:
+        user_id = advisor.data[0].get('user_id')
+        contact_email = advisor.data[0].get('contact_email')
+        
+        user = supabase.table('founders').select('name, email').eq('id', user_id).execute()
+        user_name = user.data[0].get('name', 'there') if user.data else 'there'
+        user_email = contact_email or (user.data[0].get('email') if user.data else None)
+        
+        if user_email:
+            from services import email_service
+            email_service.send_advisor_approved_email(user_email, user_name.split()[0] if user_name else 'there')
+    except Exception as e:
+        # Log but don't fail if email fails
+        print(f"[ADMIN] Failed to send advisor approval email: {e}")
+    
     return result.data[0]
 
 
-def reject_advisor(advisor_id: str):
-    """Set advisor status to REJECTED"""
+def reject_advisor(advisor_id: str, reason: str = None):
+    """Set advisor status to REJECTED and send email"""
     supabase = get_supabase()
+    
+    # Get advisor profile with user info for email
+    advisor = supabase.table('advisor_profiles').select(
+        'id, user_id, contact_email'
+    ).eq('id', advisor_id).execute()
+    
+    if not advisor.data:
+        return None
+    
+    # Update status
     result = supabase.table('advisor_profiles').update({
         'status': 'REJECTED',
     }).eq('id', advisor_id).execute()
 
     if not result.data:
         return None
+    
+    # Get user's name and email for notification
+    try:
+        user_id = advisor.data[0].get('user_id')
+        contact_email = advisor.data[0].get('contact_email')
+        
+        user = supabase.table('founders').select('name, email').eq('id', user_id).execute()
+        user_name = user.data[0].get('name', 'there') if user.data else 'there'
+        user_email = contact_email or (user.data[0].get('email') if user.data else None)
+        
+        if user_email:
+            from services import email_service
+            email_service.send_advisor_rejected_email(user_email, user_name.split()[0] if user_name else 'there', reason)
+    except Exception as e:
+        # Log but don't fail if email fails
+        print(f"[ADMIN] Failed to send advisor rejection email: {e}")
+    
     return result.data[0]
