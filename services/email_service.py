@@ -454,7 +454,7 @@ def send_welcome_email(
             </tr>
         </table>
         <p style="margin: 24px 0 0; font-size: 14px; color: #94a3b8;">
-            Questions? Just reply to this email – we're here to help!
+            Have feedback or suggestions? We'd love to hear from you — share your thoughts directly on the platform!
         </p>
     '''
     

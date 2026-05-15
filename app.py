@@ -421,14 +421,14 @@ def save_onboarding():
             return jsonify({"error": "Database connection not available"}), 500
         
         # Check if founder exists by clerk_user_id
-        existing = supabase.table('founders').select('id, email').eq('clerk_user_id', clerk_user_id).execute()
+        existing = supabase.table('founders').select('id, email, onboarding_completed').eq('clerk_user_id', clerk_user_id).execute()
         
         # If not found by clerk_user_id, check by email (case-insensitive) using database query
         if not existing.data and data.get('email'):
             email = data.get('email', '').strip()
             if email:
                 # Use ilike for case-insensitive email match instead of loading all founders
-                email_match = supabase.table('founders').select('id, email, clerk_user_id').ilike(
+                email_match = supabase.table('founders').select('id, email, clerk_user_id, onboarding_completed').ilike(
                     'email', email
                 ).limit(1).execute()
                 if email_match.data:
@@ -436,11 +436,13 @@ def save_onboarding():
                     # Found existing founder with same email - update clerk_user_id
                     supabase.table('founders').update({'clerk_user_id': clerk_user_id}).eq('id', founder['id']).execute()
                     # Reuse the found founder data instead of re-querying
-                    existing = {'data': [{'id': founder['id'], 'email': founder.get('email')}]}
+                    existing = {'data': [{'id': founder['id'], 'email': founder.get('email'), 'onboarding_completed': founder.get('onboarding_completed')}]}
         
         if existing.data:
             # Update existing founder
             founder_id = existing.data[0]['id']
+            was_onboarded = existing.data[0].get('onboarding_completed', False)
+            
             update_data = {
                 'purpose': validated_data['purpose'],
                 'location': validated_data['location'],
@@ -495,6 +497,17 @@ def save_onboarding():
                     except Exception as project_error:
                         # Log but don't fail if project insert fails (might be duplicate)
                         log_warning(f"Failed to insert projects: {str(project_error)}")
+            
+            # Send welcome email if this is first-time onboarding completion
+            if not was_onboarded:
+                try:
+                    from services import email_service
+                    user_email = data.get('email') or existing.data[0].get('email')
+                    user_name = data.get('name', '').split()[0] if data.get('name') else 'there'
+                    if user_email:
+                        email_service.send_welcome_email(user_email, user_name)
+                except Exception as email_error:
+                    log_warning(f"Failed to send welcome email: {str(email_error)}")
             
             return jsonify(result.data[0]), 200
         else:
@@ -558,6 +571,16 @@ def save_onboarding():
                     except Exception as project_error:
                         # Log but don't fail if project insert fails
                         log_warning(f"Failed to insert projects: {str(project_error)}")
+            
+            # Send welcome email to new founder
+            try:
+                from services import email_service
+                user_email = data.get('email')
+                user_name = data.get('name', '').split()[0] if data.get('name') else 'there'
+                if user_email:
+                    email_service.send_welcome_email(user_email, user_name)
+            except Exception as email_error:
+                log_warning(f"Failed to send welcome email: {str(email_error)}")
             
             return jsonify(result.data[0]), 201
             
