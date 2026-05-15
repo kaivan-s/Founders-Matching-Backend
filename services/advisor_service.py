@@ -110,6 +110,15 @@ def _get_or_create_founder_id(clerk_user_id, user_name=None, user_email=None):
     if not final_email or not final_email.strip():
         raise ValueError("Email address is required. Please ensure your account has a valid email address.")
     
+    # Get name from Clerk if not provided
+    final_name = user_name
+    if not final_name or not final_name.strip():
+        try:
+            from utils.auth import get_clerk_user_name
+            final_name = get_clerk_user_name(clerk_user_id)
+        except:
+            pass
+    
     # Create minimal founder profile for advisors ONLY (required by database schema foreign key constraint)
     # TECHNICAL NOTE: advisor_profiles.user_id has a foreign key constraint to founders.id
     # This is a database design limitation - ideally advisors wouldn't need founder profiles,
@@ -120,7 +129,7 @@ def _get_or_create_founder_id(clerk_user_id, user_name=None, user_email=None):
     # Advisors don't go through founder onboarding, so we create a minimal record.
     founder_data = {
         'clerk_user_id': clerk_user_id,
-        'name': user_name or 'Advisor',
+        'name': final_name or 'Advisor',
         'email': final_email.strip(),
         'purpose': 'both',  # Use valid purpose value (constraint requires: idea_needs_cofounder, skills_want_project, or both)
         'location': '',
@@ -656,7 +665,7 @@ def get_available_advisors(workspace_id, filters=None, clerk_user_id=None):
 
     def _base_query():
         q = supabase.table('advisor_profiles').select(
-            '*, user:founders!user_id(id, name, email)'
+            '*, user:founders!user_id(id, name, email, clerk_user_id)'
         ).eq('status', 'APPROVED').eq('is_discoverable', True)
         if workspace_domain and filters.get('domain'):
             q = q.contains('domains', [workspace_domain])
@@ -769,7 +778,28 @@ def get_available_advisors(workspace_id, filters=None, clerk_user_id=None):
                 continue
 
             stage_match = _profile_matches_mapped_stage(profile)
-            name_sort = (profile.get('user') or {}).get('name') or ''
+            
+            # Get name, fixing it from Clerk if it's missing or placeholder
+            user_data = profile.get('user') or {}
+            user_name = user_data.get('name') or ''
+            clerk_user_id_for_name = user_data.get('clerk_user_id')
+            
+            # If name is missing, use email prefix as display name
+            if not user_name or user_name.strip().lower() in ['', 'advisor', 'unknown']:
+                contact_email = profile.get('contact_email') or user_data.get('email') or ''
+                if contact_email and '@' in contact_email:
+                    user_name = contact_email.split('@')[0].replace('.', ' ').replace('_', ' ').title()
+                    # Save it to database for future
+                    try:
+                        founder_id = user_data.get('id')
+                        if founder_id:
+                            supabase.table('founders').update({'name': user_name}).eq('id', founder_id).execute()
+                    except:
+                        pass
+            
+            # Update profile's user object with corrected name
+            if user_name and user_data:
+                profile['user'] = {**user_data, 'name': user_name}
 
             out.append({
                 **profile,
@@ -778,7 +808,7 @@ def get_available_advisors(workspace_id, filters=None, clerk_user_id=None):
                 'request_status': existing_requests.get(user_id),
                 'marketplace_stage_match': stage_match,
                 'marketplace_broadened': marketplace_broadened,
-                '_sort_name': name_sort,
+                '_sort_name': user_name,
             })
 
         out.sort(
