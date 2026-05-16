@@ -18,7 +18,8 @@ FOUNDER_PLANS: Dict[FounderPlan, Dict[str, Any]] = {
         "discovery": {
             "maxSwipesPerDay": "UNLIMITED",  # Browsing is unlimited
             "maxConnectsPerDay": 1,  # 1 application per day
-            "curatedProjectsPerDay": 5,  # 5 curated matches per day
+            "curatedProjectsPerDay": 15,  # 15 curated matches shown per day
+            "unlockedProjectsPerDay": 5,  # Only 5 unlocked (rest are locked, upgrade prompt)
             "visibleTiers": ["FREE"],  # Can only see Free founders' projects
         },
         "workspaceFeatures": {
@@ -48,6 +49,7 @@ FOUNDER_PLANS: Dict[FounderPlan, Dict[str, Any]] = {
             "maxSwipesPerDay": "UNLIMITED",
             "maxConnectsPerDay": "UNLIMITED",  # Unlimited applications
             "curatedProjectsPerDay": 15,  # 15 curated matches per day
+            "unlockedProjectsPerDay": 15,  # All 15 unlocked for Pro
             "visibleTiers": ["FREE", "PRO"],  # Can see Free + Pro founders' projects
         },
         "workspaceFeatures": {
@@ -76,7 +78,8 @@ FOUNDER_PLANS: Dict[FounderPlan, Dict[str, Any]] = {
         "discovery": {
             "maxSwipesPerDay": "UNLIMITED",
             "maxConnectsPerDay": "UNLIMITED",
-            "curatedProjectsPerDay": "UNLIMITED",  # Unlimited curated matches
+            "curatedProjectsPerDay": 15,  # 15 curated matches per day (kept consistent)
+            "unlockedProjectsPerDay": 15,  # All 15 unlocked for Pro+
             "visibleTiers": ["FREE", "PRO", "PRO_PLUS"],  # Can see all tiers
         },
         "workspaceFeatures": {

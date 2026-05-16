@@ -289,9 +289,15 @@ def search_projects_for_seeker(
     
     # Get plan-based curated projects limit
     plan_config = plan_service.get_founder_plan(clerk_user_id)
-    curated_limit = plan_config.get('discovery', {}).get('curatedProjectsPerDay', DAILY_DISCOVERY_BATCH_SIZE)
+    discovery_config = plan_config.get('discovery', {})
+    curated_limit = discovery_config.get('curatedProjectsPerDay', DAILY_DISCOVERY_BATCH_SIZE)
     if curated_limit == "UNLIMITED":
         curated_limit = 50  # Cap at 50 for practical purposes
+    
+    # Get unlocked projects limit (FREE=5, PRO/PRO+=15)
+    unlocked_limit = discovery_config.get('unlockedProjectsPerDay', curated_limit)
+    if unlocked_limit == "UNLIMITED":
+        unlocked_limit = curated_limit
     
     validated = _validate_questionnaire(questionnaire)
     pref_key = _preference_key(validated)
@@ -309,6 +315,7 @@ def search_projects_for_seeker(
     discovery_meta: Dict[str, Any] = {
         'daily_limit': curated_limit,
         'effective_limit': batch_cap,
+        'unlocked_count': unlocked_limit,  # Number of projects user can fully access (FREE=5, PRO/PRO+=15)
         'next_batch_at_utc': _next_utc_midnight().isoformat(),
         'persistent_feed': False,
         'today_utc': _utc_today(),
@@ -372,6 +379,7 @@ def search_projects_for_seeker(
     # 2. Preferences changed
     # 3. Stored feed has fewer projects than current plan allows (plan upgraded)
     stored_project_count = len(existing_row.get('project_ids') or []) if existing_row else 0
+    print(f"[DISCOVERY] curated_limit={curated_limit}, batch_cap={batch_cap}, stored_count={stored_project_count}, will_regenerate={stored_project_count < batch_cap}")
     needing_new_allocation = (
         existing_row is None 
         or existing_row.get('preference_key') != pref_key

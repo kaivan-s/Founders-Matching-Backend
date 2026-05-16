@@ -95,6 +95,31 @@ def get_user_feedback(clerk_user_id):
         log_error(f"Error fetching user feedback: {str(e)}")
         raise
 
+def get_all_feedback_admin(status_filter=None, category_filter=None, limit=100):
+    """Admin-only: Get all feedback entries with user details"""
+    try:
+        supabase = get_supabase()
+        if not supabase:
+            raise Exception("Database connection not available")
+        
+        # Build query with user details
+        query = supabase.table('product_feedback')\
+            .select('*, founders(name, email, clerk_user_id)')
+        
+        if status_filter:
+            query = query.eq('status', status_filter)
+        
+        if category_filter:
+            query = query.eq('category', category_filter)
+        
+        result = query.order('created_at', desc=True).limit(limit).execute()
+        
+        return result.data if result.data else []
+        
+    except Exception as e:
+        log_error(f"Error fetching all feedback: {str(e)}")
+        raise
+
 def update_feedback_admin(feedback_id, status=None, usefulness_score=None, reward_amount_cents=None, reward_paid=None):
     """Admin-only: Update feedback status and reward fields"""
     try:

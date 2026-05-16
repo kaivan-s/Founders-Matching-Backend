@@ -131,7 +131,7 @@ def seeker_search():
         payload = seeker_service.search_projects_for_seeker(
             clerk_user_id,
             questionnaire=data,
-            limit=data.get('limit', 3),
+            limit=data.get('limit'),  # None = use plan-based limit
         )
 
         matches = payload.get('matches') or []
@@ -4575,6 +4575,37 @@ def get_my_feedback():
         return jsonify({"error": str(e)}), 400
     except Exception as e:
         log_error("Error fetching feedback", error=e)
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/admin/feedback', methods=['GET'])
+@limiter.limit(RATE_LIMITS['moderate'])
+def get_all_feedback_admin():
+    """Admin-only: Get all feedback entries"""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        # Verify admin access
+        if not admin_service.is_admin(clerk_user_id):
+            return jsonify({"error": "Admin access required"}), 403
+        
+        status_filter = request.args.get('status')
+        category_filter = request.args.get('category')
+        limit = request.args.get('limit', 100, type=int)
+        
+        feedback_list = feedback_service.get_all_feedback_admin(
+            status_filter=status_filter,
+            category_filter=category_filter,
+            limit=limit
+        )
+        
+        return jsonify(feedback_list), 200
+        
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        log_error("Error fetching all feedback", error=e)
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/admin/feedback/<feedback_id>', methods=['PATCH'])
