@@ -33,7 +33,7 @@ def get_workspaces_needing_week_one_checkin() -> List[Dict[str, Any]]:
         '''id, title, created_at, week_one_checkin_sent,
         participants:workspace_participants(
             user_id,
-            user:founders!user_id(id, name, email, clerk_user_id)
+            user:founders!user_id(id, name, email, clerk_user_id, is_active, is_deleted)
         )'''
     ).gte('created_at', week_ago_start.isoformat()
     ).lt('created_at', week_ago_end.isoformat()
@@ -64,8 +64,13 @@ def send_week_one_checkins() -> Dict[str, Any]:
         workspace_title = workspace.get('title') or 'Your Workspace'
         participants = workspace.get('participants') or []
         
-        # Filter out advisors and get founders
-        founders = [p for p in participants if p.get('user')]
+        # Filter out advisors and deleted/inactive founders
+        founders = [
+            p for p in participants 
+            if p.get('user') 
+            and not p.get('user', {}).get('is_deleted')
+            and p.get('user', {}).get('is_active', True)
+        ]
         
         if len(founders) < 2:
             log_info(f"Skipping workspace {workspace_id}: not enough founders")

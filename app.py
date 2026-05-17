@@ -5729,9 +5729,9 @@ def send_weekly_checkin_reminders():
         days_since_monday = today.weekday()
         current_week = (today - timedelta(days=days_since_monday)).strftime('%Y-%m-%d')
         
-        # Get all active workspace participants
+        # Get all active workspace participants (with active, non-deleted founders)
         participants = supabase.table('workspace_participants').select(
-            'workspace_id, user_id, user:founders!user_id(name, email, clerk_user_id), workspace:workspaces!workspace_id(id, title)'
+            'workspace_id, user_id, user:founders!user_id(name, email, clerk_user_id, is_active, is_deleted), workspace:workspaces!workspace_id(id, title)'
         ).execute()
         
         if not participants.data:
@@ -5740,6 +5740,11 @@ def send_weekly_checkin_reminders():
         # Group by workspace to find who hasn't submitted
         workspace_users = {}
         for p in participants.data:
+            # Skip deleted or inactive founders
+            user_data = p.get('user', {})
+            if not user_data or user_data.get('is_deleted') or not user_data.get('is_active', True):
+                continue
+                
             ws_id = p['workspace_id']
             if ws_id not in workspace_users:
                 workspace_users[ws_id] = {
@@ -5748,9 +5753,9 @@ def send_weekly_checkin_reminders():
                 }
             workspace_users[ws_id]['participants'].append({
                 'user_id': p['user_id'],
-                'name': p.get('user', {}).get('name', 'there'),
-                'email': p.get('user', {}).get('email'),
-                'clerk_user_id': p.get('user', {}).get('clerk_user_id')
+                'name': user_data.get('name', 'there'),
+                'email': user_data.get('email'),
+                'clerk_user_id': user_data.get('clerk_user_id')
             })
         
         # Get all check-ins for this week
@@ -5887,10 +5892,10 @@ def send_weekly_projects_digest():
         
         total_new = len(projects_list)
         
-        # Get all active founders with email
+        # Get all active founders with email (exclude deleted accounts)
         founders = supabase.table('founders').select(
             'id, name, email, is_active'
-        ).eq('is_active', True).execute()
+        ).eq('is_active', True).eq('is_deleted', False).execute()
         
         if not founders.data:
             return jsonify({"message": "No active founders", "sent": 0}), 200

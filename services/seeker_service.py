@@ -487,7 +487,7 @@ def run_discovery_daily_digest_cron() -> Dict[str, Any]:
 
     founders_res = supabase.table('founders').select(
         'id, clerk_user_id, email, name, compatibility_answers'
-    ).execute()
+    ).eq('is_active', True).eq('is_deleted', False).execute()
     founders = founders_res.data or []
 
     targets: List[Dict[str, Any]] = []
