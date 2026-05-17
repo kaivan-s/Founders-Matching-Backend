@@ -171,6 +171,45 @@ def send_new_match_email(
     )
 
 
+def send_equity_approval_pending_email(
+    to_email: str,
+    user_name: str,
+    partner_name: str,
+    workspace_id: str,
+    equity_percent: int = None
+) -> bool:
+    """Send email when partner has approved equity and waiting for your approval"""
+    equity_text = f" ({equity_percent}% for you)" if equity_percent else ""
+    content = f'''
+        <h1 style="margin: 0 0 16px; font-size: 24px; font-weight: 600; color: #0f172a;">
+            Your co-founder approved the equity split
+        </h1>
+        <p style="margin: 0 0 24px; font-size: 16px; color: #475569; line-height: 1.6;">
+            Hey {user_name}, <strong>{partner_name}</strong> has approved the proposed equity split{equity_text}.
+            Please review and approve to finalize the agreement.
+        </p>
+        <table role="presentation" cellspacing="0" cellpadding="0" border="0">
+            <tr>
+                <td style="border-radius: 8px; background-color: #0d9488;">
+                    <a href="{FRONTEND_URL}/workspaces/{workspace_id}/equity-roles" 
+                       style="display: inline-block; padding: 14px 28px; font-size: 16px; font-weight: 600; color: #ffffff; text-decoration: none;">
+                        Review & Approve →
+                    </a>
+                </td>
+            </tr>
+        </table>
+        <p style="margin: 24px 0 0; font-size: 14px; color: #94a3b8;">
+            Both founders must approve for the equity agreement to be finalized.
+        </p>
+    '''
+    
+    return send_email(
+        to_email=to_email,
+        subject=f"✅ {partner_name} approved the equity split - your turn!",
+        html_body=_base_template(content, f"{partner_name} approved the equity agreement")
+    )
+
+
 def send_interest_received_email(
     to_email: str,
     user_name: str,
@@ -650,4 +689,61 @@ def send_discovery_daily_matches_ready_email(to_email: str, user_name: str) -> b
         to_email=to_email,
         subject="Your new discovery matches are ready ✨",
         html_body=_base_template(content, "New curated matches on Guild Space"),
+    )
+
+
+def send_workspace_week_one_checkin_email(
+    to_email: str,
+    user_name: str,
+    partner_name: str,
+    workspace_title: str,
+    workspace_id: str
+) -> bool:
+    """Send 1-week check-in email after workspace creation to encourage founders to complete setup."""
+    content = f'''
+        <h1 style="margin: 0 0 16px; font-size: 24px; font-weight: 600; color: #0f172a;">
+            How's your first week going?
+        </h1>
+        <p style="margin: 0 0 24px; font-size: 16px; color: #475569; line-height: 1.6;">
+            Hey {user_name}, it's been a week since you matched with <strong>{partner_name}</strong>!
+            We'd love to know how things are progressing.
+        </p>
+        
+        <div style="background-color: #f8fafc; border-radius: 12px; padding: 24px; margin: 0 0 24px;">
+            <p style="margin: 0 0 16px; font-size: 16px; font-weight: 600; color: #0f172a;">
+                Quick check-in:
+            </p>
+            <ul style="margin: 0; padding-left: 20px; color: #475569; line-height: 1.8;">
+                <li>Have you had your first conversation?</li>
+                <li>Did you define your roles and responsibilities?</li>
+                <li>Have you discussed the equity split?</li>
+                <li>What's your next milestone together?</li>
+            </ul>
+        </div>
+        
+        <p style="margin: 0 0 24px; font-size: 16px; color: #475569; line-height: 1.6;">
+            Your workspace has tools to help you align on equity, define roles, and track progress.
+            Take a few minutes to fill in the details — it'll make your partnership stronger!
+        </p>
+        
+        <table role="presentation" cellspacing="0" cellpadding="0" border="0">
+            <tr>
+                <td style="border-radius: 8px; background-color: #0d9488;">
+                    <a href="{FRONTEND_URL}/workspaces/{workspace_id}" 
+                       style="display: inline-block; padding: 14px 28px; font-size: 16px; font-weight: 600; color: #ffffff; text-decoration: none;">
+                        Go to Workspace →
+                    </a>
+                </td>
+            </tr>
+        </table>
+        
+        <p style="margin: 24px 0 0; font-size: 14px; color: #94a3b8;">
+            Need help? Reply to this email and we'll assist you.
+        </p>
+    '''
+    
+    return send_email(
+        to_email=to_email,
+        subject=f"📊 Week 1 with {partner_name} — how's it going?",
+        html_body=_base_template(content, f"Your first week with {partner_name}")
     )

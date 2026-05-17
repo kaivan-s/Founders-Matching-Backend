@@ -311,11 +311,13 @@ def respond_to_application(
         except Exception:
             pass
         
-        # Send notifications
+        # Send notifications to both founders
         _notify_application_accepted(
             applicant_id=applicant_id,
             applicant_email=applicant.get('email'),
             applicant_name=applicant.get('name'),
+            owner_id=owner_id,
+            owner_email=owner_email,
             owner_name=owner_name,
             project_title=project.get('title'),
             workspace_id=workspace_id,
@@ -407,14 +409,16 @@ def _notify_application_accepted(
     applicant_id: str,
     applicant_email: str,
     applicant_name: str,
+    owner_id: str,
+    owner_email: str,
     owner_name: str,
     project_title: str,
     workspace_id: str,
 ) -> None:
-    """Notify applicant their application was accepted."""
+    """Notify both founders when application is accepted and workspace is created."""
     supabase = get_supabase()
     
-    # In-app notification (wrapped in try/catch so email still sends if this fails)
+    # In-app notification for applicant
     try:
         supabase.table('notifications').insert({
             'user_id': applicant_id,
@@ -427,9 +431,24 @@ def _notify_application_accepted(
             }
         }).execute()
     except Exception as e:
-        print(f"[NOTIFY] In-app notification insert failed: {e}")
+        print(f"[NOTIFY] In-app notification insert failed for applicant: {e}")
     
-    # Email notification
+    # In-app notification for owner
+    try:
+        supabase.table('notifications').insert({
+            'user_id': owner_id,
+            'type': 'WORKSPACE_CREATED',
+            'title': f"Workspace created! 🎉",
+            'message': f"Your workspace with {applicant_name or 'your new co-founder'} for {project_title} is ready",
+            'data': {
+                'workspace_id': workspace_id,
+                'project_title': project_title,
+            }
+        }).execute()
+    except Exception as e:
+        print(f"[NOTIFY] In-app notification insert failed for owner: {e}")
+    
+    # Email notification to applicant
     print(f"[NOTIFY] _notify_application_accepted: applicant_email={applicant_email}")
     if applicant_email:
         try:
@@ -442,10 +461,28 @@ def _notify_application_accepted(
                 workspace_id=workspace_id,
             )
         except Exception as e:
-            print(f"[NOTIFY] EXCEPTION in send_new_match_email: {e}")
-            log_error("Failed to send acceptance email", error=e)
+            print(f"[NOTIFY] EXCEPTION in send_new_match_email to applicant: {e}")
+            log_error("Failed to send acceptance email to applicant", error=e)
     else:
         print("[NOTIFY] SKIP: No applicant_email provided")
+    
+    # Email notification to owner
+    print(f"[NOTIFY] _notify_application_accepted: owner_email={owner_email}")
+    if owner_email:
+        try:
+            from services import email_service
+            email_service.send_new_match_email(
+                to_email=owner_email,
+                user_name=owner_name or 'there',
+                partner_name=applicant_name or 'your new co-founder',
+                partner_project=project_title,
+                workspace_id=workspace_id,
+            )
+        except Exception as e:
+            print(f"[NOTIFY] EXCEPTION in send_new_match_email to owner: {e}")
+            log_error("Failed to send acceptance email to owner", error=e)
+    else:
+        print("[NOTIFY] SKIP: No owner_email provided")
 
 
 def _notify_application_rejected(

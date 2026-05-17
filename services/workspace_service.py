@@ -388,7 +388,7 @@ def get_participants(clerk_user_id, workspace_id):
     supabase = get_supabase()
     
     # Include clerk_user_id so frontend can identify the current user
-    participants = supabase.table('workspace_participants').select('*, user:founders!user_id(id, name, email, clerk_user_id, profile_photo_url)').eq('workspace_id', workspace_id).execute()
+    participants = supabase.table('workspace_participants').select('*, user:founders!user_id(id, name, email, clerk_user_id, profile_picture_url)').eq('workspace_id', workspace_id).execute()
     
     return [{
         'id': p['id'],
@@ -1414,7 +1414,7 @@ def get_weekly_partner_checkins(clerk_user_id, workspace_id, limit=10):
     supabase = get_supabase()
     
     checkins = supabase.table('weekly_partner_checkins').select(
-        '*, user:founders!user_id(id, name, profile_photo_url)'
+        '*, user:founders!user_id(id, name, profile_picture_url)'
     ).eq('workspace_id', workspace_id).order('week_of', desc=True).order('created_at', desc=True).limit(limit).execute()
     
     return checkins.data or []
@@ -1429,7 +1429,7 @@ def get_current_week_checkins(clerk_user_id, workspace_id):
     founder_id = _get_founder_id(clerk_user_id)
     
     checkins = supabase.table('weekly_partner_checkins').select(
-        '*, user:founders!user_id(id, name, profile_photo_url)'
+        '*, user:founders!user_id(id, name, profile_picture_url)'
     ).eq('workspace_id', workspace_id).eq('week_of', current_week).execute()
     
     # Separate user's checkin and partner's checkin

@@ -339,7 +339,7 @@ def generate_mmd_document(
     # Extract questionnaire data
     founder_a_resp = questionnaire_responses.get('founder_a', {})
     founder_b_resp = questionnaire_responses.get('founder_b', {})
-    startup_context = questionnaire_responses.get('startup_context', {})
+    startup_context = questionnaire_responses.get('startup_context') or {}
     
     founder_a_data = founder_a_resp.get('responses', {}) if founder_a_resp else {}
     founder_b_data = founder_b_resp.get('responses', {}) if founder_b_resp else {}

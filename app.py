@@ -5962,6 +5962,30 @@ def cron_discovery_daily_digest():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route('/api/cron/workspace-week-one-checkins', methods=['GET', 'POST'])
+def cron_workspace_week_one_checkins():
+    """
+    Send week-one check-in emails to founders for workspaces created 7 days ago.
+    
+    This should be triggered by a daily cron job.
+    
+    Auth: header X-Cron-Secret must match env CRON_SECRET.
+    """
+    cron_secret = request.headers.get('X-Cron-Secret')
+    expected_secret = os.getenv('CRON_SECRET')
+
+    if not expected_secret or cron_secret != expected_secret:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    try:
+        from services import workspace_checkin_service
+        result = workspace_checkin_service.send_week_one_checkins()
+        return jsonify(result), 200
+    except Exception as e:
+        log_error("Cron workspace_week_one_checkins failed", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     debug = os.environ.get('FLASK_ENV') == 'development'

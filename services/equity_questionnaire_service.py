@@ -423,6 +423,8 @@ def get_equity_scenarios(
             'scenario_type': s['scenario_type'],
             'founder_a': s.get('founder_a', {}),
             'founder_b': s.get('founder_b', {}),
+            'founder_a_id': s.get('founder_a_id'),
+            'founder_b_id': s.get('founder_b_id'),
             'founder_a_percent': float(s['founder_a_percent']),
             'founder_b_percent': float(s['founder_b_percent']),
             'advisor_percent': float(s.get('advisor_percent', 0)),
@@ -529,7 +531,7 @@ def approve_scenario(
         {'both_approved': both_approved}
     )
     
-    # Send Slack notification for equity approval
+    # Send notifications for equity approval
     try:
         from services import slack_integration_service
         
@@ -549,6 +551,30 @@ def approve_scenario(
                 event_type='scenario_approved',
                 details={'founder_name': founder_name}
             )
+            
+            # Send email notification to the other founder who needs to approve
+            try:
+                from services import email_service
+                
+                # Determine which founder needs to approve
+                other_founder_id = scenario_data['founder_b_id'] if founder_id == scenario_data['founder_a_id'] else scenario_data['founder_a_id']
+                
+                # Get their equity percent
+                other_equity_percent = updated.get('founder_b_percent') if founder_id == scenario_data['founder_a_id'] else updated.get('founder_a_percent')
+                
+                # Get other founder's email and name
+                other_founder = supabase.table('founders').select('name, email').eq('id', other_founder_id).execute()
+                if other_founder.data and other_founder.data[0].get('email'):
+                    email_service.send_equity_approval_pending_email(
+                        to_email=other_founder.data[0]['email'],
+                        user_name=other_founder.data[0].get('name') or 'there',
+                        partner_name=founder_name,
+                        workspace_id=workspace_id,
+                        equity_percent=other_equity_percent
+                    )
+            except Exception as email_err:
+                from utils.logger import log_error
+                log_error(f"Failed to send equity approval email", error=email_err)
     except Exception as slack_err:
         from utils.logger import log_error
         log_error(f"Failed to send Slack equity notification", error=slack_err)
