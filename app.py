@@ -1167,11 +1167,14 @@ def delete_account():
         # 12. Delete weekly checkins by this user
         supabase.table('weekly_partner_checkins').delete().eq('user_id', founder_id).execute()
         
-        # 13. Clear sensitive profile data and mark as deleted
+        # 13. Clear sensitive profile data, reset plan, and mark as deleted
         supabase.table('founders').update({
             'is_deleted': True,
             'is_active': False,
             'deleted_at': datetime.now(timezone.utc).isoformat(),
+            'plan': 'FREE',  # Reset to free tier
+            'subscription_status': None,
+            'subscription_id': None,
             # Clear sensitive data
             'name': 'Deleted User',
             'bio': None,
