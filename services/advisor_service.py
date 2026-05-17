@@ -524,10 +524,22 @@ def get_advisor_profile(clerk_user_id):
     1. First tries to get founder_id and query advisor_profiles (original method)
     2. If that fails, tries to query all advisor_profiles with user relationship and filter in Python
     3. Includes better error logging to help debug issues
+    
+    Returns None if the underlying founder account is deleted (user needs to re-onboard).
     """
     from utils.logger import log_info, log_error
     
     supabase = get_supabase()
+    
+    # First, check if the founder account is deleted - if so, return None
+    # This forces deleted users to go through onboarding again
+    founder_check = supabase.table('founders').select('id, is_deleted').eq(
+        'clerk_user_id', clerk_user_id
+    ).execute()
+    
+    if founder_check.data and founder_check.data[0].get('is_deleted'):
+        log_info(f"Advisor profile blocked - founder account is deleted: {clerk_user_id}")
+        return None
     
     # Method 1: Try to get founder_id first, then query advisor_profiles (original method)
     founder_id = None

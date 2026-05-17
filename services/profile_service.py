@@ -70,7 +70,8 @@ def get_profile(clerk_user_id: str) -> Dict[str, Any]:
         work_preferences, looking_for_description,
         linkedin_url, linkedin_verified, twitter_url, portfolio_url, github_url,
         cal_booking_url,
-        profile_picture_url, purpose, plan, created_at, onboarding_completed
+        profile_picture_url, purpose, plan, created_at, onboarding_completed,
+        is_deleted, is_active
     ''').eq('clerk_user_id', clerk_user_id).execute()
     
     if not profile.data:

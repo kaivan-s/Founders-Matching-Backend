@@ -152,6 +152,42 @@ def seeker_search():
         return jsonify({"error": sanitize_error_for_user(e)}), 500
 
 
+@app.route('/api/seeker/skipped-projects', methods=['POST'])
+@limiter.limit(RATE_LIMITS['moderate'])
+def seeker_skipped_projects():
+    """
+    Get previously skipped projects for Pro/Pro+ users.
+    Allows users to revisit projects they may have accidentally skipped.
+    
+    Request body: Same as /api/seeker/search questionnaire
+    Returns: { "matches": [...], "can_view_skipped": bool, "total_skipped": int }
+    """
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "Questionnaire data required"}), 400
+        
+        from services import seeker_service
+        
+        payload = seeker_service.get_skipped_projects(
+            clerk_user_id,
+            questionnaire=data,
+        )
+
+        return jsonify(payload), 200
+        
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        error_trace = traceback.format_exc()
+        log_error("Error getting skipped projects", error=e, traceback_str=error_trace)
+        return jsonify({"error": sanitize_error_for_user(e)}), 500
+
+
 @app.route('/api/seeker/apply/<project_id>', methods=['POST'])
 @limiter.limit(RATE_LIMITS['moderate'])
 def seeker_apply(project_id):
@@ -423,7 +459,7 @@ def save_onboarding():
             return jsonify({"error": "Database connection not available"}), 500
         
         # Check if founder exists by clerk_user_id
-        existing = supabase.table('founders').select('id, email, onboarding_completed').eq('clerk_user_id', clerk_user_id).execute()
+        existing = supabase.table('founders').select('id, email, onboarding_completed, is_deleted').eq('clerk_user_id', clerk_user_id).execute()
         
         # If not found by clerk_user_id, check by email (case-insensitive) using database query
         if not existing.data and data.get('email'):
@@ -444,6 +480,7 @@ def save_onboarding():
             # Update existing founder
             founder_id = existing.data[0]['id']
             was_onboarded = existing.data[0].get('onboarding_completed', False)
+            was_deleted = existing.data[0].get('is_deleted', False)
             
             update_data = {
                 'purpose': validated_data['purpose'],
@@ -451,6 +488,13 @@ def save_onboarding():
                 'skills': validated_data['skills'],
                 'onboarding_completed': True
             }
+            
+            # If account was previously deleted, reactivate it
+            if was_deleted:
+                update_data['is_deleted'] = False
+                update_data['is_active'] = True
+                update_data['deleted_at'] = None
+                log_info(f"Reactivating previously deleted account: {founder_id}")
             
             # Also update name and email if provided
             if data.get('name'):
@@ -603,10 +647,19 @@ def check_onboarding_status():
             return jsonify({"error": "User ID required"}), 401
         
         supabase = get_supabase()
-        result = supabase.table('founders').select('id, onboarding_completed, purpose, skills').eq('clerk_user_id', clerk_user_id).execute()
+        result = supabase.table('founders').select('id, onboarding_completed, purpose, skills, is_deleted').eq('clerk_user_id', clerk_user_id).execute()
         
         if result.data:
             founder = result.data[0]
+            # If account was deleted, treat as not onboarded - user needs to re-onboard
+            if founder.get('is_deleted'):
+                return jsonify({
+                    'exists': True,
+                    'onboarding_completed': False,  # Force re-onboarding
+                    'has_purpose': False,
+                    'has_skills': False,
+                    'was_deleted': True  # Frontend can use this to show appropriate message
+                }), 200
             return jsonify({
                 'exists': True,
                 'onboarding_completed': founder.get('onboarding_completed', False),
@@ -1167,7 +1220,24 @@ def delete_account():
         # 12. Delete weekly checkins by this user
         supabase.table('weekly_partner_checkins').delete().eq('user_id', founder_id).execute()
         
-        # 13. Clear sensitive profile data, reset plan, and mark as deleted
+        # 13. Delete advisor-related data if user was an advisor
+        try:
+            # Get advisor profile ID first
+            advisor_profile = supabase.table('advisor_profiles').select('id').eq('user_id', founder_id).execute()
+            if advisor_profile.data:
+                advisor_id = advisor_profile.data[0]['id']
+                # Delete consultation reviews (where user is reviewer or advisor is being reviewed)
+                supabase.table('advisor_consultation_reviews').delete().eq('reviewer_id', founder_id).execute()
+                # Delete consultations (where user is founder or advisor)
+                supabase.table('advisor_consultations').delete().eq('founder_id', founder_id).execute()
+                supabase.table('advisor_consultations').delete().eq('advisor_id', advisor_id).execute()
+                # Delete advisor profile
+                supabase.table('advisor_profiles').delete().eq('user_id', founder_id).execute()
+        except Exception as advisor_err:
+            # Log but don't fail - advisor tables may not exist in all environments
+            log_error(f"Error deleting advisor data for {founder_id}: {advisor_err}")
+        
+        # 14. Clear sensitive profile data, reset plan, and mark as deleted
         supabase.table('founders').update({
             'is_deleted': True,
             'is_active': False,

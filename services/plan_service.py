@@ -18,9 +18,9 @@ FOUNDER_PLANS: Dict[FounderPlan, Dict[str, Any]] = {
         "discovery": {
             "maxSwipesPerDay": "UNLIMITED",  # Browsing is unlimited
             "maxConnectsPerDay": 1,  # 1 application per day
-            "curatedProjectsPerDay": 15,  # 15 curated matches shown per day
-            "unlockedProjectsPerDay": 5,  # Only 5 unlocked (rest are locked, upgrade prompt)
-            "visibleTiers": ["FREE"],  # Can only see Free founders' projects
+            "curatedProjectsPerDay": 5,  # 5 curated matches shown per day (no locked teasers)
+            "unlockedProjectsPerDay": 5,  # All 5 are unlocked
+            "visibleTiers": ["FREE", "PRO", "PRO_PLUS"],  # Can see all (no tier filtering)
         },
         "workspaceFeatures": {
             "equityFull": True,  # All workspace features included
@@ -50,7 +50,7 @@ FOUNDER_PLANS: Dict[FounderPlan, Dict[str, Any]] = {
             "maxConnectsPerDay": "UNLIMITED",  # Unlimited applications
             "curatedProjectsPerDay": 15,  # 15 curated matches per day
             "unlockedProjectsPerDay": 15,  # All 15 unlocked for Pro
-            "visibleTiers": ["FREE", "PRO"],  # Can see Free + Pro founders' projects
+            "visibleTiers": ["FREE", "PRO", "PRO_PLUS"],  # Can see all tiers (no tier filtering)
         },
         "workspaceFeatures": {
             "equityFull": True,
@@ -680,6 +680,14 @@ def update_founder_plan(clerk_user_id: str, new_plan: FounderPlan, subscription_
         update_data['subscription_current_period_end'] = current_period_end.isoformat()
     
     supabase.table('founders').update(update_data).eq('id', founder_id).execute()
+    
+    # FIX #5: Clear plan cache immediately so new limits take effect
+    # This ensures mid-day upgrades immediately get new maxConnectsPerDay
+    try:
+        from utils.request_cache import cache_delete
+        cache_delete(f'plan:{clerk_user_id}')
+    except ImportError:
+        pass
     
     # Log telemetry
     event_type = 'UPGRADE' if _is_upgrade(old_plan, new_plan) else 'DOWNGRADE' if old_plan != new_plan else 'ACTIVATION'

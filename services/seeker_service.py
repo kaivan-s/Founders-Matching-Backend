@@ -58,16 +58,18 @@ def _rank_discovery_candidates(
     validated: Dict[str, Any],
     extra_exclude_ids: Optional[set] = None,
     visible_tiers: Optional[List[str]] = None,
+    include_skipped: bool = False,
 ) -> List[Dict[str, Any]]:
     """Return scored project rows [{project, score, match_reasons}, ...] descending by score.
     
     Args:
-        visible_tiers: List of plan tiers the seeker can see (e.g., ['FREE', 'PRO']).
-                      If None, shows all tiers (no filtering).
+        visible_tiers: No longer used for filtering - all projects are visible.
+                      Instead, PRO/PRO+ founders get a ranking boost.
+        include_skipped: If True, include previously skipped projects (for Pro/Pro+ "see skipped" feature)
     """
     extra_exclude_ids = extra_exclude_ids or set()
     
-    # Include founder's plan for tier filtering
+    # Include founder's plan for ranking boost (not filtering)
     query = supabase.table('projects').select(
         '*, founder:founders!founder_id(id, name, profile_picture_url, location, '
         'linkedin_verified, github_verified, linkedin_url, skills, headline, plan)'
@@ -82,36 +84,46 @@ def _rank_discovery_candidates(
     ).execute()
     applied_project_ids = {app['project_id'] for app in (existing_applications.data or [])}
     
-    matched_projects = supabase.table('matches').select('project_id').execute()
-    matched_project_ids = {m['project_id'] for m in (matched_projects.data or []) if m.get('project_id')}
+    # FIX #2: Only exclude projects that are no longer seeking (not all matched projects)
+    # Projects with seeking_cofounder=False are already filtered above
+    # No need to exclude all matched projects globally
     
     # Get skipped projects (left swipes)
-    skipped_projects = supabase.table('swipes').select('project_id').eq(
-        'swiper_id', seeker_id
-    ).eq('swipe_type', 'left').execute()
-    skipped_project_ids = {s['project_id'] for s in (skipped_projects.data or []) if s.get('project_id')}
+    skipped_project_ids = set()
+    if not include_skipped:
+        skipped_projects = supabase.table('swipes').select('project_id').eq(
+            'swiper_id', seeker_id
+        ).eq('swipe_type', 'left').execute()
+        skipped_project_ids = {s['project_id'] for s in (skipped_projects.data or []) if s.get('project_id')}
     
     scored_projects: List[Dict[str, Any]] = []
     
     for project in result.data:
         project_id = project['id']
-        if project_id in applied_project_ids or project_id in matched_project_ids:
+        if project_id in applied_project_ids:
             continue
         if project_id in skipped_project_ids:
             continue
         if project_id in extra_exclude_ids:
             continue
         
-        # Tier filtering: only show projects from founders whose tier the seeker can see
-        if visible_tiers:
-            founder = project.get('founder') or {}
-            founder_plan = founder.get('plan', 'FREE')
-            if founder_plan not in visible_tiers:
-                continue
+        # FIX #1: No tier filtering - everyone sees all projects
+        # Instead, give PRO/PRO+ founders a ranking boost
+        founder = project.get('founder') or {}
+        founder_plan = founder.get('plan', 'FREE')
         
         if not _passes_dealbreakers(project, validated['dealbreakers']):
             continue
         score, match_reasons = _calculate_match_score(project, validated, seeker_skills)
+        
+        # Ranking boost for PRO/PRO+ founders (verified/serious founders)
+        if founder_plan == 'PRO_PLUS':
+            score += 15  # Strong boost for PRO+ founders
+            match_reasons.append('Pro+ founder')
+        elif founder_plan == 'PRO':
+            score += 8  # Moderate boost for PRO founders
+            match_reasons.append('Pro founder')
+        
         if score > 0:
             scored_projects.append({
                 'project': project,
@@ -251,6 +263,69 @@ def _build_matches_from_ordered_ids(
     return formatted, final_ids
 
 
+def get_skipped_projects(
+    clerk_user_id: str,
+    questionnaire: Dict[str, Any],
+) -> Dict[str, Any]:
+    """
+    Get previously skipped projects for Pro/Pro+ users.
+    Allows users to revisit projects they may have accidentally skipped.
+    
+    Returns { "matches": [...], "can_view_skipped": bool }.
+    """
+    from services import plan_service
+    
+    supabase = get_supabase()
+    
+    # Check plan - only Pro/Pro+ can view skipped
+    plan_config = plan_service.get_founder_plan(clerk_user_id)
+    plan_id = plan_config.get('id', 'FREE')
+    
+    if plan_id == 'FREE':
+        return {
+            'matches': [],
+            'can_view_skipped': False,
+            'message': 'Upgrade to Pro to view skipped projects'
+        }
+    
+    seeker = supabase.table('founders').select('id, skills').eq(
+        'clerk_user_id', clerk_user_id
+    ).execute()
+    
+    if not seeker.data:
+        return {'matches': [], 'can_view_skipped': True}
+    
+    seeker_id = seeker.data[0]['id']
+    seeker_skills = set(seeker.data[0].get('skills') or [])
+    validated = _validate_questionnaire(questionnaire)
+    
+    # Get skipped projects with include_skipped=True to re-rank them
+    ranked = _rank_discovery_candidates(
+        supabase, seeker_id, seeker_skills, validated,
+        include_skipped=True,
+    )
+    
+    # Filter to only skipped ones
+    skipped_projects = supabase.table('swipes').select('project_id').eq(
+        'swiper_id', seeker_id
+    ).eq('swipe_type', 'left').execute()
+    skipped_ids = {s['project_id'] for s in (skipped_projects.data or [])}
+    
+    # Only return projects that were skipped
+    skipped_matches = []
+    for row in ranked:
+        if row['project']['id'] in skipped_ids:
+            skipped_matches.append(
+                _format_discovery_match(row['score'], row['match_reasons'], row['project'])
+            )
+    
+    return {
+        'matches': skipped_matches[:20],  # Limit to 20
+        'can_view_skipped': True,
+        'total_skipped': len(skipped_ids),
+    }
+
+
 def search_projects_for_seeker(
     clerk_user_id: str,
     questionnaire: Dict[str, Any],
@@ -258,14 +333,12 @@ def search_projects_for_seeker(
 ) -> Dict[str, Any]:
     """
     Find matching projects for seeker. Uses a daily feed based on user's plan:
-    - FREE: 5 curated projects/day
+    - FREE: 5 curated projects/day (all unlocked)
     - PRO: 15 curated projects/day
-    - PRO_PLUS: 50 curated projects/day (unlimited)
+    - PRO_PLUS: 15 curated projects/day
     
-    Tier-based filtering (Option A - downward visibility):
-    - FREE users can only see FREE founders' projects
-    - PRO users can see FREE + PRO founders' projects  
-    - PRO_PLUS users can see all tiers
+    All users see all projects - no tier filtering.
+    PRO/PRO+ founders get ranking boost for better visibility.
     
     Returns { "matches": [...], "discovery": meta }.
     """
@@ -376,13 +449,48 @@ def search_projects_for_seeker(
 
     # Check if we need to regenerate the feed:
     # 1. No existing feed for today
-    # 2. Preferences changed
+    # 2. Preferences changed AND cooldown has passed (FIX #6: prevent questionnaire gaming)
     # 3. Stored feed has fewer projects than current plan allows (plan upgraded)
     stored_project_count = len(existing_row.get('project_ids') or []) if existing_row else 0
     print(f"[DISCOVERY] curated_limit={curated_limit}, batch_cap={batch_cap}, stored_count={stored_project_count}, will_regenerate={stored_project_count < batch_cap}")
+    
+    # FIX #6: Rate limit preference changes to prevent feed refresh exploitation
+    # Only apply cooldown to FREE users - Pro/Pro+ can refresh anytime
+    PREFERENCE_CHANGE_COOLDOWN_HOURS = 12
+    preferences_changed = existing_row is not None and existing_row.get('preference_key') != pref_key
+    can_refresh_for_preferences = False
+    
+    # Pro/Pro+ users can always refresh by changing preferences
+    is_paid_user = plan_config.get('id', 'FREE') in ['PRO', 'PRO_PLUS']
+    
+    if preferences_changed and existing_row:
+        if is_paid_user:
+            # Paid users: no cooldown
+            can_refresh_for_preferences = True
+        else:
+            # FREE users: 12-hour cooldown
+            created_at_str = existing_row.get('created_at')
+            if created_at_str:
+                try:
+                    from datetime import datetime, timezone, timedelta
+                    created_at = datetime.fromisoformat(created_at_str.replace('Z', '+00:00'))
+                    if created_at.tzinfo is None:
+                        created_at = created_at.replace(tzinfo=timezone.utc)
+                    cooldown_passed = datetime.now(timezone.utc) - created_at > timedelta(hours=PREFERENCE_CHANGE_COOLDOWN_HOURS)
+                    can_refresh_for_preferences = cooldown_passed
+                    if not cooldown_passed:
+                        # Add note to discovery meta explaining cooldown
+                        hours_since = (datetime.now(timezone.utc) - created_at).total_seconds() / 3600
+                        hours_remaining = PREFERENCE_CHANGE_COOLDOWN_HOURS - hours_since
+                        discovery_meta['preference_cooldown_remaining_hours'] = round(hours_remaining, 1)
+                except (ValueError, AttributeError):
+                    can_refresh_for_preferences = True  # Allow on parse error
+            else:
+                can_refresh_for_preferences = True  # Allow if no timestamp
+    
     needing_new_allocation = (
         existing_row is None 
-        or existing_row.get('preference_key') != pref_key
+        or (preferences_changed and can_refresh_for_preferences)
         or stored_project_count < batch_cap  # Plan upgraded, need more projects
     )
 
