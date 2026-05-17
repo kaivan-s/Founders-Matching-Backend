@@ -1119,51 +1119,75 @@ def delete_account():
         founder_email = founder.data[0].get('email', '')
         founder_name = founder.data[0].get('name', '')
         
-        # 1. Delete all projects owned by this founder (hard delete)
-        supabase.table('projects').delete().eq('founder_id', founder_id).execute()
+        # 1. Get all project IDs owned by this founder
+        projects = supabase.table('projects').select('id').eq('founder_id', founder_id).execute()
+        project_ids = [p['id'] for p in (projects.data or [])]
         
-        # 2. Remove from workspace participants
-        supabase.table('workspace_participants').delete().eq('user_id', founder_id).execute()
+        # 2. Delete swipes made by this user
+        supabase.table('swipes').delete().eq('swiper_id', founder_id).execute()
         
-        # 3. Delete all applications by this user
-        supabase.table('applications').delete().eq('applicant_id', founder_id).execute()
+        # 3. Delete swipes on projects owned by this user (foreign key constraint)
+        if project_ids:
+            for pid in project_ids:
+                supabase.table('swipes').delete().eq('project_id', pid).execute()
         
-        # 4. Delete all project access requests by this user
-        supabase.table('project_access_requests').delete().eq('requester_id', founder_id).execute()
-        
-        # 5. Delete matches where user is involved
+        # 4. Delete matches where user is involved (before projects due to FK)
         supabase.table('matches').delete().eq('founder1_id', founder_id).execute()
         supabase.table('matches').delete().eq('founder2_id', founder_id).execute()
+        # Also delete matches referencing user's projects
+        if project_ids:
+            for pid in project_ids:
+                supabase.table('matches').delete().eq('project_id', pid).execute()
         
-        # 6. Delete messages sent by this user
+        # 5. Delete all applications by this user
+        supabase.table('applications').delete().eq('applicant_id', founder_id).execute()
+        # Also delete applications to user's projects
+        if project_ids:
+            for pid in project_ids:
+                supabase.table('applications').delete().eq('project_id', pid).execute()
+        
+        # 6. Delete all project access requests by this user
+        supabase.table('project_access_requests').delete().eq('requester_id', founder_id).execute()
+        
+        # 7. Delete all projects owned by this founder
+        supabase.table('projects').delete().eq('founder_id', founder_id).execute()
+        
+        # 8. Remove from workspace participants
+        supabase.table('workspace_participants').delete().eq('user_id', founder_id).execute()
+        
+        # 9. Delete messages sent by this user
         supabase.table('messages').delete().eq('sender_id', founder_id).execute()
         
-        # 7. Delete notifications for this user
+        # 10. Delete notifications for this user
         supabase.table('notifications').delete().eq('user_id', founder_id).execute()
         
-        # 8. Delete discovery feed entries
+        # 11. Delete discovery feed entries
         supabase.table('seeker_discovery_daily_feed').delete().eq('seeker_id', founder_id).execute()
         
-        # 9. Clear sensitive profile data and mark as deleted
+        # 12. Delete weekly checkins by this user
+        supabase.table('weekly_partner_checkins').delete().eq('user_id', founder_id).execute()
+        
+        # 13. Clear sensitive profile data and mark as deleted
         supabase.table('founders').update({
             'is_deleted': True,
             'is_active': False,
             'deleted_at': datetime.now(timezone.utc).isoformat(),
-            'deleted_email': founder_email,
             # Clear sensitive data
             'name': 'Deleted User',
             'bio': None,
-            'phone': None,
+            'headline': None,
+            'location': None,
             'linkedin_url': None,
             'twitter_url': None,
             'github_url': None,
-            'website_url': None,
+            'portfolio_url': None,
             'profile_picture_url': None,
             'skills': None,
             'interests': None,
             'work_preferences': None,
-            'experience': None,
+            'expertise_details': None,
             'past_projects': None,
+            'looking_for_description': None,
             'compatibility_answers': None,
         }).eq('id', founder_id).execute()
         
