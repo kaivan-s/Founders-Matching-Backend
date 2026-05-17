@@ -40,8 +40,8 @@ FOUNDER_PLANS: Dict[FounderPlan, Dict[str, Any]] = {
     },
     "PRO": {
         "id": "PRO",
-        "monthlyPriceUSD": 12,
-        "yearlyPriceUSD": 99,  # ~17% discount
+        "monthlyPriceUSD": 5,  # Discounted from $12 (58% off)
+        "yearlyPriceUSD": 49,  # Discounted from $99
         "maxWorkspacesCreated": "UNLIMITED",
         "maxWorkspacesJoined": "UNLIMITED",
         "maxProjects": 3,  # 3 projects lifetime
