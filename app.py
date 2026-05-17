@@ -3,6 +3,8 @@ from flask import Flask, jsonify, request, redirect
 from flask_cors import CORS
 import os
 import traceback
+import json
+from datetime import datetime, timezone
 from urllib.parse import quote
 
 from utils.auth import get_clerk_user_id
@@ -1085,6 +1087,98 @@ def get_profile_options():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route('/api/account/delete', methods=['POST'])
+@limiter.limit(RATE_LIMITS['strict'])
+def delete_account():
+    """
+    Soft-delete the current user's account and clear all related data.
+    
+    This will:
+    - Set is_deleted=True and is_active=False on the founder record
+    - Delete all projects owned by this user
+    - Remove from all workspaces
+    - Delete all applications, matches, and other related data
+    - Keep clerk_user_id so user can potentially reactivate later
+    """
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        supabase = get_supabase()
+        
+        # Get founder record
+        founder = supabase.table('founders').select('id, email, name').eq(
+            'clerk_user_id', clerk_user_id
+        ).execute()
+        
+        if not founder.data:
+            return jsonify({"error": "Account not found"}), 404
+        
+        founder_id = founder.data[0]['id']
+        founder_email = founder.data[0].get('email', '')
+        founder_name = founder.data[0].get('name', '')
+        
+        # 1. Delete all projects owned by this founder (hard delete)
+        supabase.table('projects').delete().eq('founder_id', founder_id).execute()
+        
+        # 2. Remove from workspace participants
+        supabase.table('workspace_participants').delete().eq('user_id', founder_id).execute()
+        
+        # 3. Delete all applications by this user
+        supabase.table('applications').delete().eq('applicant_id', founder_id).execute()
+        
+        # 4. Delete all project access requests by this user
+        supabase.table('project_access_requests').delete().eq('requester_id', founder_id).execute()
+        
+        # 5. Delete matches where user is involved
+        supabase.table('matches').delete().eq('founder1_id', founder_id).execute()
+        supabase.table('matches').delete().eq('founder2_id', founder_id).execute()
+        
+        # 6. Delete messages sent by this user
+        supabase.table('messages').delete().eq('sender_id', founder_id).execute()
+        
+        # 7. Delete notifications for this user
+        supabase.table('notifications').delete().eq('user_id', founder_id).execute()
+        
+        # 8. Delete discovery feed entries
+        supabase.table('seeker_discovery_daily_feed').delete().eq('seeker_id', founder_id).execute()
+        
+        # 9. Clear sensitive profile data and mark as deleted
+        supabase.table('founders').update({
+            'is_deleted': True,
+            'is_active': False,
+            'deleted_at': datetime.now(timezone.utc).isoformat(),
+            'deleted_email': founder_email,
+            # Clear sensitive data
+            'name': 'Deleted User',
+            'bio': None,
+            'phone': None,
+            'linkedin_url': None,
+            'twitter_url': None,
+            'github_url': None,
+            'website_url': None,
+            'profile_picture_url': None,
+            'skills': None,
+            'interests': None,
+            'work_preferences': None,
+            'experience': None,
+            'past_projects': None,
+            'compatibility_answers': None,
+        }).eq('id', founder_id).execute()
+        
+        log_info(f"Account deleted: {founder_id} ({founder_name})")
+        
+        return jsonify({
+            "success": True,
+            "message": "Your account and all associated data have been deleted."
+        }), 200
+        
+    except Exception as e:
+        log_error("Error deleting account", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
 # ============================================
 # ACTIVATION ROUTES
 # - GET  /api/activation/status         aggregate funnel state + next nudge
@@ -1413,6 +1507,7 @@ def handle_subscription_webhook():
         error_trace = traceback.format_exc()
         log_error("Error handling subscription webhook", traceback_str=error_trace)
         return jsonify({"error": str(e)}), 500
+
 
 @app.route('/api/payments/history', methods=['GET'])
 def get_payment_history():
