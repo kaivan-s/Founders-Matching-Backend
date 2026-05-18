@@ -2284,7 +2284,7 @@ def advisor_profile():
             log_info(f"Request data: {data}")
             
             # Get user name and email from request if available (for creating minimal founder profile)
-            user_name = data.get('user_name') or request.headers.get('X-User-Name')
+            user_name = data.get('user_name') or data.get('name') or request.headers.get('X-User-Name')
             user_email = data.get('user_email') or request.headers.get('X-User-Email')
             
             # Don't log PII - log only that user info was provided
