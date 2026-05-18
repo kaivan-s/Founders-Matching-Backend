@@ -1611,3 +1611,59 @@ def get_checkin_status(clerk_user_id, workspace_id):
         'last_checkin_date': last_checkin.data[0]['created_at'] if last_checkin.data else None,
     }
 
+
+def get_workspace_activity(clerk_user_id, workspace_id, limit=20):
+    """Get recent activity for a workspace from audit log"""
+    _verify_workspace_access(clerk_user_id, workspace_id)
+    supabase = get_supabase()
+    
+    # Fetch audit logs with user info
+    result = supabase.table('workspace_audit_log').select(
+        '*, user:founders!user_id(id, name, profile_picture_url)'
+    ).eq('workspace_id', workspace_id).order('created_at', desc=True).limit(limit).execute()
+    
+    activities = []
+    for log in (result.data or []):
+        # Format action into readable text
+        action = log.get('action', '')
+        action_text = _format_audit_action(action, log.get('metadata'))
+        
+        activities.append({
+            'id': log.get('id'),
+            'action': action,
+            'action_text': action_text,
+            'entity_type': log.get('entity_type'),
+            'user': log.get('user'),
+            'created_at': log.get('created_at'),
+        })
+    
+    return activities
+
+
+def _format_audit_action(action, metadata=None):
+    """Convert action code to human-readable text"""
+    action_map = {
+        'update_workspace': 'updated workspace settings',
+        'update_participant': 'updated their profile',
+        'update_onboarding': 'completed onboarding step',
+        'create_equity_scenario': 'created an equity scenario',
+        'set_current_equity_scenario': 'set current equity split',
+        'update_equity_scenario_note': 'added a note to equity scenario',
+        'upsert_role': 'updated their role',
+        'create_checkin': 'submitted a check-in',
+        'add_checkin_comment': 'commented on a check-in',
+        'set_checkin_verdict': 'reviewed a check-in',
+        'upsert_checkin_partner_review': 'submitted partner review',
+    }
+    
+    text = action_map.get(action, action.replace('_', ' '))
+    
+    # Add metadata details if available
+    if metadata:
+        if action == 'create_equity_scenario' and metadata.get('label'):
+            text = f"created equity scenario \"{metadata['label']}\""
+        elif action == 'upsert_role' and metadata.get('role_title'):
+            text = f"set role to {metadata['role_title']}"
+    
+    return text
+

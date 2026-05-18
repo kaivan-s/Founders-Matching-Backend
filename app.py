@@ -3824,6 +3824,24 @@ def get_partner_health_trend(workspace_id):
         return jsonify({"error": str(e)}), 500
 
 
+@app.route('/api/workspaces/<workspace_id>/activity', methods=['GET'])
+def get_workspace_activity(workspace_id):
+    """Get recent activity/audit log for a workspace"""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        limit = request.args.get('limit', 20, type=int)
+        activity = workspace_service.get_workspace_activity(clerk_user_id, workspace_id, limit)
+        return jsonify(activity), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        log_error("Error fetching workspace activity", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route('/api/workspaces/<workspace_id>/partner-checkins/status', methods=['GET'])
 def get_partner_checkin_status(workspace_id):
     """Check if user needs to complete a check-in this week"""
@@ -6205,7 +6223,7 @@ def cron_cleanup_old_data():
         return jsonify({"error": "Unauthorized"}), 401
 
     try:
-        supabase = get_supabase_client()
+        supabase = get_supabase()
         
         # Call cleanup functions via RPC
         searches_result = supabase.rpc('cleanup_old_seeker_searches').execute()
