@@ -6134,15 +6134,19 @@ def send_weekly_projects_digest():
 @app.route('/api/cron/discovery-daily-digest', methods=['GET', 'POST'])
 def cron_discovery_daily_digest():
     """
-    Builds or refreshes today's curated discovery batch for every founder who has
-    saved discovery questionnaire answers, then sends at most one digest email per
-    founder per UTC day (tracked on seeker_discovery_daily_feed.digest_email_sent).
-
-    Auth: header X-Cron-Secret must match env CRON_SECRET.
-
-    Supports GET and POST (some schedulers, e.g. cron-job.org default, use GET —
-    prefer POST when the UI allows it).
+    DEPRECATED: Daily discovery feed has been removed.
+    
+    Discovery now shows all projects to all users (no daily curation).
+    This endpoint is kept for backward compatibility but does nothing.
     """
+    # Discovery simplified - no longer using daily curated batches
+    return jsonify({
+        'ok': True,
+        'deprecated': True,
+        'message': 'Daily discovery digest is deprecated. Discovery now shows all projects to all users.',
+    }), 200
+    
+    # Legacy code below - kept for reference
     cron_secret = request.headers.get('X-Cron-Secret')
     expected_secret = os.getenv('CRON_SECRET')
 
@@ -6180,6 +6184,43 @@ def cron_workspace_week_one_checkins():
         return jsonify(result), 200
     except Exception as e:
         log_error("Cron workspace_week_one_checkins failed", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/cron/cleanup-old-data', methods=['POST'])
+def cron_cleanup_old_data():
+    """
+    Cleanup old analytics and temporary data:
+    - seeker_searches older than 30 days
+    - seeker_daily_views older than 7 days
+    
+    This should be triggered by a daily cron job (e.g., 3AM).
+    
+    Auth: header X-Cron-Secret must match env CRON_SECRET.
+    """
+    cron_secret = request.headers.get('X-Cron-Secret')
+    expected_secret = os.getenv('CRON_SECRET')
+
+    if not expected_secret or cron_secret != expected_secret:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    try:
+        supabase = get_supabase_client()
+        
+        # Call cleanup functions via RPC
+        searches_result = supabase.rpc('cleanup_old_seeker_searches').execute()
+        daily_views_result = supabase.rpc('cleanup_old_seeker_daily_views').execute()
+        
+        searches_deleted = searches_result.data if searches_result.data else 0
+        daily_views_deleted = daily_views_result.data if daily_views_result.data else 0
+        
+        return jsonify({
+            "success": True,
+            "seeker_searches_deleted": searches_deleted,
+            "seeker_daily_views_deleted": daily_views_deleted
+        }), 200
+    except Exception as e:
+        log_error("Cron cleanup_old_data failed", error=e)
         return jsonify({"error": str(e)}), 500
 
 

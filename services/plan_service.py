@@ -18,9 +18,7 @@ FOUNDER_PLANS: Dict[FounderPlan, Dict[str, Any]] = {
         "discovery": {
             "maxSwipesPerDay": "UNLIMITED",  # Browsing is unlimited
             "maxConnectsPerDay": 1,  # 1 application per day
-            "curatedProjectsPerDay": 5,  # 5 curated matches shown per day (no locked teasers)
-            "unlockedProjectsPerDay": 5,  # All 5 are unlocked
-            "visibleTiers": ["FREE", "PRO", "PRO_PLUS"],  # Can see all (no tier filtering)
+            "maxProjectsVisible": 5,  # FREE users see top 5 matches
         },
         "workspaceFeatures": {
             "equityFull": True,  # All workspace features included
@@ -48,9 +46,7 @@ FOUNDER_PLANS: Dict[FounderPlan, Dict[str, Any]] = {
         "discovery": {
             "maxSwipesPerDay": "UNLIMITED",
             "maxConnectsPerDay": "UNLIMITED",  # Unlimited applications
-            "curatedProjectsPerDay": 15,  # 15 curated matches per day
-            "unlockedProjectsPerDay": 15,  # All 15 unlocked for Pro
-            "visibleTiers": ["FREE", "PRO", "PRO_PLUS"],  # Can see all tiers (no tier filtering)
+            "maxProjectsVisible": 25,  # PRO users see top 25 matches
         },
         "workspaceFeatures": {
             "equityFull": True,
@@ -78,9 +74,7 @@ FOUNDER_PLANS: Dict[FounderPlan, Dict[str, Any]] = {
         "discovery": {
             "maxSwipesPerDay": "UNLIMITED",
             "maxConnectsPerDay": "UNLIMITED",
-            "curatedProjectsPerDay": 15,  # 15 curated matches per day (kept consistent)
-            "unlockedProjectsPerDay": 15,  # All 15 unlocked for Pro+
-            "visibleTiers": ["FREE", "PRO", "PRO_PLUS"],  # Can see all tiers
+            "maxProjectsVisible": 50,  # PRO+ users see top 50 matches
         },
         "workspaceFeatures": {
             "equityFull": True,
@@ -518,12 +512,12 @@ def check_connect_limit(clerk_user_id: str) -> tuple[bool, int, int]:
 def get_visible_tiers(clerk_user_id: str) -> list[str]:
     """
     Get which plan tiers this user can see in discovery.
-    FREE: Can only see FREE projects
-    PRO: Can see FREE + PRO projects
-    PRO_PLUS: Can see all tiers
+    Now returns all tiers - visibility is not restricted.
+    Kept for backward compatibility.
     """
-    plan_config = get_founder_plan(clerk_user_id)
-    return plan_config.get('discovery', {}).get('visibleTiers', ['FREE'])
+    return ["FREE", "PRO", "PRO_PLUS"]
+
+
 
 def increment_discovery_usage(clerk_user_id: str) -> None:
     """Increment discovery swipe count - now uses 30-day rolling window via swipe_history"""

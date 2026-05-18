@@ -664,32 +664,54 @@ def send_new_projects_digest_email(
     )
 
 
-def send_discovery_daily_matches_ready_email(to_email: str, user_name: str) -> bool:
-    """Let a seeker know their next curated discovery batch is available (typically next calendar day)."""
+def send_discovery_ready_email(to_email: str, user_name: str, user_plan: str = 'FREE') -> bool:
+    """Let a seeker know their personalized opportunities are ready."""
+    
+    # Tier-specific messaging
+    if user_plan == 'PRO_PLUS':
+        opportunities_text = "50 personalized opportunities"
+        upgrade_text = ""
+    elif user_plan == 'PRO':
+        opportunities_text = "25 personalized opportunities"
+        upgrade_text = ""
+    else:
+        opportunities_text = "5 personalized opportunities"
+        upgrade_text = '''
+            <p style="margin: 24px 0 0; font-size: 14px; color: #64748b; line-height: 1.6;">
+                Want more? <a href="{}/pricing" style="color: #0d9488; text-decoration: none; font-weight: 600;">Upgrade to Pro</a> for 5x more opportunities and unlimited applications.
+            </p>
+        '''.format(FRONTEND_URL)
+    
     content = f'''
         <h1 style="margin: 0 0 16px; font-size: 24px; font-weight: 600; color: #0f172a;">
-            New matches are ready for you
+            Your opportunities are ready
         </h1>
         <p style="margin: 0 0 24px; font-size: 16px; color: #475569; line-height: 1.6;">
-            Hey {user_name}, your next set of curated project matches is live on Discover.
-            We show up to three at a time so you can focus — check them out when you have a minute.
+            Hey {user_name}, we've matched you with {opportunities_text} based on your preferences.
+            Each one is ranked by compatibility — browse them when you have a minute.
         </p>
         <table role="presentation" cellspacing="0" cellpadding="0" border="0">
             <tr>
                 <td style="border-radius: 8px; background-color: #0d9488;">
                     <a href="{FRONTEND_URL}/discover"
                        style="display: inline-block; padding: 14px 28px; font-size: 16px; font-weight: 600; color: #ffffff; text-decoration: none;">
-                        Open Discover →
+                        Browse Opportunities →
                     </a>
                 </td>
             </tr>
         </table>
+        {upgrade_text}
     '''
     return send_email(
         to_email=to_email,
-        subject="Your new discovery matches are ready ✨",
-        html_body=_base_template(content, "New curated matches on Guild Space"),
+        subject="Your personalized opportunities are ready",
+        html_body=_base_template(content, "Opportunities matched for you on Guild Space"),
     )
+
+
+def send_discovery_daily_matches_ready_email(to_email: str, user_name: str) -> bool:
+    """DEPRECATED: Use send_discovery_ready_email instead."""
+    return send_discovery_ready_email(to_email, user_name, 'FREE')
 
 
 def send_workspace_week_one_checkin_email(

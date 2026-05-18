@@ -332,13 +332,10 @@ def search_projects_for_seeker(
     limit: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
-    Find matching projects for seeker. Uses a daily feed based on user's plan:
-    - FREE: 5 curated projects/day (all unlocked)
-    - PRO: 15 curated projects/day
-    - PRO_PLUS: 15 curated projects/day
+    Find matching projects for seeker.
     
-    All users see all projects - no tier filtering.
-    PRO/PRO+ founders get ranking boost for better visibility.
+    - FREE users: Results cached for 24 hours. Can only get fresh results once per day.
+    - PRO/PRO+ users: Always fresh results, can change preferences anytime.
     
     Returns { "matches": [...], "discovery": meta }.
     """
@@ -357,197 +354,198 @@ def search_projects_for_seeker(
     seeker_id = seeker_rec['id']
     seeker_skills = set(seeker_rec.get('skills') or [])
     
-    # Get visible tiers based on seeker's subscription plan
-    visible_tiers = plan_service.get_visible_tiers(clerk_user_id)
-    
-    # Get plan-based curated projects limit
+    # Get user's plan info
     plan_config = plan_service.get_founder_plan(clerk_user_id)
+    user_plan = plan_config.get('id', 'FREE')
     discovery_config = plan_config.get('discovery', {})
-    curated_limit = discovery_config.get('curatedProjectsPerDay', DAILY_DISCOVERY_BATCH_SIZE)
-    if curated_limit == "UNLIMITED":
-        curated_limit = 50  # Cap at 50 for practical purposes
-    
-    # Get unlocked projects limit (FREE=5, PRO/PRO+=15)
-    unlocked_limit = discovery_config.get('unlockedProjectsPerDay', curated_limit)
-    if unlocked_limit == "UNLIMITED":
-        unlocked_limit = curated_limit
     
     validated = _validate_questionnaire(questionnaire)
-    pref_key = _preference_key(validated)
-    # Use plan-based limit, or explicit limit if provided (capped at plan limit)
-    batch_cap = curated_limit if limit is None else min(int(limit), curated_limit)
-
-    existing_applications = supabase.table('applications').select('project_id').eq(
-        'applicant_id', seeker_id
-    ).execute()
-    applied_project_ids = {app['project_id'] for app in (existing_applications.data or [])}
     
-    matched_projects = supabase.table('matches').select('project_id').execute()
-    matched_project_ids = {m['project_id'] for m in (matched_projects.data or []) if m.get('project_id')}
+    # Get plan-based project visibility limit (FREE=5, PRO=25, PRO_PLUS=50)
+    max_visible = discovery_config.get('maxProjectsVisible', 5)
+    batch_cap = limit if limit and limit < max_visible else max_visible
+    
+    # For FREE users, check if they already searched today - return cached results
+    if user_plan == 'FREE':
+        cached = _get_cached_daily_results(supabase, seeker_id)
+        if cached:
+            # Return cached results with fresh scores based on current preferences
+            ranked = _rank_discovery_candidates(supabase, seeker_id, seeker_skills, validated)
+            return _return_cached_results_with_scores(
+                supabase, cached['project_ids'], max_visible, user_plan, ranked
+            )
+    
+    # Get ALL ranked candidates (fresh search)
+    ranked = _rank_discovery_candidates(
+        supabase, seeker_id, seeker_skills, validated,
+    )
+    
+    # Format results
+    formatted: List[Dict[str, Any]] = []
+    for row in ranked[:batch_cap]:
+        formatted.append(_format_project_match(row))
+    
+    # For FREE users, cache today's results
+    is_free_user = user_plan == 'FREE'
+    if is_free_user:
+        project_ids = [f['id'] for f in formatted]
+        _cache_daily_results(supabase, seeker_id, project_ids)
     
     discovery_meta: Dict[str, Any] = {
-        'daily_limit': curated_limit,
-        'effective_limit': batch_cap,
-        'unlocked_count': unlocked_limit,  # Number of projects user can fully access (FREE=5, PRO/PRO+=15)
-        'next_batch_at_utc': _next_utc_midnight().isoformat(),
-        'persistent_feed': False,
-        'today_utc': _utc_today(),
-        'visible_tiers': visible_tiers,  # Include for frontend to show upgrade prompts
-        'plan_id': plan_config.get('id', 'FREE'),
+        'total_available': len(ranked),
+        'returned_count': len(formatted),
+        'max_visible': max_visible,
+        'user_plan': user_plan,
+        'has_more': len(ranked) > len(formatted),
+        'results_cached': is_free_user,  # FREE users can't edit after first search
     }
-
-    def _ids_from_ranked(ranked_rows: List[Dict[str, Any]], cap: int) -> List[str]:
-        return [r['project']['id'] for r in ranked_rows[:cap]]
-
-    def _baseline_ranked(extra_exclude: Optional[set] = None) -> List[Dict[str, Any]]:
-        return _rank_discovery_candidates(
-            supabase, seeker_id, seeker_skills, validated,
-            extra_exclude_ids=extra_exclude,
-            visible_tiers=visible_tiers,
-        )
-
-    today = discovery_meta['today_utc']
-
-    # If the feed table is missing, degrade gracefully (no daily cap across sessions).
-    try:
-        supabase.table(SEEKER_DISCOVERY_FEED_TABLE).select('seeker_id').limit(1).execute()
-    except Exception as e:
-        log_error(f"Discovery feed unavailable — falling back ({SEEKER_DISCOVERY_FEED_TABLE})", error=e)
-        ranked = _baseline_ranked()
-        rmap = {r['project']['id']: r for r in ranked}
-        formatted, _ = _build_matches_from_ordered_ids(
-            _ids_from_ranked(ranked, batch_cap),
-            rmap,
-            ranked,
-            validated=validated,
-            seeker_skills=seeker_skills,
-            seeker_id=seeker_id,
-            applied_project_ids=applied_project_ids,
-            matched_project_ids=matched_project_ids,
-            batch_cap=batch_cap,
-        )
-        discovery_meta['note'] = (
-            'Daily discovery feed table missing — run supabase/snippets/seeker_discovery_daily_feed.sql'
-        )
-        _save_search_history(seeker_id, validated, len(formatted))
-        return {'matches': formatted, 'discovery': discovery_meta}
-
-    discovery_meta['persistent_feed'] = True
-
-    historical = _historical_discovery_ids(supabase, seeker_id, today)
-    ranked_for_hydrate = _baseline_ranked(extra_exclude=historical)
-    ranked_by_id_hist = {r['project']['id']: r for r in ranked_for_hydrate}
-
-    row_res = (
-        supabase.table(SEEKER_DISCOVERY_FEED_TABLE)
-        .select('*')
-        .eq('seeker_id', seeker_id)
-        .eq('feed_date', today)
-        .execute()
-    )
-    existing_row = row_res.data[0] if row_res.data else None
-
-    # Check if we need to regenerate the feed:
-    # 1. No existing feed for today
-    # 2. Preferences changed AND cooldown has passed (FIX #6: prevent questionnaire gaming)
-    # 3. Stored feed has fewer projects than current plan allows (plan upgraded)
-    stored_project_count = len(existing_row.get('project_ids') or []) if existing_row else 0
-    print(f"[DISCOVERY] curated_limit={curated_limit}, batch_cap={batch_cap}, stored_count={stored_project_count}, will_regenerate={stored_project_count < batch_cap}")
     
-    # FIX #6: Rate limit preference changes to prevent feed refresh exploitation
-    # Only apply cooldown to FREE users - Pro/Pro+ can refresh anytime
-    PREFERENCE_CHANGE_COOLDOWN_HOURS = 12
-    preferences_changed = existing_row is not None and existing_row.get('preference_key') != pref_key
-    can_refresh_for_preferences = False
-    
-    # Pro/Pro+ users can always refresh by changing preferences
-    is_paid_user = plan_config.get('id', 'FREE') in ['PRO', 'PRO_PLUS']
-    
-    if preferences_changed and existing_row:
-        if is_paid_user:
-            # Paid users: no cooldown
-            can_refresh_for_preferences = True
-        else:
-            # FREE users: 12-hour cooldown
-            created_at_str = existing_row.get('created_at')
-            if created_at_str:
-                try:
-                    from datetime import datetime, timezone, timedelta
-                    created_at = datetime.fromisoformat(created_at_str.replace('Z', '+00:00'))
-                    if created_at.tzinfo is None:
-                        created_at = created_at.replace(tzinfo=timezone.utc)
-                    cooldown_passed = datetime.now(timezone.utc) - created_at > timedelta(hours=PREFERENCE_CHANGE_COOLDOWN_HOURS)
-                    can_refresh_for_preferences = cooldown_passed
-                    if not cooldown_passed:
-                        # Add note to discovery meta explaining cooldown
-                        hours_since = (datetime.now(timezone.utc) - created_at).total_seconds() / 3600
-                        hours_remaining = PREFERENCE_CHANGE_COOLDOWN_HOURS - hours_since
-                        discovery_meta['preference_cooldown_remaining_hours'] = round(hours_remaining, 1)
-                except (ValueError, AttributeError):
-                    can_refresh_for_preferences = True  # Allow on parse error
-            else:
-                can_refresh_for_preferences = True  # Allow if no timestamp
-    
-    needing_new_allocation = (
-        existing_row is None 
-        or (preferences_changed and can_refresh_for_preferences)
-        or stored_project_count < batch_cap  # Plan upgraded, need more projects
-    )
-
-    if needing_new_allocation:
-        starter_ids = _ids_from_ranked(ranked_for_hydrate, batch_cap)
-        persist = {'seeker_id': seeker_id, 'feed_date': today}
-        formatted, final_ids = _build_matches_from_ordered_ids(
-            starter_ids,
-            ranked_by_id_hist,
-            ranked_for_hydrate,
-            validated=validated,
-            seeker_skills=seeker_skills,
-            seeker_id=seeker_id,
-            applied_project_ids=applied_project_ids,
-            matched_project_ids=matched_project_ids,
-            batch_cap=batch_cap,
-        )
-        try:
-            supabase.table(SEEKER_DISCOVERY_FEED_TABLE).upsert({
-                **persist,
-                'project_ids': final_ids,
-                'preference_key': pref_key,
-                'digest_email_sent': False,
-            }, on_conflict='seeker_id,feed_date').execute()
-        except Exception as e:
-            log_error('Failed to upsert seeker_discovery_daily_feed', error=e)
-        _save_search_history(seeker_id, validated, len(formatted))
-        return {'matches': formatted, 'discovery': discovery_meta}
-
-    stored_ids = list(existing_row.get('project_ids') or [])[:batch_cap]
-
-    formatted, final_ids = _build_matches_from_ordered_ids(
-        stored_ids,
-        ranked_by_id_hist,
-        ranked_for_hydrate,
-        validated=validated,
-        seeker_skills=seeker_skills,
-        seeker_id=seeker_id,
-        applied_project_ids=applied_project_ids,
-        matched_project_ids=matched_project_ids,
-        batch_cap=batch_cap,
-    )
-    try:
-        if final_ids != stored_ids:
-            preserve_digest = bool(existing_row.get('digest_email_sent')) if existing_row else False
-            supabase.table(SEEKER_DISCOVERY_FEED_TABLE).upsert({
-                'seeker_id': seeker_id,
-                'feed_date': today,
-                'project_ids': final_ids,
-                'preference_key': pref_key,
-                'digest_email_sent': preserve_digest,
-            }, on_conflict='seeker_id,feed_date').execute()
-    except Exception as e:
-        log_error('Failed to refresh discovery feed ids', error=e)
-
     _save_search_history(seeker_id, validated, len(formatted))
     return {'matches': formatted, 'discovery': discovery_meta}
+
+
+def _format_project_match(row: Dict) -> Dict[str, Any]:
+    """Format a ranked project row into the match response format."""
+    project = row['project']
+    founder = project.get('founder') or {}
+    verification = _compute_verification_info(founder)
+    founder_plan = founder.get('plan', 'FREE')
+    
+    return {
+        'id': project['id'],
+        'title': project.get('title', 'Untitled Project'),
+        'description': project.get('description', ''),
+        'stage': project.get('stage'),
+        'genre': project.get('genre'),
+        'needed_skills': project.get('needed_skills', []),
+        'compatibility_answers': project.get('compatibility_answers', {}),
+        'application_questions': project.get('application_questions', []),
+        'created_at': project.get('created_at'),
+        'founder': {
+            'id': founder.get('id'),
+            'name': founder.get('name'),
+            'profile_picture_url': founder.get('profile_picture_url'),
+            'location': founder.get('location'),
+            'headline': founder.get('headline'),
+            'skills': founder.get('skills', []),
+            'linkedin_url': founder.get('linkedin_url'),
+            'verification': verification,
+            'plan': founder_plan,
+        },
+        'match_score': row['score'],
+        'match_reasons': row['match_reasons'],
+    }
+
+
+def _get_cached_daily_results(supabase, seeker_id: str) -> Optional[Dict]:
+    """Check if FREE user has cached results for today."""
+    from datetime import datetime, timezone
+    
+    today = datetime.now(timezone.utc).date().isoformat()
+    
+    try:
+        result = supabase.table('seeker_daily_views').select('project_ids').eq(
+            'seeker_id', seeker_id
+        ).eq('view_date', today).execute()
+        
+        if result.data and result.data[0].get('project_ids'):
+            return {'project_ids': result.data[0]['project_ids']}
+        return None
+    except Exception:
+        return None
+
+
+def _cache_daily_results(supabase, seeker_id: str, project_ids: List[str]) -> None:
+    """Cache today's search results for FREE user."""
+    from datetime import datetime, timezone
+    
+    if not project_ids:
+        return
+    
+    today = datetime.now(timezone.utc).date().isoformat()
+    
+    try:
+        supabase.table('seeker_daily_views').upsert({
+            'seeker_id': seeker_id,
+            'view_date': today,
+            'project_ids': project_ids,
+        }, on_conflict='seeker_id,view_date').execute()
+    except Exception as e:
+        log_error("Failed to cache daily results", error=e)
+
+
+def _return_cached_results_with_scores(
+    supabase, project_ids: List[str], max_visible: int, user_plan: str, ranked: List[Dict]
+) -> Dict[str, Any]:
+    """Return cached results with fresh scores from current preferences."""
+    
+    if not project_ids:
+        return {'matches': [], 'discovery': {
+            'total_available': 0,
+            'returned_count': 0,
+            'max_visible': max_visible,
+            'user_plan': user_plan,
+            'has_more': False,
+            'results_cached': True,
+        }}
+    
+    cached_set = set(project_ids[:max_visible])
+    
+    # Get cached projects from ranked list (they'll have proper scores)
+    formatted = []
+    for row in ranked:
+        if row['project']['id'] in cached_set:
+            formatted.append(_format_project_match(row))
+            cached_set.discard(row['project']['id'])
+    
+    # For any cached projects not in ranked (e.g., became inactive or stopped seeking), fetch from DB
+    if cached_set:
+        projects_result = supabase.table('projects').select(
+            '*, founders!projects_founder_id_fkey(*)'
+        ).in_('id', list(cached_set)).eq('is_active', True).eq('seeking_cofounder', True).execute()
+        
+        for project in (projects_result.data or []):
+            founder = project.get('founders') or {}
+            verification = _compute_verification_info(founder)
+            formatted.append({
+                'id': project['id'],
+                'title': project.get('title', 'Untitled Project'),
+                'description': project.get('description', ''),
+                'stage': project.get('stage'),
+                'genre': project.get('genre'),
+                'needed_skills': project.get('needed_skills', []),
+                'compatibility_answers': project.get('compatibility_answers', {}),
+                'application_questions': project.get('application_questions', []),
+                'created_at': project.get('created_at'),
+                'founder': {
+                    'id': founder.get('id'),
+                    'name': founder.get('name'),
+                    'profile_picture_url': founder.get('profile_picture_url'),
+                    'location': founder.get('location'),
+                    'headline': founder.get('headline'),
+                    'skills': founder.get('skills', []),
+                    'linkedin_url': founder.get('linkedin_url'),
+                    'verification': verification,
+                    'plan': founder.get('plan', 'FREE'),
+                },
+                'match_score': 0,
+                'match_reasons': [],
+            })
+    
+    # Sort by score descending
+    formatted.sort(key=lambda x: x.get('match_score', 0), reverse=True)
+    
+    return {
+        'matches': formatted,
+        'discovery': {
+            'total_available': len(ranked),
+            'returned_count': len(formatted),
+            'max_visible': max_visible,
+            'user_plan': user_plan,
+            'has_more': len(ranked) > len(formatted),
+            'results_cached': True,
+        }
+    }
 
 
 def _looks_like_saved_discovery_prefs(compatibility_answers: Any) -> bool:
@@ -569,12 +567,23 @@ def _mark_discovery_digest_sent(supabase, seeker_id: str, feed_date: str) -> Non
 
 def run_discovery_daily_digest_cron() -> Dict[str, Any]:
     """
-    For each founder with saved discovery questionnaire answers:
-    ensure today's batch exists (same logic as Discover search), then send one
-    digest email per UTC day (digest_email_sent) driving users back into the app.
-
-    Call from POST /api/cron/discovery-daily-digest (scheduler), not from user HTTP.
+    DEPRECATED: Daily digest emails are no longer sent.
+    
+    The discovery flow has been simplified to tier-based visibility without daily batches.
+    This function is kept for backward compatibility but returns immediately.
+    
+    Previously: For each founder with saved discovery questionnaire answers,
+    ensure today's batch exists, then send one digest email per UTC day.
     """
+    return {
+        'ok': True,
+        'deprecated': True,
+        'message': 'Daily digest cron is deprecated. Discovery now uses tier-based visibility.',
+        'candidates': 0,
+        'emails_sent': 0
+    }
+    
+    # --- Original code below (kept for reference, not executed) ---
     supabase = get_supabase()
     today = _utc_today()
     counts: Dict[str, Any] = {
@@ -723,10 +732,10 @@ def apply_to_project(
     applicant_id = applicant.data[0]['id']
     applicant_name = applicant.data[0].get('name', 'Someone')
     
-    # Verify project exists and is accepting applications
+    # Verify project exists and is accepting applications (include founder's plan)
     project = supabase.table('projects').select(
         'id, title, founder_id, is_active, seeking_cofounder, '
-        'founders!inner(id, name, email)'
+        'founders!inner(id, name, email, plan)'
     ).eq('id', project_id).execute()
     
     if not project.data:
