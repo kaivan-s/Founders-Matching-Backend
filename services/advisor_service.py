@@ -222,7 +222,7 @@ def _calculate_verification_badges(data: dict) -> list:
     badges = []
     
     # LinkedIn badge
-    linkedin_url = data.get('linkedin_url', '').strip()
+    linkedin_url = (data.get('linkedin_url') or '').strip()
     if linkedin_url and 'linkedin.com' in linkedin_url:
         badges.append('linkedin')
     
@@ -311,7 +311,7 @@ def create_advisor_profile(clerk_user_id, data, user_name=None, user_email=None)
             raise ValueError("LinkedIn URL must be a valid LinkedIn profile URL")
     
     # Validate Twitter/X URL if provided
-    twitter_url = data.get('twitter_url', '').strip()
+    twitter_url = (data.get('twitter_url') or '').strip()
     if twitter_url and not (twitter_url.startswith('http://') or twitter_url.startswith('https://')):
         raise ValueError("Twitter/X URL must be a valid URL starting with http:// or https://")
     
