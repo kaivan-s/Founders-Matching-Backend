@@ -2376,7 +2376,6 @@ def advisor_profile_image():
             content_type
         )
         return jsonify(result), 200
-        
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
     except Exception as e:
