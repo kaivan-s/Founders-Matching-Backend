@@ -160,9 +160,9 @@ def _calculate_profile_completion_score(data: dict) -> int:
     # Basic info (20 points)
     if data.get('headline') and len(data.get('headline', '')) >= 10:
         score += 5
-    if data.get('bio') and len(data.get('bio', '')) >= 100:
+    if data.get('bio') and len(data.get('bio') or '') >= 100:
         score += 10
-    linkedin_url = data.get('linkedin_url', '').strip()
+    linkedin_url = (data.get('linkedin_url') or '').strip()
     if linkedin_url and 'linkedin.com' in linkedin_url:
         score += 5
     
@@ -303,7 +303,7 @@ def create_advisor_profile(clerk_user_id, data, user_name=None, user_email=None)
         raise ValueError(f"max_active_workspaces must be a number between 1 and 10. Received: {max_workspaces}")
     
     # Validate LinkedIn URL (optional - can be set via OAuth)
-    linkedin_url = data.get('linkedin_url', '').strip()
+    linkedin_url = (data.get('linkedin_url') or '').strip()
     if linkedin_url:
         if not linkedin_url.startswith('https://'):
             raise ValueError("LinkedIn URL must start with https://")
