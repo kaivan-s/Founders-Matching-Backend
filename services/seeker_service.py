@@ -372,7 +372,7 @@ def search_projects_for_seeker(
             # Return cached results with fresh scores based on current preferences
             ranked = _rank_discovery_candidates(supabase, seeker_id, seeker_skills, validated)
             return _return_cached_results_with_scores(
-                supabase, cached['project_ids'], max_visible, user_plan, ranked
+                supabase, cached['project_ids'], max_visible, user_plan, ranked, clerk_user_id
             )
     
     # Get ALL ranked candidates (fresh search)
@@ -391,6 +391,10 @@ def search_projects_for_seeker(
         project_ids = [f['id'] for f in formatted]
         _cache_daily_results(supabase, seeker_id, project_ids)
     
+    # Get remaining applications for the day
+    can_apply, apps_sent_today, max_apps = plan_service.check_connect_limit(clerk_user_id)
+    apps_remaining = max(0, max_apps - apps_sent_today) if max_apps != -1 else -1  # -1 means unlimited
+    
     discovery_meta: Dict[str, Any] = {
         'total_available': len(ranked),
         'returned_count': len(formatted),
@@ -398,6 +402,9 @@ def search_projects_for_seeker(
         'user_plan': user_plan,
         'has_more': len(ranked) > len(formatted),
         'results_cached': is_free_user,  # FREE users can't edit after first search
+        'applications_remaining': apps_remaining,
+        'applications_sent_today': apps_sent_today,
+        'max_applications_per_day': max_apps,
     }
     
     _save_search_history(seeker_id, validated, len(formatted))
@@ -475,9 +482,14 @@ def _cache_daily_results(supabase, seeker_id: str, project_ids: List[str]) -> No
 
 
 def _return_cached_results_with_scores(
-    supabase, project_ids: List[str], max_visible: int, user_plan: str, ranked: List[Dict]
+    supabase, project_ids: List[str], max_visible: int, user_plan: str, ranked: List[Dict], clerk_user_id: str
 ) -> Dict[str, Any]:
     """Return cached results with fresh scores from current preferences."""
+    from services import plan_service
+    
+    # Get remaining applications for the day
+    can_apply, apps_sent_today, max_apps = plan_service.check_connect_limit(clerk_user_id)
+    apps_remaining = max(0, max_apps - apps_sent_today) if max_apps != -1 else -1
     
     if not project_ids:
         return {'matches': [], 'discovery': {
@@ -487,6 +499,9 @@ def _return_cached_results_with_scores(
             'user_plan': user_plan,
             'has_more': False,
             'results_cached': True,
+            'applications_remaining': apps_remaining,
+            'applications_sent_today': apps_sent_today,
+            'max_applications_per_day': max_apps,
         }}
     
     cached_set = set(project_ids[:max_visible])
@@ -544,6 +559,9 @@ def _return_cached_results_with_scores(
             'user_plan': user_plan,
             'has_more': len(ranked) > len(formatted),
             'results_cached': True,
+            'applications_remaining': apps_remaining,
+            'applications_sent_today': apps_sent_today,
+            'max_applications_per_day': max_apps,
         }
     }
 
