@@ -25,11 +25,11 @@ def verify_advisor_profile(profile_id: int, verification_data: dict):
             log_error("Database connection not available for verification")
             return
         
-        # Basic validation checks
-        bio = verification_data.get('bio', '').strip()
-        headline = verification_data.get('headline', '').strip()
-        contact_email = verification_data.get('contact_email', '').strip()
-        user_email = verification_data.get('user_email', '').strip()
+        # Basic validation checks (handle None values)
+        bio = (verification_data.get('bio') or '').strip()
+        headline = (verification_data.get('headline') or '').strip()
+        contact_email = (verification_data.get('contact_email') or '').strip()
+        user_email = (verification_data.get('user_email') or '').strip()
         questionnaire_data = verification_data.get('questionnaire_data', {})
         
         # Check if minimum required fields are present
