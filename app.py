@@ -2576,13 +2576,10 @@ def get_advisor_availability(advisor_user_id):
 
 @app.route('/api/advisors/<advisor_user_id>/booking-link', methods=['GET'])
 def get_advisor_booking_link(advisor_user_id):
-    """Get advisor's cal.com booking link (public)"""
+    """Get advisor's cal.com booking link and payment info (public)"""
     try:
-        link = calcom_service.get_advisor_booking_link(advisor_user_id)
-        return jsonify({
-            "has_calcom": link is not None,
-            "booking_url": link
-        }), 200
+        info = calcom_service.get_advisor_booking_info(advisor_user_id)
+        return jsonify(info), 200
     except Exception as e:
         log_error("Error getting booking link", error=e)
         return jsonify({"error": str(e)}), 500

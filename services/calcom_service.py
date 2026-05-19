@@ -67,6 +67,46 @@ def get_advisor_booking_link(advisor_user_id: str) -> Optional[str]:
     return None
 
 
+def get_advisor_booking_info(advisor_user_id: str) -> Dict[str, Any]:
+    """Get advisor's booking link and payment methods for the booking dialog."""
+    supabase = get_supabase()
+
+    advisor = supabase.table("advisor_profiles").select(
+        "calcom_connected, calcom_booking_url, calcom_username, payment_methods"
+    ).eq("user_id", advisor_user_id).execute()
+
+    if not advisor.data:
+        return {
+            "has_calcom": False,
+            "booking_url": None,
+            "payment_methods": {},
+            "preferred_payment": None,
+        }
+
+    row = advisor.data[0]
+    booking_url = resolve_advisor_cal_booking_url(row)
+    payment_methods = row.get("payment_methods") or {}
+    
+    # Determine preferred payment method label
+    preferred_key = payment_methods.get("preferred")
+    preferred_payment = None
+    if preferred_key and payment_methods.get(preferred_key):
+        payment_labels = {
+            "upi_id": "UPI",
+            "paypal_url": "PayPal", 
+            "razorpay_link": "Razorpay",
+            "bank_details": "Bank Transfer",
+        }
+        preferred_payment = payment_labels.get(preferred_key, preferred_key)
+
+    return {
+        "has_calcom": booking_url is not None,
+        "booking_url": booking_url,
+        "payment_methods": payment_methods,
+        "preferred_payment": preferred_payment,
+    }
+
+
 def get_advisor_availability(
     advisor_user_id: str,
     start_date: str,
