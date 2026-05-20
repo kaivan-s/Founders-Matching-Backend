@@ -993,6 +993,95 @@ def get_project_viewers(project_id):
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+
+# ==================== Project Insights (AI Validation) ====================
+
+@app.route('/api/projects/<project_id>/insights', methods=['GET'])
+def get_project_insights(project_id):
+    """Get AI-generated insights for a project"""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        from services import insights_service
+        result = insights_service.get_project_insights(clerk_user_id, project_id)
+        
+        if result is None:
+            return jsonify({"insights": None, "message": "No insights generated yet"}), 200
+        
+        return jsonify(result), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        log_error(f"Error getting project insights: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/projects/<project_id>/insights/generate', methods=['POST'])
+@limiter.limit(RATE_LIMITS['strict'])
+def generate_project_insights(project_id):
+    """Generate AI insights for a project (Pro/Pro+ only)"""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        from services import insights_service
+        result = insights_service.generate_project_insights(clerk_user_id, project_id)
+        return jsonify(result), 200
+    except ValueError as e:
+        error_msg = str(e)
+        if "subscription" in error_msg.lower() or "upgrade" in error_msg.lower():
+            return jsonify({"error": error_msg, "upgrade_required": True}), 403
+        if "limit reached" in error_msg.lower():
+            return jsonify({"error": error_msg, "limit_reached": True}), 429
+        return jsonify({"error": error_msg}), 400
+    except Exception as e:
+        log_error(f"Error generating project insights: {e}")
+        return jsonify({"error": "Failed to generate insights. Please try again."}), 500
+
+
+@app.route('/api/insights/usage', methods=['GET'])
+def get_insights_usage():
+    """Get current insights usage and limits for the user"""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        from services import insights_service
+        result = insights_service.get_insights_usage(clerk_user_id)
+        return jsonify(result), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        log_error(f"Error getting insights usage: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/workspaces/<workspace_id>/insights', methods=['GET'])
+def get_workspace_insights(workspace_id):
+    """Get AI insights for the project associated with a workspace"""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        from services import insights_service
+        result = insights_service.get_insights_for_workspace(clerk_user_id, workspace_id)
+        
+        if result is None:
+            return jsonify({"insights": None, "message": "No insights available for this workspace"}), 200
+        
+        return jsonify(result), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        log_error(f"Error getting workspace insights: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route('/api/access-requests', methods=['GET'])
 def get_access_requests():
     """Get pending access requests for projects owned by current user"""
@@ -2266,8 +2355,9 @@ def advisor_profile():
     """Get, create, or update advisor profile"""
     try:
         clerk_user_id = get_clerk_user_id()
-        if not clerk_user_id:
+        if not clerk_user_id or not clerk_user_id.strip():
             return jsonify({"error": "User ID required"}), 401
+        clerk_user_id = clerk_user_id.strip()
         
         if request.method == 'GET':
             profile = advisor_service.get_advisor_profile(clerk_user_id)

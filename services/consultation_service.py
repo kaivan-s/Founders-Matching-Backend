@@ -107,58 +107,88 @@ def _ensure_status(consultation: Dict[str, Any], expected: List[str]) -> None:
         )
 
 
-def _enrich_consultation(row: Dict[str, Any]) -> Dict[str, Any]:
-    """Add lightweight related party info for UI display."""
+def _enrich_consultations_batch(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Batch enrich consultations - single query for all founders and advisor profiles."""
+    if not rows:
+        return []
+    
     supabase = get_supabase()
-    advisor_id = row.get('advisor_id')
-    founder_id = row.get('founder_id')
-
-    party_ids = [pid for pid in (advisor_id, founder_id) if pid]
+    
+    # Collect all unique IDs
+    all_advisor_ids = set()
+    all_founder_ids = set()
+    for row in rows:
+        if row.get('advisor_id'):
+            all_advisor_ids.add(row['advisor_id'])
+        if row.get('founder_id'):
+            all_founder_ids.add(row['founder_id'])
+    
+    all_party_ids = list(all_advisor_ids | all_founder_ids)
+    
+    # Batch query 1: Get all founders in one query
     parties = {}
-    if party_ids:
-        res = supabase.table('founders').select('id, name, email, profile_picture_url').in_('id', party_ids).execute()
+    if all_party_ids:
+        res = supabase.table('founders').select('id, name, email, profile_picture_url').in_('id', all_party_ids).execute()
         for p in (res.data or []):
             parties[p['id']] = p
-
-    advisor_cal_booking_url = None
-    advisor_payment_methods = {}
-    if advisor_id:
+    
+    # Batch query 2: Get all advisor profiles in one query
+    advisor_profiles = {}
+    if all_advisor_ids:
         try:
             ap_res = supabase.table('advisor_profiles').select(
-                'payment_methods, calcom_connected, calcom_booking_url, calcom_username'
-            ).eq('user_id', advisor_id).execute()
-            if ap_res.data:
-                ap = ap_res.data[0]
-                advisor_payment_methods = ap.get('payment_methods') or {}
-                if isinstance(advisor_payment_methods, dict):
-                    advisor_cal_booking_url = calcom_service.resolve_advisor_cal_booking_url(ap)
+                'user_id, payment_methods, calcom_connected, calcom_booking_url, calcom_username'
+            ).in_('user_id', list(all_advisor_ids)).execute()
+            for ap in (ap_res.data or []):
+                advisor_profiles[ap['user_id']] = ap
         except Exception as e:
-            log_warning(f"Could not load advisor profile for consultation enrich: {e}")
+            log_warning(f"Could not load advisor profiles for consultation enrich: {e}")
+    
+    # Now enrich each row using the pre-fetched data
+    enriched = []
+    for row in rows:
+        advisor_id = row.get('advisor_id')
+        founder_id = row.get('founder_id')
+        
+        advisor_cal_booking_url = None
+        advisor_payment_methods = {}
+        
+        if advisor_id and advisor_id in advisor_profiles:
+            ap = advisor_profiles[advisor_id]
+            advisor_payment_methods = ap.get('payment_methods') or {}
+            if isinstance(advisor_payment_methods, dict):
+                advisor_cal_booking_url = calcom_service.resolve_advisor_cal_booking_url(ap)
+        
+        advisor_party = parties.get(advisor_id)
+        if advisor_party is not None:
+            advisor = {
+                **advisor_party,
+                'payment_methods': advisor_payment_methods,
+                'calcom_booking_url': advisor_cal_booking_url,
+            }
+        elif advisor_id and (advisor_payment_methods or advisor_cal_booking_url is not None):
+            advisor = {
+                'id': advisor_id,
+                'payment_methods': advisor_payment_methods,
+                'calcom_booking_url': advisor_cal_booking_url,
+            }
+        else:
+            advisor = advisor_party
+        
+        enriched.append({
+            **row,
+            'advisor_cal_booking_url': advisor_cal_booking_url,
+            'advisor': advisor,
+            'founder': parties.get(founder_id),
+        })
+    
+    return enriched
 
-    advisor_party = parties.get(advisor_id)
-    if advisor_party is not None:
-        advisor = {
-            **advisor_party,
-            'payment_methods': advisor_payment_methods,
-            'calcom_booking_url': advisor_cal_booking_url,
-        }
-    elif advisor_id and (
-        advisor_payment_methods or advisor_cal_booking_url is not None
-    ):
-        advisor = {
-            'id': advisor_id,
-            'payment_methods': advisor_payment_methods,
-            'calcom_booking_url': advisor_cal_booking_url,
-        }
-    else:
-        advisor = advisor_party
 
-    return {
-        **row,
-        'advisor_cal_booking_url': advisor_cal_booking_url,
-        'advisor': advisor,
-        'founder': parties.get(founder_id),
-    }
+def _enrich_consultation(row: Dict[str, Any]) -> Dict[str, Any]:
+    """Add lightweight related party info for UI display (single consultation)."""
+    result = _enrich_consultations_batch([row])
+    return result[0] if result else row
 
 
 # ---------------------------------------------------------------------------
@@ -571,7 +601,7 @@ def list_consultations(
 
     query = query.order('created_at', desc=True).limit(min(limit, 200))
     res = query.execute()
-    return [_enrich_consultation(r) for r in (res.data or [])]
+    return _enrich_consultations_batch(res.data or [])
 
 
 def get_consultation(clerk_user_id: str, consultation_id: str) -> Dict[str, Any]:

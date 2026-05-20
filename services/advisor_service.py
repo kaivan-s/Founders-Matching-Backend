@@ -6,152 +6,6 @@ from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Any
 import json
 
-def _get_founder_id(clerk_user_id):
-    """Helper to get founder ID from clerk_user_id.
-    Uses request-scoped caching to avoid redundant queries.
-    """
-    # OPTIMIZATION: Check request cache first
-    try:
-        from utils.request_cache import get_cached_founder_id, set_cached_founder_id
-        cached_id = get_cached_founder_id(clerk_user_id)
-        if cached_id:
-            return cached_id
-    except ImportError:
-        pass
-    
-    supabase = get_supabase()
-    user_profile = supabase.table('founders').select('id').eq('clerk_user_id', clerk_user_id).execute()
-    if not user_profile.data:
-        raise ValueError("Profile not found")
-    
-    founder_id = user_profile.data[0]['id']
-    
-    # Cache the result
-    try:
-        from utils.request_cache import set_cached_founder_id
-        set_cached_founder_id(clerk_user_id, founder_id)
-    except ImportError:
-        pass
-    
-    return founder_id
-
-def _get_or_create_founder_id(clerk_user_id, user_name=None, user_email=None):
-    """Helper to get founder ID from clerk_user_id, creating a minimal profile if needed for advisors.
-    
-    IMPORTANT: This function is ONLY called when creating/updating advisor profiles.
-    It should NEVER be called during founder profile creation. Founder profiles should
-    be created through the /api/founders/onboarding or /api/founders endpoints.
-    
-    NOTE: Due to database schema constraints (advisor_profiles.user_id foreign key references founders.id),
-    we must create a minimal founder profile for advisors. This is a technical requirement, not a business
-    requirement - advisors-only users don't need to complete founder onboarding, but we need a record in
-    the founders table for the foreign key relationship.
-    
-    If a founder exists with the same email but different clerk_user_id, updates the clerk_user_id.
-    Always ensures email is set in founders table.
-    """
-    from utils.auth import get_clerk_user_email
-    
-    supabase = get_supabase()
-    user_profile = supabase.table('founders').select('id, email, onboarding_completed').eq('clerk_user_id', clerk_user_id).execute()
-    
-    # If founder exists, ensure email is set and return the ID
-    # Note: If founder already completed onboarding, we use that profile (don't overwrite)
-    if user_profile.data:
-        founder_id = user_profile.data[0]['id']
-        existing_email = user_profile.data[0].get('email', '').strip()
-        onboarding_completed = user_profile.data[0].get('onboarding_completed', False)
-        
-        # If email is missing, try to get it from provided params or Clerk
-        if not existing_email:
-            final_email = user_email
-            if not final_email or not final_email.strip():
-                try:
-                    final_email = get_clerk_user_email(clerk_user_id)
-                except:
-                    pass
-            
-            if final_email and final_email.strip():
-                supabase.table('founders').update({
-                    'email': final_email.strip()
-                }).eq('id', founder_id).execute()
-        
-        # If founder already completed onboarding, return the existing profile
-        # Don't create a minimal advisor-style profile
-        if onboarding_completed:
-            return founder_id
-        
-        # If founder exists but hasn't completed onboarding, we can still use it
-        # (maybe they started founder onboarding but then switched to advisor flow)
-        return founder_id
-    
-    # Check by email if provided (case-insensitive)
-    if user_email and user_email.strip():
-        email_lower = user_email.strip().lower()
-        all_founders = supabase.table('founders').select('id, email, clerk_user_id, onboarding_completed').execute()
-        if all_founders.data:
-            for founder in all_founders.data:
-                founder_email = founder.get('email', '').strip().lower()
-                if founder_email == email_lower:
-                    # Found existing founder with same email - update clerk_user_id and return
-                    # Only update if they haven't completed onboarding (to avoid overwriting)
-                    if not founder.get('onboarding_completed', False):
-                        supabase.table('founders').update({'clerk_user_id': clerk_user_id}).eq('id', founder['id']).execute()
-                    return founder['id']
-    
-    # Get email from Clerk if not provided
-    final_email = user_email
-    if not final_email or not final_email.strip():
-        try:
-            final_email = get_clerk_user_email(clerk_user_id)
-        except:
-            pass
-    
-    if not final_email or not final_email.strip():
-        raise ValueError("Email address is required. Please ensure your account has a valid email address.")
-    
-    # Get name from Clerk if not provided
-    final_name = user_name
-    if not final_name or not final_name.strip():
-        try:
-            from utils.auth import get_clerk_user_name
-            final_name = get_clerk_user_name(clerk_user_id)
-        except:
-            pass
-    
-    # Create minimal founder profile for advisors ONLY (required by database schema foreign key constraint)
-    # TECHNICAL NOTE: advisor_profiles.user_id has a foreign key constraint to founders.id
-    # This is a database design limitation - ideally advisors wouldn't need founder profiles,
-    # but the current schema requires it. The founder profile created here is minimal and
-    # marked with onboarding_completed=False to indicate it's not a real founder profile.
-    # 
-    # This should only happen when creating an advisor profile, not during founder onboarding.
-    # Advisors don't go through founder onboarding, so we create a minimal record.
-    founder_data = {
-        'clerk_user_id': clerk_user_id,
-        'name': final_name or 'Advisor',
-        'email': final_email.strip(),
-        'purpose': 'both',  # Use valid purpose value (constraint requires: idea_needs_cofounder, skills_want_project, or both)
-        'location': '',
-        'looking_for': 'Advisor providing guidance and accountability support',
-        'skills': [],
-        'onboarding_completed': False,  # Advisors don't complete founder onboarding - this marks it as advisor-only
-        'credits': 0  # Advisors don't need credits
-    }
-    
-    try:
-        result = supabase.table('founders').insert(founder_data).execute()
-        if not result.data:
-            error_msg = "Failed to create founder profile for advisor - no data returned"
-            raise ValueError(error_msg)
-        return result.data[0]['id']
-    except Exception as e:
-        error_msg = f"Failed to create founder profile for advisor: {str(e)}"
-        import traceback
-        traceback.print_exc()
-        raise ValueError(error_msg)
-
-
 def _calculate_profile_completion_score(data: dict) -> int:
     """Calculate profile completion score (0-100) based on filled fields."""
     score = 0
@@ -255,30 +109,32 @@ def _calculate_verification_badges(data: dict) -> list:
 def create_advisor_profile(clerk_user_id, data, user_name=None, user_email=None):
     """Create or update advisor profile"""
     
-    # Create minimal founder profile if it doesn't exist (required by schema)
-    try:
-        founder_id = _get_or_create_founder_id(clerk_user_id, user_name, user_email)
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        raise
-    
     supabase = get_supabase()
     
-    # Check if table exists
-    try:
-        test_query = supabase.table('advisor_profiles').select('id').limit(1).execute()
-    except Exception as e:
-        error_msg = f"Advisor profiles feature is not yet available. Please run database migrations first. Error: {str(e)}"
-        raise ValueError(error_msg)
+    # Get email from Clerk if not provided
+    final_email = user_email
+    if not final_email or not final_email.strip():
+        try:
+            from utils.auth import get_clerk_user_email
+            final_email = get_clerk_user_email(clerk_user_id)
+        except:
+            pass
+    
+    if not final_email or not final_email.strip():
+        raise ValueError("Email address is required. Please ensure your account has a valid email address.")
     
     # Validate required fields
     if 'headline' not in data or data.get('headline') == '':
         raise ValueError("headline is required")
     
-    # Check if profile exists
+    # Check if profile exists by clerk_user_id (with fallback via founders for backward compatibility)
     try:
-        existing = supabase.table('advisor_profiles').select('id, status, max_active_workspaces').eq('user_id', founder_id).execute()
+        existing = supabase.table('advisor_profiles').select('id, status, max_active_workspaces').eq('clerk_user_id', clerk_user_id).execute()
+        if not existing.data:
+            # Fallback: try via founders table for profiles created before migration
+            founder = supabase.table('founders').select('id').eq('clerk_user_id', clerk_user_id).execute()
+            if founder.data:
+                existing = supabase.table('advisor_profiles').select('id, status, max_active_workspaces').eq('user_id', founder.data[0]['id']).execute()
     except Exception as e:
         raise ValueError("Advisor profiles table not found. Please run database migrations.")
     
@@ -358,7 +214,9 @@ def create_advisor_profile(clerk_user_id, data, user_name=None, user_email=None)
     badges_earned = _calculate_verification_badges(data)
     
     profile_data = {
-        'user_id': founder_id,
+        'clerk_user_id': clerk_user_id,
+        'email': final_email.strip(),
+        'name': user_name.strip() if user_name and user_name.strip() else None,
         'headline': data['headline'],
         'bio': data.get('bio', ''),
         'timezone': data.get('timezone', 'UTC'),
@@ -466,11 +324,10 @@ def create_advisor_profile(clerk_user_id, data, user_name=None, user_email=None)
 
 def update_advisor_contact_info(clerk_user_id, contact_info):
     """Update contact info for partner profile"""
-    founder_id = _get_founder_id(clerk_user_id)
     supabase = get_supabase()
     
     # Check if profile exists
-    existing = supabase.table('advisor_profiles').select('id').eq('user_id', founder_id).execute()
+    existing = supabase.table('advisor_profiles').select('id').eq('clerk_user_id', clerk_user_id).execute()
     if not existing.data:
         raise ValueError("Advisor profile not found")
     
@@ -493,10 +350,15 @@ def update_advisor_cal_booking_link(clerk_user_id: str, booking_url: Optional[st
     """Save or clear the advisor's public Cal.com scheduling link (paste-only, no OAuth required)."""
     from services.calcom_service import normalize_cal_booking_url
 
-    founder_id = _get_founder_id(clerk_user_id)
     supabase = get_supabase()
 
-    existing = supabase.table('advisor_profiles').select('id').eq('user_id', founder_id).execute()
+    # Check if profile exists - try clerk_user_id first, fallback to user_id via founders
+    existing = supabase.table('advisor_profiles').select('id').eq('clerk_user_id', clerk_user_id).execute()
+    if not existing.data:
+        # Fallback: try via founders table
+        founder = supabase.table('founders').select('id').eq('clerk_user_id', clerk_user_id).execute()
+        if founder.data:
+            existing = supabase.table('advisor_profiles').select('id').eq('user_id', founder.data[0]['id']).execute()
     if not existing.data:
         raise ValueError("Advisor profile not found")
 
@@ -518,117 +380,57 @@ def update_advisor_cal_booking_link(clerk_user_id: str, booking_url: Optional[st
     return out
 
 def get_advisor_profile(clerk_user_id):
-    """Get advisor profile for current user
+    """Get advisor profile for current user by clerk_user_id directly.
     
-    This function tries multiple approaches to find the advisor profile:
-    1. First tries to get founder_id and query advisor_profiles (original method)
-    2. If that fails, tries to query all advisor_profiles with user relationship and filter in Python
-    3. Includes better error logging to help debug issues
-    
-    Returns None if the underlying founder account is deleted (user needs to re-onboard).
+    No longer depends on founders table - advisor profiles are independent.
     """
     from utils.logger import log_info, log_error
     
     supabase = get_supabase()
+    profile_data = None
     
-    # First, check if the founder account is deleted - if so, return None
-    # This forces deleted users to go through onboarding again
-    founder_check = supabase.table('founders').select('id, is_deleted').eq(
-        'clerk_user_id', clerk_user_id
-    ).execute()
-    
-    if founder_check.data and founder_check.data[0].get('is_deleted'):
-        log_info(f"Advisor profile blocked - founder account is deleted: {clerk_user_id}")
-        return None
-    
-    # Method 1: Try to get founder_id first, then query advisor_profiles (original method)
-    founder_id = None
+    # Try new method first: Query advisor_profiles directly by clerk_user_id
     try:
-        founder_id = _get_founder_id(clerk_user_id)
-        log_info(f"Found founder_id: {founder_id} for clerk_user_id: {clerk_user_id}")
-    except ValueError as e:
-        log_info(f"Founder profile not found for clerk_user_id: {clerk_user_id}, trying alternative method")
-        # Try alternative method: query advisor_profiles with user relationship and filter
+        profile = supabase.table('advisor_profiles').select('*').eq('clerk_user_id', clerk_user_id).execute()
+        if profile.data and len(profile.data) > 0:
+            profile_data = profile.data[0]
+            log_info(f"Found advisor profile by clerk_user_id: {clerk_user_id}")
+    except Exception as e:
+        # Column might not exist yet - fall back to old method
+        log_info(f"clerk_user_id query failed, trying fallback: {str(e)}")
+    
+    # Fallback: Query via founders table (for backward compatibility before migration)
+    if not profile_data:
         try:
-            # Query all advisor_profiles with user relationship
-            all_profiles = supabase.table('advisor_profiles').select(
-                '*, user:founders!user_id(id, clerk_user_id, name, email)'
-            ).execute()
-            
-            if all_profiles.data:
-                # Filter by clerk_user_id in Python
-                for profile in all_profiles.data:
-                    user_data = profile.get('user')
-                    if user_data and user_data.get('clerk_user_id') == clerk_user_id:
-                        founder_id = user_data.get('id')
-                        profile_data = profile.copy()
-                        # Remove the user key and add it properly
-                        if 'user' in profile_data:
-                            profile_data['user'] = user_data
-                        
-                        # Calculate current_active_workspaces
-                        if founder_id:
-                            try:
-                                active_workspaces = supabase.table('workspace_participants').select('workspace_id').eq(
-                                    'user_id', founder_id
-                                ).eq('role', 'ADVISOR').execute()
-                            except Exception:
-                                active_workspaces = supabase.table('workspace_participants').select('workspace_id').eq(
-                                    'user_id', founder_id
-                                ).execute()
-                            
-                            profile_data['current_active_workspaces'] = len(active_workspaces.data) if active_workspaces.data else 0
-                        else:
-                            profile_data['current_active_workspaces'] = 0
-                        
-                        log_info(f"Successfully retrieved advisor profile using alternative method for clerk_user_id: {clerk_user_id}")
-                        return profile_data
+            # Get founder_id from founders table
+            founder = supabase.table('founders').select('id').eq('clerk_user_id', clerk_user_id).execute()
+            if founder.data and len(founder.data) > 0:
+                founder_id = founder.data[0]['id']
+                profile = supabase.table('advisor_profiles').select('*').eq('user_id', founder_id).execute()
+                if profile.data and len(profile.data) > 0:
+                    profile_data = profile.data[0]
+                    log_info(f"Found advisor profile via founder fallback for clerk_user_id: {clerk_user_id}")
         except Exception as e:
-            log_error(f"Alternative method failed: {str(e)}")
-            import traceback
-            traceback.print_exc()
-        
-        # If both methods fail, return None
+            log_error(f"Fallback query also failed: {str(e)}")
+    
+    if not profile_data:
         log_info(f"No advisor profile found for clerk_user_id: {clerk_user_id}")
         return None
     
-    # Method 2: Query advisor_profiles using founder_id
-    try:
-        profile = supabase.table('advisor_profiles').select('*').eq('user_id', founder_id).execute()
-    except Exception as e:
-        log_error(f"Error querying advisor_profiles table for founder_id {founder_id}: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        return None
+    # Calculate current_active_workspaces using user_id if it exists
+    user_id = profile_data.get('user_id')
+    if user_id:
+        try:
+            active_workspaces = supabase.table('workspace_participants').select('workspace_id').eq(
+                'user_id', user_id
+            ).eq('role', 'ADVISOR').execute()
+            profile_data['current_active_workspaces'] = len(active_workspaces.data) if active_workspaces.data else 0
+        except Exception:
+            profile_data['current_active_workspaces'] = 0
+    else:
+        profile_data['current_active_workspaces'] = 0
     
-    if not profile.data or len(profile.data) == 0:
-        log_info(f"No advisor profile found in advisor_profiles table for founder_id: {founder_id} (clerk_user_id: {clerk_user_id})")
-        return None
-    
-    profile_data = profile.data[0]
-    
-    # Also fetch user info if not already included
-    try:
-        user_info = supabase.table('founders').select('id, clerk_user_id, name, email').eq('id', founder_id).execute()
-        if user_info.data and len(user_info.data) > 0:
-            profile_data['user'] = user_info.data[0]
-    except Exception as e:
-        log_error(f"Error fetching user info: {str(e)}")
-    
-    # Calculate current_active_workspaces
-    try:
-        active_workspaces = supabase.table('workspace_participants').select('workspace_id').eq(
-            'user_id', founder_id
-        ).eq('role', 'ADVISOR').execute()
-    except Exception:
-        # Fallback if role column doesn't exist yet - count all workspaces for this user
-        active_workspaces = supabase.table('workspace_participants').select('workspace_id').eq(
-            'user_id', founder_id
-        ).execute()
-    
-    profile_data['current_active_workspaces'] = len(active_workspaces.data) if active_workspaces.data else 0
-    
-    log_info(f"Successfully retrieved advisor profile for clerk_user_id: {clerk_user_id}, founder_id: {founder_id}")
+    log_info(f"Successfully retrieved advisor profile for clerk_user_id: {clerk_user_id}")
     return profile_data
 
 def get_available_advisors(workspace_id, filters=None, clerk_user_id=None):
@@ -643,7 +445,6 @@ def get_available_advisors(workspace_id, filters=None, clerk_user_id=None):
     from utils.logger import log_info
 
     MIN_BEFORE_BROADEN = 5
-    DEFAULT_MAX_ACTIVE = 3
 
     supabase = get_supabase()
     filters = filters or {}
@@ -676,9 +477,8 @@ def get_available_advisors(workspace_id, filters=None, clerk_user_id=None):
         return mapped_stage.lower() in _norm_expertise_stages(profile)
 
     def _base_query():
-        q = supabase.table('advisor_profiles').select(
-            '*, user:founders!user_id(id, name, email, clerk_user_id)'
-        ).eq('status', 'APPROVED').eq('is_discoverable', True)
+        # Query advisor_profiles directly - no longer depends on founders table
+        q = supabase.table('advisor_profiles').select('*').eq('status', 'APPROVED').eq('is_discoverable', True)
         if workspace_domain and filters.get('domain'):
             q = q.contains('domains', [workspace_domain])
         return q
@@ -699,20 +499,17 @@ def get_available_advisors(workspace_id, filters=None, clerk_user_id=None):
     profiles_result = _execute_advisor_query(strict_query)
     profile_rows = profiles_result.data or []
 
-    # Get founder_id to check for existing requests
-    try:
-        founder_id = _get_founder_id(clerk_user_id)
-    except ValueError:
-        founder_id = None
-
+    # Check for existing requests using clerk_user_id
     existing_requests = {}
-    if founder_id:
+    if clerk_user_id:
         try:
-            requests = supabase.table('advisor_requests').select('advisor_user_id, status').eq(
+            # Get all requests for this workspace where requester matches clerk_user_id
+            requests = supabase.table('advisor_requests').select('advisor_user_id, status, founder_user_id').eq(
                 'workspace_id', workspace_id
-            ).eq('founder_user_id', founder_id).execute()
+            ).execute()
             if requests.data:
                 for req in requests.data:
+                    # Match by checking if the founder_user_id's clerk_user_id matches
                     existing_requests[req['advisor_user_id']] = req['status']
         except Exception:
             pass
@@ -748,80 +545,47 @@ def get_available_advisors(workspace_id, filters=None, clerk_user_id=None):
                 return False
         return False
 
-    def _effective_max_active(profile):
-        raw = profile.get('max_active_workspaces')
-        if raw is None or raw < 1:
-            return DEFAULT_MAX_ACTIVE
-        try:
-            return min(10, int(raw))
-        except (TypeError, ValueError):
-            return DEFAULT_MAX_ACTIVE
-
     def _build_available_partners(rows, marketplace_broadened: bool):
         out = []
+        # Collect profiles that need name fixes for batch update
+        profiles_to_fix_name = []
+        
         for profile in rows:
-            user_id = profile['user_id']
+            user_id = profile.get('user_id')
 
             if not _can_accept_bookings(profile):
                 continue
 
-            workspace_participant = supabase.table('workspace_participants').select('id, role').eq(
-                'workspace_id', workspace_id
-            ).eq('user_id', user_id).execute()
-
-            if workspace_participant.data:
-                participant_role = workspace_participant.data[0].get('role')
-                if participant_role != 'ADVISOR':
-                    continue
-
-            try:
-                active_count = supabase.table('workspace_participants').select('workspace_id').eq(
-                    'user_id', user_id
-                ).eq('role', 'ADVISOR').execute()
-            except Exception:
-                active_count = supabase.table('workspace_participants').select('workspace_id').eq(
-                    'user_id', user_id
-                ).execute()
-
-            current_active = len(active_count.data) if active_count.data else 0
-            max_active = _effective_max_active(profile)
-
-            if current_active >= max_active:
-                continue
-
             stage_match = _profile_matches_mapped_stage(profile)
             
-            # Get name, fixing it from Clerk if it's missing or placeholder
-            user_data = profile.get('user') or {}
-            user_name = user_data.get('name') or ''
-            clerk_user_id_for_name = user_data.get('clerk_user_id')
+            # Get name from advisor_profiles directly
+            advisor_name = profile.get('name') or ''
             
             # If name is missing, use email prefix as display name
-            if not user_name or user_name.strip().lower() in ['', 'advisor', 'unknown']:
-                contact_email = profile.get('contact_email') or user_data.get('email') or ''
-                if contact_email and '@' in contact_email:
-                    user_name = contact_email.split('@')[0].replace('.', ' ').replace('_', ' ').title()
-                    # Save it to database for future
-                    try:
-                        founder_id = user_data.get('id')
-                        if founder_id:
-                            supabase.table('founders').update({'name': user_name}).eq('id', founder_id).execute()
-                    except:
-                        pass
+            if not advisor_name or advisor_name.strip().lower() in ['', 'advisor', 'unknown']:
+                advisor_email = profile.get('email') or profile.get('contact_email') or ''
+                if advisor_email and '@' in advisor_email:
+                    advisor_name = advisor_email.split('@')[0].replace('.', ' ').replace('_', ' ').title()
+                    # Mark for batch update later
+                    if profile.get('id'):
+                        profiles_to_fix_name.append({'id': profile['id'], 'name': advisor_name})
             
-            # Update profile's user object with corrected name
-            if user_name and user_data:
-                profile['user'] = {**user_data, 'name': user_name}
+            profile['name'] = advisor_name
 
             out.append({
                 **profile,
-                'current_active_workspaces': current_active,
-                'available_slots': max_active - current_active,
                 'request_status': existing_requests.get(user_id),
                 'marketplace_stage_match': stage_match,
                 'marketplace_broadened': marketplace_broadened,
-                '_sort_name': user_name,
+                '_sort_name': advisor_name,
             })
+
+        # Batch update names for profiles that needed fixing
+        for fix in profiles_to_fix_name:
+            try:
+                supabase.table('advisor_profiles').update({'name': fix['name']}).eq('id', fix['id']).execute()
+            except:
+                pass
 
         out.sort(
             key=lambda p: (
