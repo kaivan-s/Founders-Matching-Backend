@@ -51,6 +51,22 @@ def _next_utc_midnight() -> datetime:
     )
 
 
+def _get_projects_with_insights(supabase, project_ids: List[str]) -> set:
+    """Get set of project IDs that have completed insights."""
+    if not project_ids:
+        return set()
+    
+    try:
+        result = supabase.table('project_insights').select('project_id').in_(
+            'project_id', project_ids
+        ).eq('status', 'completed').execute()
+        
+        return {row['project_id'] for row in (result.data or [])}
+    except Exception as e:
+        log_error("Failed to get projects with insights", error=e)
+        return set()
+
+
 def _rank_discovery_candidates(
     supabase,
     seeker_id: str,
@@ -172,7 +188,7 @@ def _send_discovery_daily_digest_email(seeker_record: Dict[str, Any]) -> bool:
         return False
 
 
-def _format_discovery_match(score: int, match_reasons: List[str], project: Dict[str, Any]) -> Dict[str, Any]:
+def _format_discovery_match(score: int, match_reasons: List[str], project: Dict[str, Any], has_insights: bool = False) -> Dict[str, Any]:
     founder = project.get('founder') or {}
     verification = _compute_verification_info(founder)
     return {
@@ -197,6 +213,7 @@ def _format_discovery_match(score: int, match_reasons: List[str], project: Dict[
         },
         'match_score': score,
         'match_reasons': match_reasons,
+        'has_insights': has_insights,
     }
 
 
@@ -211,6 +228,7 @@ def _build_matches_from_ordered_ids(
     applied_project_ids: set,
     matched_project_ids: set,
     batch_cap: int,
+    projects_with_insights: Optional[set] = None,
 ) -> Tuple[List[Dict[str, Any]], List[str]]:
     """
     Hydrate formatted matches preserving order where possible.
@@ -218,6 +236,7 @@ def _build_matches_from_ordered_ids(
     """
     formatted: List[Dict[str, Any]] = []
     used: set = set()
+    projects_with_insights = projects_with_insights or set()
     
     def _eligible_live(project: Dict) -> bool:
         pid = project['id']
@@ -237,7 +256,8 @@ def _build_matches_from_ordered_ids(
         score, reasons = _calculate_match_score(project_dict, validated, seeker_skills)
         if score <= 0:
             return False
-        formatted.append(_format_discovery_match(score, reasons, project_dict))
+        has_insights = project_dict['id'] in projects_with_insights
+        formatted.append(_format_discovery_match(score, reasons, project_dict, has_insights=has_insights))
         used.add(project_dict['id'])
         return True
     
@@ -311,12 +331,20 @@ def get_skipped_projects(
     ).eq('swipe_type', 'left').execute()
     skipped_ids = {s['project_id'] for s in (skipped_projects.data or [])}
     
+    # Get projects that will be returned
+    skipped_project_ids = [row['project']['id'] for row in ranked if row['project']['id'] in skipped_ids][:20]
+    
+    # Get insights status for skipped projects
+    projects_with_insights = _get_projects_with_insights(supabase, skipped_project_ids)
+    
     # Only return projects that were skipped
     skipped_matches = []
     for row in ranked:
-        if row['project']['id'] in skipped_ids:
+        project_id = row['project']['id']
+        if project_id in skipped_ids:
+            has_insights = project_id in projects_with_insights
             skipped_matches.append(
-                _format_discovery_match(row['score'], row['match_reasons'], row['project'])
+                _format_discovery_match(row['score'], row['match_reasons'], row['project'], has_insights=has_insights)
             )
     
     return {
@@ -380,10 +408,15 @@ def search_projects_for_seeker(
         supabase, seeker_id, seeker_skills, validated,
     )
     
+    # Get insights status for projects in batch
+    project_ids_for_insights = [row['project']['id'] for row in ranked[:batch_cap]]
+    projects_with_insights = _get_projects_with_insights(supabase, project_ids_for_insights)
+    
     # Format results
     formatted: List[Dict[str, Any]] = []
     for row in ranked[:batch_cap]:
-        formatted.append(_format_project_match(row))
+        has_insights = row['project']['id'] in projects_with_insights
+        formatted.append(_format_project_match(row, has_insights=has_insights))
     
     # For FREE users, cache today's results
     is_free_user = user_plan == 'FREE'
@@ -411,7 +444,7 @@ def search_projects_for_seeker(
     return {'matches': formatted, 'discovery': discovery_meta}
 
 
-def _format_project_match(row: Dict) -> Dict[str, Any]:
+def _format_project_match(row: Dict, has_insights: bool = False) -> Dict[str, Any]:
     """Format a ranked project row into the match response format."""
     project = row['project']
     founder = project.get('founder') or {}
@@ -441,6 +474,7 @@ def _format_project_match(row: Dict) -> Dict[str, Any]:
         },
         'match_score': row['score'],
         'match_reasons': row['match_reasons'],
+        'has_insights': has_insights,
     }
 
 
@@ -506,12 +540,17 @@ def _return_cached_results_with_scores(
     
     cached_set = set(project_ids[:max_visible])
     
+    # Get insights status for all cached projects
+    projects_with_insights = _get_projects_with_insights(supabase, project_ids[:max_visible])
+    
     # Get cached projects from ranked list (they'll have proper scores)
     formatted = []
     for row in ranked:
-        if row['project']['id'] in cached_set:
-            formatted.append(_format_project_match(row))
-            cached_set.discard(row['project']['id'])
+        project_id = row['project']['id']
+        if project_id in cached_set:
+            has_insights = project_id in projects_with_insights
+            formatted.append(_format_project_match(row, has_insights=has_insights))
+            cached_set.discard(project_id)
     
     # For any cached projects not in ranked (e.g., became inactive or stopped seeking), fetch from DB
     if cached_set:
@@ -522,6 +561,7 @@ def _return_cached_results_with_scores(
         for project in (projects_result.data or []):
             founder = project.get('founders') or {}
             verification = _compute_verification_info(founder)
+            has_insights = project['id'] in projects_with_insights
             formatted.append({
                 'id': project['id'],
                 'title': project.get('title', 'Untitled Project'),
@@ -545,6 +585,7 @@ def _return_cached_results_with_scores(
                 },
                 'match_score': 0,
                 'match_reasons': [],
+                'has_insights': has_insights,
             })
     
     # Sort by score descending
