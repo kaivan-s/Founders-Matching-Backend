@@ -626,21 +626,129 @@ def _mark_discovery_digest_sent(supabase, seeker_id: str, feed_date: str) -> Non
 
 def run_discovery_daily_digest_cron() -> Dict[str, Any]:
     """
-    DEPRECATED: Daily digest emails are no longer sent.
+    Daily campaign email cron job.
     
-    The discovery flow has been simplified to tier-based visibility without daily batches.
-    This function is kept for backward compatibility but returns immediately.
+    Sends emails to a rotating batch of users (25% per day = 4-day cycle).
+    Users are randomly selected from those not emailed in the last 4 days.
     
-    Previously: For each founder with saved discovery questionnaire answers,
-    ensure today's batch exists, then send one digest email per UTC day.
+    This ensures:
+    - Random fair distribution across users
+    - No user gets spammed (4-day cooldown)
+    - Scales automatically as user base grows
     """
-    return {
+    from services.email_service import send_campaign_discovery_email
+    from datetime import datetime, timezone
+    
+    supabase = get_supabase()
+    
+    BATCH_PERCENTAGE = 0.25  # 25% of users per day = 4-day cycle
+    
+    stats = {
         'ok': True,
-        'deprecated': True,
-        'message': 'Daily digest cron is deprecated. Discovery now uses tier-based visibility.',
-        'candidates': 0,
-        'emails_sent': 0
+        'total_eligible_users': 0,
+        'batch_size': 0,
+        'emails_sent': 0,
+        'emails_failed': 0,
+        'skipped_no_email': 0,
     }
+    
+    try:
+        # Get count of eligible users (active, not deleted, not unsubscribed)
+        # Note: email_unsubscribed might not exist yet, handle gracefully
+        try:
+            count_query = supabase.table('founders').select('id', count='exact').eq(
+                'is_active', True
+            ).eq('is_deleted', False).eq('email_unsubscribed', False).execute()
+        except Exception:
+            # Column might not exist yet, fallback without unsubscribe filter
+            count_query = supabase.table('founders').select('id', count='exact').eq(
+                'is_active', True
+            ).eq('is_deleted', False).execute()
+        
+        total_users = count_query.count or 0
+        stats['total_eligible_users'] = total_users
+        
+        if total_users == 0:
+            stats['message'] = 'No eligible users found'
+            return stats
+        
+        # Calculate batch size (25% of total, minimum 1)
+        batch_size = max(1, int(total_users * BATCH_PERCENTAGE))
+        stats['batch_size'] = batch_size
+        
+        # Get users to email: random selection from those not emailed in last 4 days
+        import random
+        from datetime import timedelta
+        
+        four_days_ago = (datetime.now(timezone.utc) - timedelta(days=4)).isoformat()
+        
+        try:
+            # Get all eligible users (not emailed in last 4 days or never emailed)
+            users_query = supabase.table('founders').select(
+                'id, email, name'
+            ).eq('is_active', True).eq('is_deleted', False).eq(
+                'email_unsubscribed', False
+            ).or_(
+                f'last_campaign_email_at.is.null,last_campaign_email_at.lt.{four_days_ago}'
+            ).execute()
+        except Exception:
+            # Fallback without unsubscribe/timestamp filter
+            users_query = supabase.table('founders').select(
+                'id, email, name'
+            ).eq('is_active', True).eq('is_deleted', False).execute()
+        
+        all_eligible = users_query.data or []
+        
+        # Randomly select batch_size users
+        if len(all_eligible) > batch_size:
+            users_to_email = random.sample(all_eligible, batch_size)
+        else:
+            users_to_email = all_eligible
+        
+        if not users_to_email:
+            stats['message'] = 'No users in batch'
+            return stats
+        
+        # Send emails to each user in the batch
+        now = datetime.now(timezone.utc).isoformat()
+        
+        for user in users_to_email:
+            user_email = user.get('email')
+            user_name = user.get('name')
+            user_id = user.get('id')
+            
+            if not user_email:
+                stats['skipped_no_email'] += 1
+                continue
+            
+            # Send the campaign email
+            success = send_campaign_discovery_email(
+                to_email=user_email,
+                user_name=user_name,
+            )
+            
+            if success:
+                stats['emails_sent'] += 1
+                # Update last_campaign_email_at
+                try:
+                    supabase.table('founders').update({
+                        'last_campaign_email_at': now
+                    }).eq('id', user_id).execute()
+                except Exception as e:
+                    log_error(f"Failed to update last_campaign_email_at for {user_id}", error=e)
+            else:
+                stats['emails_failed'] += 1
+        
+        stats['message'] = f"Sent {stats['emails_sent']} campaign emails"
+        return stats
+        
+    except Exception as e:
+        log_error("Campaign email cron failed", error=e)
+        return {
+            'ok': False,
+            'error': str(e),
+            **stats
+        }
     
     # --- Original code below (kept for reference, not executed) ---
     supabase = get_supabase()

@@ -6238,19 +6238,14 @@ def send_weekly_projects_digest():
 @app.route('/api/cron/discovery-daily-digest', methods=['GET', 'POST'])
 def cron_discovery_daily_digest():
     """
-    DEPRECATED: Daily discovery feed has been removed.
+    Daily campaign email cron job.
     
-    Discovery now shows all projects to all users (no daily curation).
-    This endpoint is kept for backward compatibility but does nothing.
+    Sends "New projects are waiting" emails to a rotating batch of users.
+    - 25% of users per day (4-day cycle)
+    - Random selection from users not emailed in last 4 days
+    
+    Auth: header X-Cron-Secret must match env CRON_SECRET.
     """
-    # Discovery simplified - no longer using daily curated batches
-    return jsonify({
-        'ok': True,
-        'deprecated': True,
-        'message': 'Daily discovery digest is deprecated. Discovery now shows all projects to all users.',
-    }), 200
-    
-    # Legacy code below - kept for reference
     cron_secret = request.headers.get('X-Cron-Secret')
     expected_secret = os.getenv('CRON_SECRET')
 
@@ -6263,7 +6258,7 @@ def cron_discovery_daily_digest():
         http_code = 200 if result.get('ok') else 500
         return jsonify(result), http_code
     except Exception as e:
-        log_error("Cron discovery_daily_digest failed", error=e)
+        log_error("Cron campaign_email failed", error=e)
         return jsonify({"error": str(e)}), 500
 
 

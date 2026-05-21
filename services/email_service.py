@@ -769,3 +769,46 @@ def send_workspace_week_one_checkin_email(
         subject=f"📊 Week 1 with {partner_name} — how's it going?",
         html_body=_base_template(content, f"Your first week with {partner_name}")
     )
+
+
+def send_campaign_discovery_email(
+    to_email: str,
+    user_name: str,
+) -> bool:
+    """
+    Send campaign email encouraging user to check new projects in their feed.
+    Part of the rotating daily campaign system.
+    """
+    # Use first name only
+    first_name = (user_name or 'there').split()[0] if user_name else 'there'
+    
+    content = f'''
+        <h1 style="margin: 0 0 16px; font-size: 24px; font-weight: 600; color: #0f172a;">
+            New projects are waiting for you
+        </h1>
+        <p style="margin: 0 0 24px; font-size: 16px; color: #475569; line-height: 1.6;">
+            Hey {first_name}, new projects have been added to Guild Space that might be a great fit for your skills and interests.
+        </p>
+        <p style="margin: 0 0 24px; font-size: 16px; color: #475569; line-height: 1.6;">
+            Take a moment to explore and find your next opportunity to build something meaningful.
+        </p>
+        <table role="presentation" cellspacing="0" cellpadding="0" border="0">
+            <tr>
+                <td style="border-radius: 8px; background-color: #0d9488;">
+                    <a href="{FRONTEND_URL}/discover" 
+                       style="display: inline-block; padding: 14px 28px; font-size: 16px; font-weight: 600; color: #ffffff; text-decoration: none;">
+                        Discover Projects →
+                    </a>
+                </td>
+            </tr>
+        </table>
+        <p style="margin: 24px 0 0; font-size: 14px; color: #94a3b8;">
+            You're receiving this because you have an account on Guild Space.
+        </p>
+    '''
+    
+    return send_email(
+        to_email=to_email,
+        subject="🔍 New projects are waiting for you",
+        html_body=_base_template(content, "New projects match your profile on Guild Space")
+    )
