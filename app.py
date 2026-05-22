@@ -2432,16 +2432,12 @@ def advisor_profile_image():
         if not clerk_user_id:
             return jsonify({"error": "User ID required"}), 401
         
-        # Get advisor profile ID
+        # Get advisor profile ID by clerk_user_id (advisors don't require founders profile)
         supabase = get_supabase()
-        founder = supabase.table('founders').select('id').eq('clerk_user_id', clerk_user_id).execute()
-        if not founder.data:
-            return jsonify({"error": "User not found"}), 404
+        advisor = supabase.table('advisor_profiles').select('id').eq('clerk_user_id', clerk_user_id).execute()
         
-        founder_id = founder.data[0]['id']
-        advisor = supabase.table('advisor_profiles').select('id').eq('user_id', founder_id).execute()
         if not advisor.data:
-            return jsonify({"error": "Advisor profile not found"}), 404
+            return jsonify({"error": "Advisor profile not found. Please complete your profile setup first."}), 404
         
         advisor_profile_id = advisor.data[0]['id']
         
