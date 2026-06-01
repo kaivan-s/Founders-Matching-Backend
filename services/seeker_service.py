@@ -538,7 +538,21 @@ def _return_cached_results_with_scores(
             'max_applications_per_day': max_apps,
         }}
     
-    cached_set = set(project_ids[:max_visible])
+    # Get seeker's founder ID to check for skipped projects
+    founder = supabase.table('founders').select('id').eq('clerk_user_id', clerk_user_id).execute()
+    seeker_id = founder.data[0]['id'] if founder.data else None
+    
+    # Get skipped projects to filter them out from cached results
+    skipped_project_ids = set()
+    if seeker_id:
+        skipped_projects = supabase.table('swipes').select('project_id').eq(
+            'swiper_id', seeker_id
+        ).eq('swipe_type', 'left').execute()
+        skipped_project_ids = {s['project_id'] for s in (skipped_projects.data or []) if s.get('project_id')}
+    
+    # Filter out skipped projects from cached results
+    filtered_project_ids = [pid for pid in project_ids[:max_visible] if pid not in skipped_project_ids]
+    cached_set = set(filtered_project_ids)
     
     # Get insights status for all cached projects
     projects_with_insights = _get_projects_with_insights(supabase, project_ids[:max_visible])
