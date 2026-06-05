@@ -410,8 +410,8 @@ def check_project_limit(clerk_user_id: str) -> tuple[bool, int, int]:
     if max_projects == "UNLIMITED":
         return (True, 0, -1)  # -1 means unlimited
     
-    # Count existing projects
-    projects = supabase.table('projects').select('id', count='exact').eq('founder_id', founder_id).execute()
+    # Count existing non-deleted projects
+    projects = supabase.table('projects').select('id', count='exact').eq('founder_id', founder_id).neq('is_deleted', True).execute()
     current_count = projects.count if projects.count is not None else 0
     
     can_create = current_count < max_projects

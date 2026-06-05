@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from config.database import get_supabase
 
 def get_user_projects(clerk_user_id):
-    """Get all projects for a user"""
+    """Get all non-deleted projects for a user"""
     supabase = get_supabase()
     
     # Get founder ID
@@ -14,8 +14,8 @@ def get_user_projects(clerk_user_id):
     
     founder_id = founder.data[0]['id']
     
-    # Get all projects for this founder
-    projects = supabase.table('projects').select('*').eq('founder_id', founder_id).order('display_order').execute()
+    # Get all non-deleted projects for this founder
+    projects = supabase.table('projects').select('*').eq('founder_id', founder_id).neq('is_deleted', True).order('display_order').execute()
     return projects.data if projects.data else []
 
 def create_project(clerk_user_id, data):
@@ -174,18 +174,31 @@ def delete_project(clerk_user_id, project_id):
     """Soft delete a project and clean up related data"""
     supabase = get_supabase()
     
-    # Verify project belongs to user
-    project = supabase.table('projects').select('founder_id, founders!inner(clerk_user_id)').eq('id', project_id).execute()
+    # Get founder ID for the current user
+    founder = supabase.table('founders').select('id').eq('clerk_user_id', clerk_user_id).execute()
+    if not founder.data:
+        raise ValueError("Profile not found")
+    
+    founder_id = founder.data[0]['id']
+    
+    # Verify project exists and belongs to the current user
+    project = supabase.table('projects').select('id, founder_id').eq('id', project_id).execute()
     if not project.data:
         raise ValueError("Project not found")
     
+    if project.data[0]['founder_id'] != founder_id:
+        raise ValueError("You don't have permission to delete this project")
+    
     # Soft delete project (triggers will handle cleanup)
-    supabase.table('projects').update({
+    result = supabase.table('projects').update({
         'is_deleted': True,
         'deleted_at': datetime.now(timezone.utc).isoformat(),
         'seeking_cofounder': False,
         'is_active': False
-    }).eq('id', project_id).execute()
+    }).eq('id', project_id).eq('founder_id', founder_id).execute()
+    
+    if not result.data:
+        raise ValueError("Failed to delete project")
     
     # Auto-reject pending right swipes for this project
     try:
