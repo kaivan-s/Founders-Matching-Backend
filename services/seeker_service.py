@@ -428,6 +428,10 @@ def search_projects_for_seeker(
     can_apply, apps_sent_today, max_apps = plan_service.check_connect_limit(clerk_user_id)
     apps_remaining = max(0, max_apps - apps_sent_today) if max_apps != -1 else -1  # -1 means unlimited
     
+    # Get remaining swipes/browses for the day
+    can_swipe, swipes_today, max_swipes = plan_service.check_discovery_limit(clerk_user_id)
+    swipes_remaining = max(0, max_swipes - swipes_today) if max_swipes != -1 else -1  # -1 means unlimited
+    
     discovery_meta: Dict[str, Any] = {
         'total_available': len(ranked),
         'returned_count': len(formatted),
@@ -438,6 +442,10 @@ def search_projects_for_seeker(
         'applications_remaining': apps_remaining,
         'applications_sent_today': apps_sent_today,
         'max_applications_per_day': max_apps,
+        'swipes_remaining': swipes_remaining,
+        'swipes_today': swipes_today,
+        'max_swipes_per_day': max_swipes,
+        'all_exhausted': len(ranked) == 0,
     }
     
     _save_search_history(seeker_id, validated, len(formatted))
@@ -990,6 +998,12 @@ def apply_to_project(
     except Exception:
         pass
     
+    # Record in swipe_history for daily limit tracking (right swipe = application)
+    try:
+        plan_service.record_swipe_in_history(clerk_user_id, 'right', project_id)
+    except Exception:
+        pass
+    
     return result.data[0]
 
 
@@ -1087,7 +1101,22 @@ def skip_project(clerk_user_id: str, project_id: str) -> Dict[str, str]:
     """
     Skip a project in discovery (left swipe).
     The project will not appear in future discovery results.
+    Enforces daily swipe limits for FREE users.
     """
+    from services import plan_service
+    
+    # Check daily swipe limit before allowing the skip
+    can_swipe, current_count, max_allowed = plan_service.check_discovery_limit(clerk_user_id)
+    if not can_swipe:
+        plan = plan_service.get_founder_plan(clerk_user_id)
+        if plan.get('id') == 'FREE':
+            raise ValueError(
+                f"Daily browse limit reached ({current_count}/{max_allowed}). "
+                "Upgrade to Pro for unlimited browsing."
+            )
+        else:
+            raise ValueError(f"Daily browse limit reached ({current_count}/{max_allowed}).")
+    
     supabase = get_supabase()
     
     # Get seeker's founder ID
@@ -1115,13 +1144,16 @@ def skip_project(clerk_user_id: str, project_id: str) -> Dict[str, str]:
     if existing.data:
         return {"message": "Already skipped"}
     
-    # Record the skip (left swipe)
+    # Record the skip (left swipe) in both tables
     supabase.table('swipes').insert({
         'swiper_id': seeker_id,
         'swiped_id': project_founder_id,
         'project_id': project_id,
         'swipe_type': 'left',
     }).execute()
+    
+    # Record in swipe_history for daily limit tracking
+    plan_service.record_swipe_in_history(clerk_user_id, 'left', project_id)
     
     return {"message": "Project skipped"}
 

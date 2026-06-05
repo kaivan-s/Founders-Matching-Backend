@@ -13,28 +13,30 @@ FOUNDER_PLANS: Dict[FounderPlan, Dict[str, Any]] = {
         "monthlyPriceUSD": 0,
         "yearlyPriceUSD": 0,
         "maxWorkspacesCreated": 1,  # Can create 1 workspace
-        "maxWorkspacesJoined": "UNLIMITED",  # Can join unlimited (for virality)
+        "maxWorkspacesJoined": 2,  # Can join up to 2 workspaces total
         "maxProjects": 1,  # 1 project lifetime
         "discovery": {
-            "maxSwipesPerDay": "UNLIMITED",  # Browsing is unlimited
+            "maxSwipesPerDay": 10,  # Limited browsing to create urgency
             "maxConnectsPerDay": 1,  # 1 application per day
-            "maxProjectsVisible": 5,  # FREE users see top 5 matches
+            "maxProjectsVisible": 3,  # FREE users see only top 3 matches
         },
         "workspaceFeatures": {
-            "equityFull": True,  # All workspace features included
-            "kpiFull": True,
-            "decisionsFull": True,
+            "equityFull": False,  # Basic equity only - no scenarios
+            "kpiFull": False,  # Basic KPIs only
+            "decisionsFull": False,  # View only, no voting
             "weeklyCheckins": True,
             "notifications": True,
-            "slackIntegration": True,
-            "notionIntegration": True,
-            "summaryDashboard": True,
+            "slackIntegration": False,  # No integrations for free
+            "notionIntegration": False,
+            "summaryDashboard": False,  # No AI summary
         },
         "accountability": {
             "canBrowseMarketplace": False,  # No advisor access for Free
             "canBookAdvisor": False,
         },
         "postMatchSupport": False,
+        "canRevisitSkipped": False,  # Cannot revisit passed opportunities
+        "aiInsightsPerMonth": 0,  # No AI insights
     },
     "PRO": {
         "id": "PRO",
@@ -63,6 +65,8 @@ FOUNDER_PLANS: Dict[FounderPlan, Dict[str, Any]] = {
             "canBookAdvisor": True,        # Pay-per-session directly to advisor
         },
         "postMatchSupport": False,
+        "canRevisitSkipped": True,  # Can revisit passed opportunities
+        "aiInsightsPerMonth": 3,  # 3 AI insights per month
     },
     "PRO_PLUS": {
         "id": "PRO_PLUS",
@@ -91,6 +95,8 @@ FOUNDER_PLANS: Dict[FounderPlan, Dict[str, Any]] = {
             "canBookAdvisor": True,
         },
         "postMatchSupport": True,  # 30 days of moderated support
+        "canRevisitSkipped": True,  # Can revisit passed opportunities
+        "aiInsightsPerMonth": 10,  # 10 AI insights per month
     },
 }
 
@@ -415,8 +421,9 @@ def check_project_limit(clerk_user_id: str) -> tuple[bool, int, int]:
 
 def check_discovery_limit(clerk_user_id: str) -> tuple[bool, int, int]:
     """
-    Check if user can perform more discovery swipes.
+    Check if user can perform more discovery swipes (browsing).
     Uses daily limits for FREE tier, unlimited for paid tiers.
+    Counts ALL swipes (left + right) to limit browsing behavior.
     Returns: (can_swipe, current_count, max_allowed)
     """
     founder_id = _get_founder_id(clerk_user_id)
@@ -435,8 +442,8 @@ def check_discovery_limit(clerk_user_id: str) -> tuple[bool, int, int]:
         now = datetime.now(timezone.utc)
         today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
         
-        # Count right swipes today from swipe_history table
-        swipe_count_result = supabase.table('swipe_history').select('id', count='exact').eq('user_id', founder_id).eq('swipe_type', 'right').gte('swipe_date', today_start.isoformat()).execute()
+        # Count ALL swipes today (left + right) to limit browsing
+        swipe_count_result = supabase.table('swipe_history').select('id', count='exact').eq('user_id', founder_id).gte('swipe_date', today_start.isoformat()).execute()
         
         current_count = swipe_count_result.count if swipe_count_result.count is not None else 0
         can_swipe = current_count < max_swipes_per_day
