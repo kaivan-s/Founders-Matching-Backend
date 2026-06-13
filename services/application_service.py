@@ -221,7 +221,7 @@ def respond_to_application(
     application = supabase.table('applications').select(
         '''*, 
         applicant:founders!applicant_id(id, name, email),
-        project:projects!project_id(id, title, seeking_cofounder)'''
+        project:projects!project_id(id, title, seeking_cofounder, is_deleted)'''
     ).eq('id', application_id).eq('project_owner_id', owner_id).execute()
     
     if not application.data:
@@ -236,6 +236,9 @@ def respond_to_application(
     project = app.get('project') or {}
     applicant_id = applicant.get('id')
     project_id = project.get('id')
+    
+    if project.get('is_deleted'):
+        raise ValueError("This project has been deleted")
     
     if not project.get('seeking_cofounder'):
         raise ValueError("This project is no longer seeking a co-founder")
