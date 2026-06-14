@@ -37,7 +37,8 @@ def get_applications_for_owner(clerk_user_id: str) -> Dict[str, Any]:
         applicant:founders!applicant_id(
             id, name, email, profile_picture_url, headline, bio, 
             location, skills, linkedin_url, linkedin_verified, github_verified,
-            interests, expertise_details, work_preferences, looking_for_description
+            interests, expertise_details, work_preferences, looking_for_description,
+            plan
         ),
         project:projects!project_id(id, title, stage, genre)'''
     ).eq('project_owner_id', owner_id).order('created_at', desc=True).execute()
@@ -63,6 +64,9 @@ def get_applications_for_owner(clerk_user_id: str) -> Dict[str, Any]:
         applicant = app.get('applicant') or {}
         verification = _compute_verification(applicant)
         
+        applicant_plan = applicant.get('plan', 'FREE')
+        is_pro_applicant = applicant_plan in ('PRO', 'PRO_PLUS')
+        
         formatted_app = {
             'id': app['id'],
             'status': app['status'],
@@ -73,6 +77,7 @@ def get_applications_for_owner(clerk_user_id: str) -> Dict[str, Any]:
             'question_answers': app.get('question_answers', {}),
             'video_intro_url': app.get('video_intro_url'),
             'voice_intro_url': app.get('voice_intro_url'),
+            'is_pro_applicant': is_pro_applicant,  # Pro badge: shows seriousness
             'applicant': {
                 'id': applicant.get('id'),
                 'name': applicant.get('name'),
@@ -87,6 +92,7 @@ def get_applications_for_owner(clerk_user_id: str) -> Dict[str, Any]:
                 'work_preferences': applicant.get('work_preferences', {}),
                 'looking_for_description': applicant.get('looking_for_description'),
                 'verification': verification,
+                'plan': applicant_plan,
             }
         }
         
@@ -146,6 +152,8 @@ def get_application_detail(clerk_user_id: str, application_id: str) -> Dict[str,
     ).eq('founder_id', applicant.get('id')).eq('is_active', True).limit(5).execute()
     
     verification = _compute_verification(applicant)
+    applicant_plan = applicant.get('plan', 'FREE')
+    is_pro_applicant = applicant_plan in ('PRO', 'PRO_PLUS')
     
     return {
         'id': app['id'],
@@ -157,6 +165,7 @@ def get_application_detail(clerk_user_id: str, application_id: str) -> Dict[str,
         'question_answers': app.get('question_answers', {}),
         'video_intro_url': app.get('video_intro_url'),
         'voice_intro_url': app.get('voice_intro_url'),
+        'is_pro_applicant': is_pro_applicant,  # Pro badge consistency with list view
         'project': project,
         'applicant': {
             'id': applicant.get('id'),
@@ -177,6 +186,7 @@ def get_application_detail(clerk_user_id: str, application_id: str) -> Dict[str,
             'looking_for_description': applicant.get('looking_for_description'),
             'past_projects': applicant.get('past_projects'),
             'verification': verification,
+            'plan': applicant_plan,
             'projects': applicant_projects.data if applicant_projects.data else [],
         }
     }

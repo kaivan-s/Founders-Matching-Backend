@@ -188,9 +188,29 @@ def _send_discovery_daily_digest_email(seeker_record: Dict[str, Any]) -> bool:
         return False
 
 
-def _format_discovery_match(score: int, match_reasons: List[str], project: Dict[str, Any], has_insights: bool = False) -> Dict[str, Any]:
+def _format_discovery_match(
+    score: int, 
+    match_reasons: List[str], 
+    project: Dict[str, Any], 
+    has_insights: bool = False,
+    user_plan: str = 'FREE'
+) -> Dict[str, Any]:
+    """
+    Format a project for discovery results.
+    
+    Match reasons are gated by plan:
+    - FREE: Only see match_score, match_reasons is empty (teases "Unlock with Pro")
+    - PRO/PRO_PLUS: Full match_reasons visible
+    """
     founder = project.get('founder') or {}
     verification = _compute_verification_info(founder)
+    
+    # Gate match reasons - FREE users only see the score, not WHY they match
+    # Handle None case safely
+    match_reasons = match_reasons or []
+    visible_reasons = match_reasons if user_plan != 'FREE' else []
+    reasons_locked = user_plan == 'FREE' and len(match_reasons) > 0
+    
     return {
         'id': project['id'],
         'title': project.get('title', 'Untitled Project'),
@@ -210,9 +230,12 @@ def _format_discovery_match(score: int, match_reasons: List[str], project: Dict[
             'skills': founder.get('skills', []),
             'linkedin_url': founder.get('linkedin_url'),
             'verification': verification,
+            'plan': founder.get('plan', 'FREE'),  # Include founder's plan for Pro badge
         },
         'match_score': score,
-        'match_reasons': match_reasons,
+        'match_reasons': visible_reasons,
+        'match_reasons_locked': reasons_locked,  # Frontend shows "Unlock with Pro" when true
+        'match_reasons_count': len(match_reasons),  # Tease: "3 reasons why you match"
         'has_insights': has_insights,
     }
 
@@ -229,6 +252,7 @@ def _build_matches_from_ordered_ids(
     matched_project_ids: set,
     batch_cap: int,
     projects_with_insights: Optional[set] = None,
+    user_plan: str = 'FREE',
 ) -> Tuple[List[Dict[str, Any]], List[str]]:
     """
     Hydrate formatted matches preserving order where possible.
@@ -257,7 +281,7 @@ def _build_matches_from_ordered_ids(
         if score <= 0:
             return False
         has_insights = project_dict['id'] in projects_with_insights
-        formatted.append(_format_discovery_match(score, reasons, project_dict, has_insights=has_insights))
+        formatted.append(_format_discovery_match(score, reasons, project_dict, has_insights=has_insights, user_plan=user_plan))
         used.add(project_dict['id'])
         return True
     
@@ -344,7 +368,7 @@ def get_skipped_projects(
         if project_id in skipped_ids:
             has_insights = project_id in projects_with_insights
             skipped_matches.append(
-                _format_discovery_match(row['score'], row['match_reasons'], row['project'], has_insights=has_insights)
+                _format_discovery_match(row['score'], row['match_reasons'], row['project'], has_insights=has_insights, user_plan=plan_id)
             )
     
     return {
@@ -416,7 +440,7 @@ def search_projects_for_seeker(
     formatted: List[Dict[str, Any]] = []
     for row in ranked[:batch_cap]:
         has_insights = row['project']['id'] in projects_with_insights
-        formatted.append(_format_project_match(row, has_insights=has_insights))
+        formatted.append(_format_project_match(row, has_insights=has_insights, user_plan=user_plan))
     
     # For FREE users, cache today's results
     is_free_user = user_plan == 'FREE'
@@ -452,12 +476,24 @@ def search_projects_for_seeker(
     return {'matches': formatted, 'discovery': discovery_meta}
 
 
-def _format_project_match(row: Dict, has_insights: bool = False) -> Dict[str, Any]:
-    """Format a ranked project row into the match response format."""
+def _format_project_match(row: Dict, has_insights: bool = False, user_plan: str = 'FREE') -> Dict[str, Any]:
+    """
+    Format a ranked project row into the match response format.
+    
+    Match reasons are gated by plan:
+    - FREE: Only see match_score, match_reasons is empty (teases "Unlock with Pro")
+    - PRO/PRO_PLUS: Full match_reasons visible
+    """
     project = row['project']
     founder = project.get('founder') or {}
     verification = _compute_verification_info(founder)
     founder_plan = founder.get('plan', 'FREE')
+    
+    match_reasons = row.get('match_reasons', [])
+    
+    # Gate match reasons - FREE users only see the score, not WHY they match
+    visible_reasons = match_reasons if user_plan != 'FREE' else []
+    reasons_locked = user_plan == 'FREE' and len(match_reasons) > 0
     
     return {
         'id': project['id'],
@@ -481,7 +517,9 @@ def _format_project_match(row: Dict, has_insights: bool = False) -> Dict[str, An
             'plan': founder_plan,
         },
         'match_score': row['score'],
-        'match_reasons': row['match_reasons'],
+        'match_reasons': visible_reasons,
+        'match_reasons_locked': reasons_locked,  # Frontend shows "Unlock with Pro" when true
+        'match_reasons_count': len(match_reasons),  # Tease: "3 reasons why you match"
         'has_insights': has_insights,
     }
 
@@ -571,7 +609,7 @@ def _return_cached_results_with_scores(
         project_id = row['project']['id']
         if project_id in cached_set:
             has_insights = project_id in projects_with_insights
-            formatted.append(_format_project_match(row, has_insights=has_insights))
+            formatted.append(_format_project_match(row, has_insights=has_insights, user_plan=user_plan))
             cached_set.discard(project_id)
     
     # For any cached projects not in ranked (e.g., became inactive or stopped seeking), fetch from DB
@@ -584,6 +622,7 @@ def _return_cached_results_with_scores(
             founder = project.get('founders') or {}
             verification = _compute_verification_info(founder)
             has_insights = project['id'] in projects_with_insights
+            # Since this is for cached results (FREE users), match_reasons are locked
             formatted.append({
                 'id': project['id'],
                 'title': project.get('title', 'Untitled Project'),
@@ -606,7 +645,9 @@ def _return_cached_results_with_scores(
                     'plan': founder.get('plan', 'FREE'),
                 },
                 'match_score': 0,
-                'match_reasons': [],
+                'match_reasons': [],  # Locked for FREE users
+                'match_reasons_locked': True,
+                'match_reasons_count': 0,
                 'has_insights': has_insights,
             })
     
@@ -1407,3 +1448,206 @@ def _notify_application_received(
             log_error("Failed to send application email", error=e)
     else:
         print("[NOTIFY] SKIP: No owner_email provided")
+
+
+def get_project_preview_for_seeker(clerk_user_id: str, project_id: str) -> Dict[str, Any]:
+    """
+    Get a pre-apply project snapshot for Pro users.
+    
+    This gives seekers insights BEFORE they apply:
+    - Founder activity level
+    - Application response rate
+    - Competition level (how many others applying)
+    - Project freshness
+    
+    Only available to PRO/PRO_PLUS users.
+    """
+    from services import plan_service
+    from datetime import datetime, timezone, timedelta
+    
+    # Check plan - only Pro users can access
+    plan_config = plan_service.get_founder_plan(clerk_user_id)
+    user_plan = plan_config.get('id', 'FREE')
+    
+    if user_plan == 'FREE':
+        return {
+            'accessible': False,
+            'message': 'Upgrade to Pro to see project insights before applying',
+            'preview_locked': True,
+        }
+    
+    supabase = get_supabase()
+    
+    # Get project and founder info
+    project = supabase.table('projects').select(
+        'id, title, created_at, founder_id, is_active, seeking_cofounder, is_deleted'
+    ).eq('id', project_id).execute()
+    
+    if not project.data:
+        raise ValueError("Project not found")
+    
+    project_data = project.data[0]
+    
+    # Validate project is active and visible
+    if project_data.get('is_deleted'):
+        raise ValueError("Project not found")
+    if not project_data.get('is_active') or not project_data.get('seeking_cofounder'):
+        return {
+            'accessible': False,
+            'message': 'This project is no longer seeking co-founders',
+            'preview_locked': False,
+        }
+    
+    founder_id = project_data['founder_id']
+    
+    # Get founder's last activity
+    founder = supabase.table('founders').select(
+        'id, updated_at, created_at'
+    ).eq('id', founder_id).execute()
+    
+    founder_data = founder.data[0] if founder.data else {}
+    
+    # Get application stats for this project
+    app_stats = supabase.table('applications').select(
+        'id, status, created_at, responded_at'
+    ).eq('project_id', project_id).execute()
+    
+    apps = app_stats.data or []
+    pending_apps = len([a for a in apps if a['status'] == 'pending'])
+    accepted_apps = len([a for a in apps if a['status'] == 'accepted'])
+    rejected_apps = len([a for a in apps if a['status'] == 'rejected'])
+    withdrawn_apps = len([a for a in apps if a['status'] == 'withdrawn'])
+    
+    # Calculate response rate (exclude withdrawn - owner couldn't respond to those)
+    responded_apps = accepted_apps + rejected_apps
+    actionable_apps = len(apps) - withdrawn_apps  # Apps the owner could respond to
+    response_rate = (responded_apps / actionable_apps * 100) if actionable_apps > 0 else None
+    
+    # Calculate average response time (for responded applications)
+    response_times = []
+    for app in apps:
+        if app.get('responded_at') and app.get('created_at'):
+            try:
+                created = datetime.fromisoformat(app['created_at'].replace('Z', '+00:00'))
+                responded = datetime.fromisoformat(app['responded_at'].replace('Z', '+00:00'))
+                diff_hours = (responded - created).total_seconds() / 3600
+                response_times.append(diff_hours)
+            except:
+                pass
+    
+    avg_response_hours = sum(response_times) / len(response_times) if response_times else None
+    
+    # Determine competition level (use ranges to protect privacy)
+    if pending_apps == 0:
+        competition_level = 'low'
+        competition_label = 'No other applicants'
+    elif pending_apps <= 2:
+        competition_level = 'low'
+        competition_label = 'Low competition'
+    elif pending_apps <= 5:
+        competition_level = 'medium'
+        competition_label = 'Moderate competition'
+    else:
+        competition_level = 'high'
+        competition_label = 'High competition'
+    
+    # Determine founder activity
+    now = datetime.now(timezone.utc)
+    try:
+        project_created = datetime.fromisoformat(project_data['created_at'].replace('Z', '+00:00')) if project_data.get('created_at') else now
+        project_age_days = (now - project_created).days
+    except (ValueError, TypeError):
+        project_age_days = 30  # Default to old-ish project if date parsing fails
+    
+    # Check recent application responses as activity indicator
+    recent_responses = [a for a in apps if a.get('responded_at')]
+    days_since_response = None
+    if recent_responses:
+        try:
+            latest_response = max(
+                datetime.fromisoformat(a['responded_at'].replace('Z', '+00:00')) 
+                for a in recent_responses
+            )
+            days_since_response = (now - latest_response).days
+        except (ValueError, TypeError):
+            pass  # Leave days_since_response as None
+    
+    if days_since_response is not None and days_since_response <= 3:
+        activity_level = 'high'
+        activity_label = 'Very active founder'
+    elif days_since_response is not None and days_since_response <= 7:
+        activity_level = 'medium'
+        activity_label = 'Active this week'
+    elif project_age_days <= 14:
+        activity_level = 'medium'
+        activity_label = 'New project'
+    else:
+        activity_level = 'low'
+        activity_label = 'No recent activity'
+    
+    # Format response time
+    if avg_response_hours is not None:
+        if avg_response_hours < 24:
+            response_time_label = f'~{int(avg_response_hours)}h avg response'
+        else:
+            response_time_label = f'~{int(avg_response_hours/24)}d avg response'
+    else:
+        response_time_label = 'No response data yet'
+    
+    # Format response rate
+    if response_rate is not None:
+        if response_rate >= 80:
+            response_rate_level = 'high'
+        elif response_rate >= 50:
+            response_rate_level = 'medium'
+        else:
+            response_rate_level = 'low'
+        response_rate_label = f'{int(response_rate)}% response rate'
+    else:
+        response_rate_level = 'unknown'
+        # More accurate label based on project age
+        if project_age_days <= 14:
+            response_rate_label = 'New project'
+        else:
+            response_rate_label = 'No application data'
+    
+    return {
+        'accessible': True,
+        'preview_locked': False,
+        'project_id': project_id,
+        'metrics': {
+            'competition': {
+                'level': competition_level,
+                'label': competition_label,
+                # Note: exact count hidden for privacy
+            },
+            'activity': {
+                'level': activity_level,
+                'label': activity_label,
+            },
+            'response_rate': {
+                'level': response_rate_level,
+                'label': response_rate_label,
+            },
+            'response_time': {
+                'label': response_time_label,
+            },
+        },
+        'summary': _generate_preview_summary(activity_level, competition_level, response_rate_level),
+    }
+
+
+def _generate_preview_summary(activity: str, competition: str, response_rate: str) -> str:
+    """Generate a human-readable summary of the project preview."""
+    if activity == 'high' and response_rate in ('high', 'medium'):
+        if competition == 'low':
+            return "Great opportunity - Active founder, low competition"
+        return "Active founder - Worth applying despite competition"
+    elif activity == 'low':
+        if competition == 'low':
+            return "Low activity - May take time to get a response"
+        return "Consider carefully - Low activity, high competition"
+    elif competition == 'high':
+        return "Competitive - Stand out with a strong application"
+    else:
+        return "Good opportunity - Moderate activity and competition"

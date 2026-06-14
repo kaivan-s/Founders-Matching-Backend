@@ -288,6 +288,35 @@ def seeker_skip_project(project_id):
         return jsonify({"error": sanitize_error_for_user(e)}), 500
 
 
+@app.route('/api/seeker/project/<project_id>/preview', methods=['GET'])
+def seeker_project_preview(project_id):
+    """
+    Get pre-apply project insights for Pro users.
+    
+    Returns project health metrics before applying:
+    - Competition level (pending applications)
+    - Founder activity level
+    - Response rate and time
+    
+    PRO/PRO_PLUS only. FREE users get a locked response.
+    """
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        from services import seeker_service
+        
+        result = seeker_service.get_project_preview_for_seeker(clerk_user_id, project_id)
+        return jsonify(result), 200
+        
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        log_error("Error getting project preview", error=e)
+        return jsonify({"error": sanitize_error_for_user(e)}), 500
+
+
 # ============================================
 # OWNER FLOW - "I have a project"
 # Application management for project owners
