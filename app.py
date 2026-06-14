@@ -1464,7 +1464,7 @@ def get_matches():
 
 @app.route('/api/matches/<match_id>', methods=['DELETE', 'OPTIONS'])
 def delete_match(match_id):
-    """Remove a match (unmatch)"""
+    """Remove a match (unmatch) - now uses safe dissolution flow with cooling-off period"""
     if request.method == 'OPTIONS':
         return '', 200
     
@@ -1479,6 +1479,93 @@ def delete_match(match_id):
         return jsonify({"error": str(e)}), 404
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+# ==================== Dissolution API Routes ====================
+
+@app.route('/api/matches/<match_id>/dissolution', methods=['POST'])
+@limiter.limit(RATE_LIMITS['standard'])
+def request_dissolution(match_id):
+    """
+    Request dissolution of a match/workspace partnership.
+    Starts a 7-day cooling-off period. Partner can confirm immediately or wait.
+    """
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        data = request.get_json() or {}
+        reason = data.get('reason')
+        
+        result = match_service.request_dissolution(clerk_user_id, match_id, reason)
+        return jsonify(result), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        log_error("Error requesting dissolution", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/matches/<match_id>/dissolution', methods=['GET'])
+@limiter.limit(RATE_LIMITS['standard'])
+def get_dissolution_status(match_id):
+    """Get the current dissolution status for a match."""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        result = match_service.get_dissolution_status(clerk_user_id, match_id)
+        return jsonify(result), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 404
+    except Exception as e:
+        log_error("Error getting dissolution status", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/matches/<match_id>/dissolution/confirm', methods=['POST'])
+@limiter.limit(RATE_LIMITS['standard'])
+def confirm_dissolution(match_id):
+    """
+    Confirm a pending dissolution request (by the non-requesting party).
+    This immediately completes the dissolution and archives the workspace.
+    """
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        result = match_service.confirm_dissolution(clerk_user_id, match_id)
+        return jsonify(result), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        log_error("Error confirming dissolution", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/matches/<match_id>/dissolution/cancel', methods=['POST'])
+@limiter.limit(RATE_LIMITS['standard'])
+def cancel_dissolution(match_id):
+    """
+    Cancel a pending dissolution request (by the requester only).
+    Only works during the cooling-off period.
+    """
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        result = match_service.cancel_dissolution_request(clerk_user_id, match_id)
+        return jsonify(result), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        log_error("Error cancelling dissolution", error=e)
+        return jsonify({"error": str(e)}), 500
+
 
 @app.route('/api/likes', methods=['GET'])
 def get_likes():
@@ -6279,6 +6366,29 @@ def cron_workspace_week_one_checkins():
         return jsonify(result), 200
     except Exception as e:
         log_error("Cron workspace_week_one_checkins failed", error=e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/cron/process-dissolution-requests', methods=['GET', 'POST'])
+def cron_process_dissolution_requests():
+    """
+    Process expired dissolution requests (auto-complete after 7-day cooling-off).
+    
+    This should be triggered by a daily cron job.
+    
+    Auth: header X-Cron-Secret must match env CRON_SECRET.
+    """
+    cron_secret = request.headers.get('X-Cron-Secret')
+    expected_secret = os.getenv('CRON_SECRET')
+    
+    if not expected_secret or cron_secret != expected_secret:
+        return jsonify({"error": "Unauthorized"}), 401
+    
+    try:
+        result = match_service.process_expired_dissolution_requests()
+        return jsonify(result), 200
+    except Exception as e:
+        log_error("Cron process_dissolution_requests failed", error=e)
         return jsonify({"error": str(e)}), 500
 
 

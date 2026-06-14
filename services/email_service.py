@@ -812,3 +812,83 @@ def send_campaign_discovery_email(
         subject="🔍 New projects are waiting for you",
         html_body=_base_template(content, "New projects match your profile on Guild Space")
     )
+
+
+def send_dissolution_request_email(
+    to_email: str,
+    user_name: str,
+    requester_name: str,
+    workspace_id: str,
+    cooloff_ends_at,
+    reason: str = None
+) -> bool:
+    """
+    Send email when a co-founder requests partnership dissolution.
+    """
+    first_name = (user_name or 'there').split()[0] if user_name else 'there'
+    
+    # Format the date
+    if hasattr(cooloff_ends_at, 'strftime'):
+        end_date = cooloff_ends_at.strftime('%B %d, %Y')
+    else:
+        end_date = str(cooloff_ends_at)[:10] if cooloff_ends_at else 'soon'
+    
+    reason_block = ""
+    if reason:
+        reason_block = f'''
+        <div style="background: #fef3c7; border-radius: 8px; padding: 16px; margin: 0 0 24px;">
+            <p style="margin: 0; font-size: 14px; color: #92400e;">
+                <strong>Their reason:</strong> {reason}
+            </p>
+        </div>
+        '''
+    
+    content = f'''
+        <h1 style="margin: 0 0 16px; font-size: 24px; font-weight: 600; color: #0f172a;">
+            {requester_name} has requested to end your partnership
+        </h1>
+        <p style="margin: 0 0 24px; font-size: 16px; color: #475569; line-height: 1.6;">
+            Hey {first_name}, your co-founder has requested to dissolve your partnership. 
+            This doesn't happen immediately — you have time to talk things through.
+        </p>
+        
+        {reason_block}
+        
+        <div style="background: #f1f5f9; border-radius: 8px; padding: 20px; margin: 0 0 24px;">
+            <h3 style="margin: 0 0 12px; font-size: 16px; font-weight: 600; color: #0f172a;">
+                What happens next?
+            </h3>
+            <ul style="margin: 0; padding-left: 20px; color: #475569; line-height: 1.8;">
+                <li>You have until <strong>{end_date}</strong> to respond</li>
+                <li>You can <strong>confirm</strong> to end the partnership immediately</li>
+                <li>Or wait — the partnership will automatically end on {end_date}</li>
+                <li>Your workspace data will be <strong>preserved</strong> in read-only mode</li>
+            </ul>
+        </div>
+        
+        <p style="margin: 0 0 24px; font-size: 16px; color: #475569; line-height: 1.6;">
+            We encourage you to have a conversation with {requester_name} before deciding. 
+            Many partnerships can be saved with open communication.
+        </p>
+        
+        <table role="presentation" cellspacing="0" cellpadding="0" border="0">
+            <tr>
+                <td style="border-radius: 8px; background-color: #0d9488;">
+                    <a href="{FRONTEND_URL}/workspaces/{workspace_id}" 
+                       style="display: inline-block; padding: 14px 28px; font-size: 16px; font-weight: 600; color: #ffffff; text-decoration: none;">
+                        View Workspace →
+                    </a>
+                </td>
+            </tr>
+        </table>
+        
+        <p style="margin: 24px 0 0; font-size: 14px; color: #94a3b8;">
+            Need help mediating? Reply to this email and we can connect you with an advisor.
+        </p>
+    '''
+    
+    return send_email(
+        to_email=to_email,
+        subject=f"⚠️ {requester_name} has requested to end your partnership",
+        html_body=_base_template(content, "Partnership dissolution request")
+    )

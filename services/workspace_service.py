@@ -53,12 +53,19 @@ def _get_founder_id(clerk_user_id, email=None):
     
     return founder_id
 
-def _verify_workspace_access(clerk_user_id, workspace_id, allowed_roles=None):
+def _verify_workspace_access(clerk_user_id, workspace_id, allowed_roles=None, require_write=False):
     """Verify that the user is a participant in the workspace
     allowed_roles: list of roles allowed (None means any role is allowed)
+    require_write: if True, fails for archived workspaces (they're read-only)
     """
     founder_id = _get_founder_id(clerk_user_id)
     supabase = get_supabase()
+    
+    # Check if workspace is archived (requires write access to fail)
+    if require_write:
+        workspace = supabase.table('workspaces').select('is_archived').eq('id', workspace_id).execute()
+        if workspace.data and workspace.data[0].get('is_archived'):
+            raise ValueError("This workspace has been archived and is read-only. No changes can be made.")
     
     # Try to select role column, but handle case where it might not exist yet
     try:
@@ -81,10 +88,22 @@ def _verify_workspace_access(clerk_user_id, workspace_id, allowed_roles=None):
     
     return founder_id
 
+
+def is_workspace_archived(workspace_id: str) -> bool:
+    """Check if a workspace is archived (read-only)."""
+    supabase = get_supabase()
+    workspace = supabase.table('workspaces').select('is_archived').eq('id', workspace_id).execute()
+    return workspace.data and workspace.data[0].get('is_archived', False)
+
 def _can_edit_workspace(clerk_user_id, workspace_id):
-    """Check if user can edit workspace (not ADVISOR)"""
+    """Check if user can edit workspace (not ADVISOR and not archived)"""
     founder_id = _get_founder_id(clerk_user_id)
     supabase = get_supabase()
+    
+    # Check if workspace is archived (read-only)
+    workspace = supabase.table('workspaces').select('is_archived').eq('id', workspace_id).execute()
+    if workspace.data and workspace.data[0].get('is_archived'):
+        raise ValueError("This workspace has been archived and is read-only. No changes can be made.")
     
     # Try to select role column, but handle case where it might not exist yet
     try:
@@ -311,7 +330,11 @@ def list_user_workspaces(clerk_user_id):
             'created_at': workspace.get('created_at'),
             'project': project,
             'match_id': workspace.get('match_id'),
-            'other_founder': other_founder
+            'other_founder': other_founder,
+            'is_archived': workspace.get('is_archived', False),
+            'archived_at': workspace.get('archived_at'),
+            'dissolution_status': workspace.get('dissolution_status', 'active'),
+            'dissolution_cooloff_ends_at': workspace.get('dissolution_cooloff_ends_at')
         })
     
     return formatted_workspaces
@@ -352,6 +375,13 @@ def get_workspace(clerk_user_id, workspace_id):
             'timezone': p.get('timezone')
         } for p in (participants.data or [])],
         'current_equity': current_equity,
+        'is_archived': workspace_data.get('is_archived', False),
+        'archived_at': workspace_data.get('archived_at'),
+        'dissolution_status': workspace_data.get('dissolution_status', 'active'),
+        'dissolution_requested_at': workspace_data.get('dissolution_requested_at'),
+        'dissolution_requested_by': workspace_data.get('dissolution_requested_by'),
+        'dissolution_cooloff_ends_at': workspace_data.get('dissolution_cooloff_ends_at'),
+        'dissolution_reason': workspace_data.get('dissolution_reason'),
     }
 
 def update_workspace(clerk_user_id, workspace_id, data):
