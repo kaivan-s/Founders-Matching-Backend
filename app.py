@@ -318,6 +318,103 @@ def seeker_project_preview(project_id):
 
 
 # ============================================
+# MARKET INTELLIGENCE - Skill demand insights
+# ============================================
+
+@app.route('/api/market/skill-insights', methods=['GET'])
+def get_skill_market_insights():
+    """
+    Get personalized skill market insights for the current user.
+    
+    Shows how user's skills compare to market demand:
+    - FREE: Teaser with overall position
+    - PRO: Full breakdown with actionable advice
+    """
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        from services import market_intelligence_service
+        
+        result = market_intelligence_service.get_user_skill_insights(clerk_user_id)
+        return jsonify(result), 200
+        
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        log_error("Error getting skill insights", error=e)
+        return jsonify({"error": sanitize_error_for_user(e)}), 500
+
+
+@app.route('/api/market/top-skills', methods=['GET'])
+def get_top_skills():
+    """
+    Get overview of top skills in demand on the platform.
+    Public endpoint (no auth required) for landing pages.
+    """
+    try:
+        from services import market_intelligence_service
+        
+        limit = request.args.get('limit', 10, type=int)
+        result = market_intelligence_service.get_top_skills_overview(limit=min(limit, 20))
+        return jsonify(result), 200
+        
+    except Exception as e:
+        log_error("Error getting top skills", error=e)
+        return jsonify({"error": sanitize_error_for_user(e)}), 500
+
+
+# ============================================
+# STANDALONE ADVISOR MARKETPLACE
+# Browse advisors without workspace context (Pro only)
+# ============================================
+
+@app.route('/api/advisors/browse', methods=['GET'])
+def browse_advisors_standalone():
+    """
+    Browse all available advisors without workspace context.
+    
+    This endpoint allows Pro users to access the advisor marketplace
+    directly from the main navigation, without needing a workspace.
+    
+    Query params:
+    - domain: Filter by domain/industry
+    - expertise_stage: Filter by stage (idea, pre-seed, seed, etc.)
+    - search: Text search in name, headline, bio, domains
+    """
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        # Check if user has Pro subscription
+        if not plan_service.check_feature_access(clerk_user_id, 'accountability.canBrowseMarketplace'):
+            return jsonify({
+                "error": "Advisor marketplace requires a Pro subscription",
+                "upgrade_required": True,
+                "required_plan": "PRO",
+            }), 403
+        
+        filters = {
+            'domain': request.args.get('domain'),
+            'expertise_stage': request.args.get('expertise_stage'),
+            'search': request.args.get('search'),
+        }
+        # Remove None values
+        filters = {k: v for k, v in filters.items() if v}
+        
+        advisors = advisor_service.browse_all_advisors(clerk_user_id, filters)
+        return jsonify(advisors), 200
+        
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        log_error("Error browsing advisors", error=e)
+        return jsonify({"error": sanitize_error_for_user(e)}), 500
+
+
+# ============================================
 # OWNER FLOW - "I have a project"
 # Application management for project owners
 # ============================================

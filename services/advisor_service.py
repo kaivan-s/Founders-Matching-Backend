@@ -677,3 +677,123 @@ def _batch_get_advisor_ratings(supabase, advisor_ids):
 # get_advisor_requests, get_active_workspaces, respond_to_advisor_request,
 # remove_advisor_from_workspace, compute_advisor_impact_scorecard, save_quarterly_review
 
+
+def browse_all_advisors(clerk_user_id: str, filters: Optional[Dict] = None) -> List[Dict]:
+    """
+    Browse all available advisors without workspace context.
+    
+    This is for Pro users who want to access advisors directly from the main navigation,
+    without needing to be in a workspace first.
+    
+    Args:
+        clerk_user_id: The requesting user's Clerk ID
+        filters: Optional filters (domain, expertise_stage, search query)
+    
+    Returns:
+        List of advisor profiles with rating stats
+    """
+    from datetime import datetime, timezone
+    from utils.logger import log_info
+    
+    supabase = get_supabase()
+    filters = filters or {}
+    
+    # Build base query for approved, discoverable advisors
+    query = supabase.table('advisor_profiles').select('*').eq('status', 'APPROVED').eq('is_discoverable', True)
+    
+    # Apply optional filters
+    if filters.get('domain'):
+        query = query.contains('domains', [filters['domain']])
+    
+    if filters.get('expertise_stage'):
+        query = query.contains('expertise_stages', [filters['expertise_stage']])
+    
+    try:
+        result = query.execute()
+        profiles = result.data or []
+    except Exception as e:
+        error_msg = str(e)
+        if 'PGRST205' in error_msg or 'Could not find the table' in error_msg:
+            raise ValueError("The advisor_profiles table does not exist. Please run database migrations.")
+        raise
+    
+    def _can_accept_bookings(p):
+        """Check if advisor can currently accept bookings based on subscription status."""
+        status = p.get('subscription_status') or 'free'
+        now = datetime.now(timezone.utc)
+        if status == 'free':
+            return True
+        if status == 'trial':
+            ends = p.get('trial_ends_at')
+            if not ends:
+                return True
+            try:
+                t = datetime.fromisoformat(str(ends).replace('Z', '+00:00'))
+                if t.tzinfo is None:
+                    t = t.replace(tzinfo=timezone.utc)
+                return t > now
+            except (ValueError, AttributeError):
+                return False
+        if status == 'active':
+            ends = p.get('subscription_current_period_end')
+            if not ends:
+                return True
+            try:
+                t = datetime.fromisoformat(str(ends).replace('Z', '+00:00'))
+                if t.tzinfo is None:
+                    t = t.replace(tzinfo=timezone.utc)
+                return t > now
+            except (ValueError, AttributeError):
+                return False
+        return False
+    
+    # Filter to only advisors who can accept bookings
+    available_advisors = []
+    for profile in profiles:
+        if not _can_accept_bookings(profile):
+            continue
+        
+        # Ensure name is populated
+        advisor_name = profile.get('name') or ''
+        if not advisor_name or advisor_name.strip().lower() in ['', 'advisor', 'unknown']:
+            advisor_email = profile.get('email') or profile.get('contact_email') or ''
+            if advisor_email and '@' in advisor_email:
+                advisor_name = advisor_email.split('@')[0].replace('.', ' ').replace('_', ' ').title()
+        
+        profile['name'] = advisor_name
+        available_advisors.append(profile)
+    
+    # Apply text search filter if provided
+    search_query = filters.get('search', '').lower().strip()
+    if search_query:
+        available_advisors = [
+            a for a in available_advisors
+            if search_query in (a.get('name') or '').lower()
+            or search_query in (a.get('headline') or '').lower()
+            or search_query in (a.get('bio') or '').lower()
+            or any(search_query in (d or '').lower() for d in (a.get('domains') or []))
+            or any(search_query in (t or '').lower() for t in (a.get('advisory_types') or []))
+        ]
+    
+    # Sort by profile completion score (higher first), then by name
+    available_advisors.sort(
+        key=lambda a: (
+            -(a.get('profile_completion_score') or 0),
+            a.get('name', '').lower()
+        )
+    )
+    
+    # Add rating stats
+    if available_advisors:
+        advisor_ids = [a['user_id'] for a in available_advisors if a.get('user_id')]
+        rating_stats = _batch_get_advisor_ratings(supabase, advisor_ids)
+        for advisor in available_advisors:
+            uid = advisor.get('user_id')
+            advisor['rating_stats'] = rating_stats.get(uid, {
+                'avg_rating': None,
+                'total_reviews': 0,
+            })
+    
+    log_info(f"Browse advisors: user={clerk_user_id} found={len(available_advisors)} filters={filters}")
+    return available_advisors
+
