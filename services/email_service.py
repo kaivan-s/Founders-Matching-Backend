@@ -671,7 +671,7 @@ def send_discovery_ready_email(to_email: str, user_name: str, user_plan: str = '
     if user_plan == 'PRO_PLUS':
         opportunities_text = "50 personalized opportunities"
         upgrade_text = ""
-    elif user_plan == 'PRO':
+    elif user_plan in ('PRO', 'PRO_TRIAL'):
         opportunities_text = "25 personalized opportunities"
         upgrade_text = ""
     else:

@@ -65,7 +65,7 @@ def get_applications_for_owner(clerk_user_id: str) -> Dict[str, Any]:
         verification = _compute_verification(applicant)
         
         applicant_plan = applicant.get('plan', 'FREE')
-        is_pro_applicant = applicant_plan in ('PRO', 'PRO_PLUS')
+        is_pro_applicant = applicant_plan in ('PRO', 'PRO_PLUS', 'PRO_TRIAL')
         
         formatted_app = {
             'id': app['id'],
@@ -153,7 +153,7 @@ def get_application_detail(clerk_user_id: str, application_id: str) -> Dict[str,
     
     verification = _compute_verification(applicant)
     applicant_plan = applicant.get('plan', 'FREE')
-    is_pro_applicant = applicant_plan in ('PRO', 'PRO_PLUS')
+    is_pro_applicant = applicant_plan in ('PRO', 'PRO_PLUS', 'PRO_TRIAL')
     
     return {
         'id': app['id'],

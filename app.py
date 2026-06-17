@@ -5147,6 +5147,119 @@ def update_feedback_admin(feedback_id):
         log_error("Error updating feedback", error=e)
         return jsonify({"error": str(e)}), 500
 
+# ==================== PRO TRIAL ENDPOINTS ====================
+
+from services import trial_service
+
+@app.route('/api/trials/status', methods=['GET'])
+def get_trial_status():
+    """Get current user's trial status"""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        status = trial_service.get_trial_status(clerk_user_id)
+        return jsonify(status), 200
+    except Exception as e:
+        log_error("Error getting trial status", error=e)
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/trials/request', methods=['POST'])
+@limiter.limit(RATE_LIMITS['moderate'])
+def submit_trial_request():
+    """Submit a Pro trial request"""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "No data provided"}), 400
+        
+        reason = data.get('reason', '').strip()
+        
+        result = trial_service.submit_trial_request(clerk_user_id, reason)
+        return jsonify(result), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        log_error("Error submitting trial request", error=e)
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/admin/trials/pending', methods=['GET'])
+def admin_list_pending_trials():
+    """List pending trial requests (admin only)"""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        if not admin_service.is_admin(clerk_user_id):
+            return jsonify({"error": "Admin access required"}), 403
+        
+        requests = trial_service.get_pending_requests()
+        return jsonify(requests), 200
+    except Exception as e:
+        log_error("Error listing pending trials", error=e)
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/admin/trials', methods=['GET'])
+def admin_list_all_trials():
+    """List all trial requests (admin only)"""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        if not admin_service.is_admin(clerk_user_id):
+            return jsonify({"error": "Admin access required"}), 403
+        
+        limit = request.args.get('limit', 50, type=int)
+        requests = trial_service.get_all_requests(limit=limit)
+        return jsonify(requests), 200
+    except Exception as e:
+        log_error("Error listing all trials", error=e)
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/admin/trials/<request_id>/approve', methods=['POST'])
+def admin_approve_trial(request_id):
+    """Approve a trial request (admin only)"""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        if not admin_service.is_admin(clerk_user_id):
+            return jsonify({"error": "Admin access required"}), 403
+        
+        result = trial_service.approve_trial_request(request_id, clerk_user_id)
+        return jsonify(result), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        log_error("Error approving trial", error=e)
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/admin/trials/<request_id>/reject', methods=['POST'])
+def admin_reject_trial(request_id):
+    """Reject a trial request (admin only)"""
+    try:
+        clerk_user_id = get_clerk_user_id()
+        if not clerk_user_id:
+            return jsonify({"error": "User ID required"}), 401
+        if not admin_service.is_admin(clerk_user_id):
+            return jsonify({"error": "Admin access required"}), 403
+        
+        data = request.get_json() or {}
+        rejection_reason = data.get('reason')
+        
+        result = trial_service.reject_trial_request(request_id, clerk_user_id, rejection_reason)
+        return jsonify(result), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        log_error("Error rejecting trial", error=e)
+        return jsonify({"error": str(e)}), 500
+
 # ============================================================================
 # Equity Questionnaire API Endpoints
 # ============================================================================

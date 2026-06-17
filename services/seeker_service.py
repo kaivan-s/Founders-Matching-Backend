@@ -136,7 +136,7 @@ def _rank_discovery_candidates(
         if founder_plan == 'PRO_PLUS':
             score += 15  # Strong boost for PRO+ founders
             match_reasons.append('Pro+ founder')
-        elif founder_plan == 'PRO':
+        elif founder_plan in ('PRO', 'PRO_TRIAL'):
             score += 8  # Moderate boost for PRO founders
             match_reasons.append('Pro founder')
         

@@ -5,7 +5,7 @@ from typing import Dict, Optional, Any, Literal
 from enum import Enum
 from dateutil.relativedelta import relativedelta
 
-FounderPlan = Literal["FREE", "PRO", "PRO_PLUS"]
+FounderPlan = Literal["FREE", "PRO", "PRO_PLUS", "PRO_TRIAL"]
 
 FOUNDER_PLANS: Dict[FounderPlan, Dict[str, Any]] = {
     "FREE": {
@@ -98,6 +98,37 @@ FOUNDER_PLANS: Dict[FounderPlan, Dict[str, Any]] = {
         "canRevisitSkipped": True,  # Can revisit passed opportunities
         "aiInsightsPerMonth": 10,  # 10 AI insights per month
     },
+    "PRO_TRIAL": {
+        "id": "PRO_TRIAL",
+        "monthlyPriceUSD": 0,  # Free trial
+        "yearlyPriceUSD": 0,
+        "maxWorkspacesCreated": "UNLIMITED",
+        "maxWorkspacesJoined": "UNLIMITED",
+        "maxProjects": 3,  # Same as PRO
+        "discovery": {
+            "maxSwipesPerDay": "UNLIMITED",
+            "maxConnectsPerDay": "UNLIMITED",
+            "maxProjectsVisible": 25,  # Same as PRO
+        },
+        "workspaceFeatures": {
+            "equityFull": True,
+            "kpiFull": True,
+            "decisionsFull": True,
+            "weeklyCheckins": True,
+            "notifications": True,
+            "slackIntegration": True,
+            "notionIntegration": True,
+            "summaryDashboard": True,
+        },
+        "accountability": {
+            "canBrowseMarketplace": True,
+            "canBookAdvisor": True,
+        },
+        "postMatchSupport": False,
+        "canRevisitSkipped": True,
+        "aiInsightsPerMonth": 3,  # Same as PRO
+        "is_trial": True,  # Flag to identify trial plans
+    },
 }
 
 # Advisor monetization model:
@@ -172,7 +203,9 @@ def _get_founder_id(clerk_user_id: str, email: str = None) -> str:
 
 
 def get_founder_plan(clerk_user_id: str) -> Dict[str, Any]:
-    """Get founder's current plan. Uses request-scoped caching."""
+    """Get founder's current plan. Uses request-scoped caching.
+    Also checks for active Pro trials - if user has an active trial, they get PRO features.
+    """
     # Check cache first
     try:
         from utils.request_cache import get_cached_plan, set_cached_plan
@@ -228,11 +261,49 @@ def get_founder_plan(clerk_user_id: str) -> Dict[str, Any]:
         elif period_ended and subscription_status != 'active':
             plan_id = 'FREE'
     
+    # Check for active Pro trial if user is on FREE plan
+    is_trial = False
+    trial_info = None
+    if plan_id == 'FREE':
+        try:
+            # Check for active trial
+            now = datetime.now(timezone.utc)
+            trial_result = supabase.table('pro_trial_requests').select(
+                'id, trial_start, trial_end'
+            ).eq('founder_id', founder_id).eq('status', 'approved').execute()
+            
+            for trial in trial_result.data or []:
+                trial_end = trial.get('trial_end')
+                if trial_end:
+                    try:
+                        end_date = datetime.fromisoformat(trial_end.replace('Z', '+00:00'))
+                        if end_date.tzinfo is None:
+                            end_date = end_date.replace(tzinfo=timezone.utc)
+                        if end_date > now:
+                            # Active trial found - grant PRO_TRIAL plan
+                            plan_id = 'PRO_TRIAL'
+                            is_trial = True
+                            days_left = (end_date - now).days
+                            trial_info = {
+                                'trial_end': trial_end,
+                                'days_remaining': max(0, days_left),
+                            }
+                            break
+                    except (ValueError, TypeError):
+                        pass
+        except Exception:
+            # Trial check failed - continue with FREE plan
+            pass
+    
     plan_config = FOUNDER_PLANS.get(plan_id, FOUNDER_PLANS['FREE']).copy()
     
     # Add subscription info
     plan_config['subscription_status'] = subscription_status
     plan_config['subscription_current_period_end'] = subscription_current_period_end
+    
+    # Add trial info if applicable
+    plan_config['is_trial'] = is_trial
+    plan_config['trial_info'] = trial_info
     
     # Cache the result
     try:
@@ -698,7 +769,7 @@ def update_founder_plan(clerk_user_id: str, new_plan: FounderPlan, subscription_
 
 def _is_upgrade(old_plan: str, new_plan: str) -> bool:
     """Check if plan change is an upgrade"""
-    plan_order = {'FREE': 0, 'PRO': 1, 'PRO_PLUS': 2}
+    plan_order = {'FREE': 0, 'PRO_TRIAL': 1, 'PRO': 1, 'PRO_PLUS': 2}
     return plan_order.get(new_plan, 0) > plan_order.get(old_plan, 0)
 
 def log_plan_telemetry(user_id: str, event_type: str, from_plan: Optional[str] = None, to_plan: Optional[str] = None, metadata: Optional[Dict] = None) -> None:
